@@ -1,0 +1,53 @@
+# ============================================================================
+# RunSecure — Runner Configuration
+# ============================================================================
+# Copy this file to: .github/runner.yml in your project.
+#
+# This file tells RunSecure how to build and run your CI container.
+# Only the 'runtime' field is required. Everything else has sensible defaults.
+#
+# Docs: https://github.com/NaorPenso/RunSecure#configuration
+# ============================================================================
+
+# REQUIRED: Language runtime and version
+# Options: node:22, node:24, python:3.11, python:3.12, rust:stable
+runtime: node:24
+
+# OPTIONAL: CI tools to bake into the image
+# Available: playwright, semgrep, cypress
+# These are installed on top of the language layer and cached in the image.
+# tools:
+#   - playwright
+#   - semgrep
+
+# OPTIONAL: Extra system packages (installed via apt)
+# apt:
+#   - libvips-dev
+#   - ffmpeg
+
+# OPTIONAL: Extra domains allowed through the egress proxy
+# The base allowlist (GitHub, npm, PyPI, crates.io) is always included.
+# Use ".domain.com" to allow all subdomains.
+# egress:
+#   - "*.neon.tech"
+#   - "api.vercel.com"
+#   - "*.amazonaws.com"
+
+# OPTIONAL: GitHub runner labels (must match your workflow's runs-on)
+labels: [self-hosted, Linux, ARM64, container]
+
+# OPTIONAL: Container resource limits
+resources:
+  memory: 4g        # RAM limit (default: 4g)
+  cpus: 2           # CPU limit (default: 2)
+  pids: 512         # Max processes (default: 512)
+  workspace: 8g     # Tmpfs workspace size (default: 8g)
+
+# OPTIONAL: Per-job image override
+# "base" = language image only (faster, smaller — good for lint/test/build)
+# "full" = language + all tools listed above (needed for E2E, security scans)
+# jobs:
+#   lint: base
+#   test: base
+#   security: base
+#   e2e: full
