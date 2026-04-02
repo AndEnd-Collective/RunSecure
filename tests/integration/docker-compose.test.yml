@@ -1,0 +1,76 @@
+# ============================================================================
+# RunSecure — Integration Test Compose
+# ============================================================================
+# Launches Squid proxy + runner container on an isolated network for testing.
+# No JIT token required — the runner container just runs test scripts.
+#
+# Usage:
+#   docker compose -f tests/integration/docker-compose.test.yml up --build --abort-on-container-exit
+# ============================================================================
+
+services:
+  proxy:
+    build:
+      context: ../../infra/squid
+      dockerfile: Dockerfile
+    container_name: runsecure-test-proxy
+    # Override squid.conf if runtime.conf exists (project-specific egress)
+    volumes:
+      - ${SQUID_CONF:-../../infra/squid/base.conf}:/etc/squid/squid.conf:ro
+    networks:
+      test-net:
+        aliases:
+          - proxy
+      proxy-external: {}
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf 2>/dev/null || exit 0"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  runner:
+    image: ${RUNNER_IMAGE:-runner-node:24}
+    container_name: runsecure-test-runner
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - HTTP_PROXY=http://proxy:3128
+      - HTTPS_PROXY=http://proxy:3128
+      - http_proxy=http://proxy:3128
+      - https_proxy=http://proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,proxy
+      - no_proxy=localhost,127.0.0.1,proxy
+    volumes:
+      - ../../tests:/mnt/tests:ro
+    entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
+
+    # --- Full hardening (same as production) ---
+    user: "1001:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,nosuid,size=2g,uid=1001,gid=0
+      - /home/runner/_work:rw,size=4g,uid=1001,gid=0
+      - /home/runner/_diag:rw,size=256m,uid=1001,gid=0
+      - /home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0
+      - /home/runner/.npm:rw,size=512m,uid=1001,gid=0
+      - /home/runner/.local:rw,size=256m,uid=1001,gid=0
+      - /home/runner/.cache:rw,size=512m,uid=1001,gid=0
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+    networks:
+      - test-net
+
+networks:
+  # Internal network: containers cannot reach the internet directly.
+  # Only the proxy service has an external network for outbound access.
+  test-net:
+    internal: true
+  proxy-external:
+    driver: bridge

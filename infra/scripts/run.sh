@@ -24,6 +24,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Auto-detect docker compose command
+if docker compose version &>/dev/null; then
+    DC="docker compose"
+elif docker-compose version &>/dev/null; then
+    DC="docker-compose"
+else
+    echo "ERROR: Neither 'docker compose' nor 'docker-compose' found."
+    exit 1
+fi
+
 # --- Default arguments -------------------------------------------------------
 PROJECT_DIR=""
 REPO=""
@@ -111,7 +121,7 @@ echo ""
 cleanup() {
     echo ""
     echo "[RunSecure] Shutting down..."
-    docker compose -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -162,11 +172,11 @@ EOF
         RUNNER_MEMORY="$MEMORY" \
         RUNNER_CPUS="$CPUS" \
         RUNNER_PIDS="$PIDS" \
-        docker compose -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" \
+        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" \
             up --abort-on-container-exit --exit-code-from runner
 
         # Clean up for next iteration
-        docker compose -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
     else
         # Direct mode (no proxy) — use docker run with hardening flags
         docker run \
