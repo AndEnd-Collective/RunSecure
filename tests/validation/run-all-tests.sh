@@ -71,11 +71,7 @@ HARDENING_FLAGS=(
     --user 1001:0
     --security-opt=no-new-privileges
     --cap-drop=ALL
-    --read-only
     --tmpfs "/tmp:rw,nosuid,size=2g,uid=1001,gid=0"
-    --tmpfs "/home/runner/_work:rw,exec,size=4g,uid=1001,gid=0"
-    --tmpfs "/home/runner/_diag:rw,size=256m,uid=1001,gid=0"
-    --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0"
     --memory=4g
     --memory-swap=4g
     --cpus=2
@@ -154,21 +150,18 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- Phase 3: Functional Tests ---${NC}\n"
 
-# Strategy: Copy project files into the tmpfs workspace (not bind-mount as ro).
-# You can't overlay tmpfs on a subdirectory of a read-only bind mount, so we
-# bind-mount a host dir to a STAGING path and cp into the writable workspace.
+# Without --read-only, we can bind-mount projects directly and write in-place.
 
 # Node.js: run test suite inside container
 step "Node.js: npm test" \
     docker run "${HARDENING_FLAGS[@]}" \
-    -v "${TESTS_DIR}/node-project:/mnt/project:ro" \
+    -v "${TESTS_DIR}/node-project:/home/runner/_work/project:ro" \
     runner-node:24 bash -c "
-        cp -r /mnt/project /home/runner/_work/project
         cd /home/runner/_work/project
         node --test src/*.test.js
     "
 
-# Node.js: build step
+# Node.js: build step (needs writable dir for dist/)
 step "Node.js: build" \
     docker run "${HARDENING_FLAGS[@]}" \
     -v "${TESTS_DIR}/node-project:/mnt/project:ro" \
@@ -182,8 +175,6 @@ step "Node.js: build" \
 # Python: run test suite inside container
 step "Python: pytest" \
     docker run "${HARDENING_FLAGS[@]}" \
-    --tmpfs "/home/runner/.local:rw,size=256m,uid=1001,gid=0" \
-    --tmpfs "/home/runner/.cache:rw,size=256m,uid=1001,gid=0" \
     -v "${TESTS_DIR}/python-project:/mnt/project:ro" \
     runner-python:3.12 bash -c "
         cp -r /mnt/project /home/runner/_work/project
@@ -196,7 +187,6 @@ step "Python: pytest" \
 if [[ "$QUICK" == false ]]; then
     step "Rust: cargo test" \
         docker run "${HARDENING_FLAGS[@]}" \
-        --tmpfs "/home/runner/.cargo/registry:rw,size=512m,uid=1001,gid=0" \
         -v "${TESTS_DIR}/rust-project:/mnt/project:ro" \
         runner-rust:stable bash -c "
             cp -r /mnt/project /home/runner/_work/project

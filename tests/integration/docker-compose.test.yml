@@ -3,9 +3,6 @@
 # ============================================================================
 # Launches Squid proxy + runner container on an isolated network for testing.
 # No JIT token required — the runner container just runs test scripts.
-#
-# Usage:
-#   docker compose -f tests/integration/docker-compose.test.yml up --build --abort-on-container-exit
 # ============================================================================
 
 services:
@@ -14,7 +11,6 @@ services:
       context: ../../infra/squid
       dockerfile: Dockerfile
     container_name: runsecure-test-proxy
-    # Override squid.conf if runtime.conf exists (project-specific egress)
     volumes:
       - ${SQUID_CONF:-../../infra/squid/base.conf}:/etc/squid/squid.conf:ro
     networks:
@@ -46,21 +42,14 @@ services:
       - ../../tests:/mnt/tests:ro
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
-    # --- Full hardening (same as production) ---
+    # --- Hardening (matches production minus read-only) ---
     user: "1001:0"
-    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     tmpfs:
       - /tmp:rw,nosuid,size=2g,uid=1001,gid=0
-      - /home/runner/_work:rw,exec,size=4g,uid=1001,gid=0
-      - /home/runner/_diag:rw,size=256m,uid=1001,gid=0
-      - /home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0
-      - /home/runner/.npm:rw,size=512m,uid=1001,gid=0
-      - /home/runner/.local:rw,size=256m,uid=1001,gid=0
-      - /home/runner/.cache:rw,size=512m,uid=1001,gid=0
     mem_limit: 4g
     cpus: 2
     pids_limit: 512
@@ -68,8 +57,6 @@ services:
       - test-net
 
 networks:
-  # Internal network: containers cannot reach the internet directly.
-  # Only the proxy service has an external network for outbound access.
   test-net:
     internal: true
   proxy-external:
