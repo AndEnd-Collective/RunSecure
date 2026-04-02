@@ -60,12 +60,17 @@ services:
       - ALL
 
     # --- Hardening: filesystem ---
+    # _work needs exec for npm postinstall scripts and compiled binaries.
+    # /tmp stays noexec to block downloaded malware execution.
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g
-      - /home/runner/_work:rw,size=12g
+      - /home/runner/_work:rw,exec,size=12g
       - /home/runner/_diag:rw,size=256m
       - /home/runner/actions-runner/_diag:rw,size=256m
+      - /home/runner/.npm:rw,size=512m
+      - /home/runner/.semgrep:rw,size=64m
+      - /home/runner/.cache:rw,size=256m
 
     # --- Hardening: resources ---
     deploy:

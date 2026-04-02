@@ -55,7 +55,7 @@ services:
       - ALL
     tmpfs:
       - /tmp:rw,nosuid,size=2g,uid=1001,gid=0
-      - /home/runner/_work:rw,size=4g,uid=1001,gid=0
+      - /home/runner/_work:rw,exec,size=4g,uid=1001,gid=0
       - /home/runner/_diag:rw,size=256m,uid=1001,gid=0
       - /home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0
       - /home/runner/.npm:rw,size=512m,uid=1001,gid=0

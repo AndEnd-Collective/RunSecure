@@ -188,9 +188,12 @@ EOF
             --cap-drop=ALL \
             --read-only \
             --tmpfs "/tmp:rw,noexec,nosuid,size=2g" \
-            --tmpfs "/home/runner/_work:rw,size=12g" \
+            --tmpfs "/home/runner/_work:rw,exec,size=12g" \
             --tmpfs "/home/runner/_diag:rw,size=256m" \
             --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m" \
+            --tmpfs "/home/runner/.npm:rw,size=512m" \
+            --tmpfs "/home/runner/.semgrep:rw,size=64m" \
+            --tmpfs "/home/runner/.cache:rw,size=256m" \
             --memory="$MEMORY" \
             --memory-swap="$MEMORY" \
             --cpus="$CPUS" \

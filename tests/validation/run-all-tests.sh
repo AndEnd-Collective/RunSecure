@@ -73,7 +73,7 @@ HARDENING_FLAGS=(
     --cap-drop=ALL
     --read-only
     --tmpfs "/tmp:rw,nosuid,size=2g,uid=1001,gid=0"
-    --tmpfs "/home/runner/_work:rw,size=4g,uid=1001,gid=0"
+    --tmpfs "/home/runner/_work:rw,exec,size=4g,uid=1001,gid=0"
     --tmpfs "/home/runner/_diag:rw,size=256m,uid=1001,gid=0"
     --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0"
     --memory=4g
