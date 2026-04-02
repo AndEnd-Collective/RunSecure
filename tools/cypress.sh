@@ -26,9 +26,9 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 # Install Cypress globally so it's cached in the image
-su -s /bin/bash runner -c "npm install -g cypress"
+npm install -g cypress
 
 # Verify the binary works
-su -s /bin/bash runner -c "cypress verify"
+HOME=/home/runner cypress verify
 
 echo "[RunSecure] Cypress installed successfully."
