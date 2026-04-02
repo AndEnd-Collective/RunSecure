@@ -38,6 +38,10 @@ rm -rf /var/lib/apt/lists/*
 # Note: su is removed by base hardening, so use HOME override to install
 # as root but to the runner user's cache location.
 HOME=/home/runner npx --yes playwright install chromium
-chown -R runner:0 /home/runner/.cache/ms-playwright 2>/dev/null || true
+
+# Fix ownership: npx ran as root, so .cache and .npm are root-owned.
+# The runner user (1001) needs to write to these at runtime.
+chown -R runner:0 /home/runner/.cache 2>/dev/null || true
+chown -R runner:0 /home/runner/.npm 2>/dev/null || true
 
 echo "[RunSecure] Playwright + Chromium installed successfully."
