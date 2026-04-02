@@ -1,0 +1,15 @@
+{
+  "name": "runsecure-test-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test Node.js project for RunSecure runner validation",
+  "scripts": {
+    "test": "node --test src/*.test.js",
+    "lint": "echo 'Lint passed (no eslint configured for test project)'",
+    "build": "node scripts/build.js",
+    "typecheck": "echo 'Typecheck passed (no TypeScript in test project)'"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

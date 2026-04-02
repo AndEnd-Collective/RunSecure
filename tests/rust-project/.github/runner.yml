@@ -1,0 +1,10 @@
+# RunSecure configuration for the test Rust project
+runtime: rust:stable
+tools: []
+egress: []
+labels: [self-hosted, Linux, ARM64, container]
+resources:
+  memory: 4g
+  cpus: 2
+  pids: 512
+  workspace: 4g
