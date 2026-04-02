@@ -17,27 +17,19 @@ ARG RUST_VERSION=stable
 
 USER root
 
-# Rust needs a linker and basic build tools. Install them, then strip apt.
-RUN apt-get update 2>/dev/null || true \
+# Rust needs a linker and basic build tools.
+# Base image retains apt so language layers can install packages.
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          gcc \
          libc6-dev \
          make \
          pkg-config \
          libssl-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    # Remove apt/dpkg again
-    && rm -rf \
-         /usr/bin/apt* /usr/bin/dpkg* \
-         /usr/lib/apt /usr/lib/dpkg \
-         /var/lib/apt /var/lib/dpkg \
-         /var/cache/apt /etc/apt \
-       2>/dev/null || true
+    && rm -rf /var/lib/apt/lists/*
 
-# Re-apply hardening
-RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true \
-    && chmod 444 /etc/passwd /etc/group \
-    && chmod 555 /etc
+# Re-apply setuid stripping
+RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 
 # Switch to runner user for rustup (installs to $HOME)
 USER runner

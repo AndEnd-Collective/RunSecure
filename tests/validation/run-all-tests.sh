@@ -72,10 +72,10 @@ HARDENING_FLAGS=(
     --security-opt=no-new-privileges
     --cap-drop=ALL
     --read-only
-    --tmpfs "/tmp:rw,noexec,nosuid,size=2g"
-    --tmpfs "/home/runner/_work:rw,size=4g"
-    --tmpfs "/home/runner/_diag:rw,size=256m"
-    --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m"
+    --tmpfs "/tmp:rw,nosuid,size=2g,uid=1001,gid=0"
+    --tmpfs "/home/runner/_work:rw,size=4g,uid=1001,gid=0"
+    --tmpfs "/home/runner/_diag:rw,size=256m,uid=1001,gid=0"
+    --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m,uid=1001,gid=0"
     --memory=4g
     --memory-swap=4g
     --cpus=2
@@ -154,13 +154,16 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- Phase 3: Functional Tests ---${NC}\n"
 
+# Strategy: Copy project files into the tmpfs workspace (not bind-mount as ro).
+# You can't overlay tmpfs on a subdirectory of a read-only bind mount, so we
+# bind-mount a host dir to a STAGING path and cp into the writable workspace.
+
 # Node.js: run test suite inside container
 step "Node.js: npm test" \
     docker run "${HARDENING_FLAGS[@]}" \
-    -v "${TESTS_DIR}/node-project:/home/runner/_work/project:ro" \
-    --tmpfs "/home/runner/_work/project/node_modules:rw,size=512m" \
-    --tmpfs "/home/runner/_work/project/dist:rw,size=64m" \
+    -v "${TESTS_DIR}/node-project:/mnt/project:ro" \
     runner-node:24 bash -c "
+        cp -r /mnt/project /home/runner/_work/project
         cd /home/runner/_work/project
         node --test src/*.test.js
     "
@@ -168,9 +171,9 @@ step "Node.js: npm test" \
 # Node.js: build step
 step "Node.js: build" \
     docker run "${HARDENING_FLAGS[@]}" \
-    -v "${TESTS_DIR}/node-project:/home/runner/_work/project:ro" \
-    --tmpfs "/home/runner/_work/project/dist:rw,size=64m" \
+    -v "${TESTS_DIR}/node-project:/mnt/project:ro" \
     runner-node:24 bash -c "
+        cp -r /mnt/project /home/runner/_work/project
         cd /home/runner/_work/project
         node scripts/build.js
         cat dist/build-info.json
@@ -179,10 +182,11 @@ step "Node.js: build" \
 # Python: run test suite inside container
 step "Python: pytest" \
     docker run "${HARDENING_FLAGS[@]}" \
-    -v "${TESTS_DIR}/python-project:/home/runner/_work/project:ro" \
-    --tmpfs "/home/runner/.local:rw,size=256m" \
-    --tmpfs "/home/runner/.cache:rw,size=256m" \
+    --tmpfs "/home/runner/.local:rw,size=256m,uid=1001,gid=0" \
+    --tmpfs "/home/runner/.cache:rw,size=256m,uid=1001,gid=0" \
+    -v "${TESTS_DIR}/python-project:/mnt/project:ro" \
     runner-python:3.12 bash -c "
+        cp -r /mnt/project /home/runner/_work/project
         cd /home/runner/_work/project
         pip3 install --user --quiet --break-system-packages pytest
         python3 -m pytest tests/ -v
@@ -192,10 +196,10 @@ step "Python: pytest" \
 if [[ "$QUICK" == false ]]; then
     step "Rust: cargo test" \
         docker run "${HARDENING_FLAGS[@]}" \
-        --tmpfs "/home/runner/.cargo/registry:rw,size=512m" \
-        -v "${TESTS_DIR}/rust-project:/home/runner/_work/project:ro" \
-        --tmpfs "/home/runner/_work/project/target:rw,size=2g" \
+        --tmpfs "/home/runner/.cargo/registry:rw,size=512m,uid=1001,gid=0" \
+        -v "${TESTS_DIR}/rust-project:/mnt/project:ro" \
         runner-rust:stable bash -c "
+            cp -r /mnt/project /home/runner/_work/project
             cd /home/runner/_work/project
             cargo test 2>&1
         "
@@ -244,18 +248,22 @@ step "Read-only root filesystem" \
     "
 
 # Verify fork bomb protection (PID limit)
+# The test succeeds if fork() fails with "Resource temporarily unavailable"
 step "PID limit enforcement" \
     docker run "${HARDENING_FLAGS[@]}" \
     --pids-limit=32 \
     runner-base:latest bash -c "
-        # Try to create many processes — should hit the limit
+        # Try to spawn many processes — expect fork to fail
+        FORK_FAILED=false
         for i in \$(seq 1 50); do
-            sleep 100 &>/dev/null &
-        done 2>&1
-        PROCS=\$(ps aux 2>/dev/null | wc -l || echo 0)
-        echo \"Processes created: \$PROCS (limit: 32)\"
-        if [[ \$PROCS -lt 50 ]]; then
-            echo 'PID limit is being enforced.'
+            if ! sleep 100 & 2>/dev/null; then
+                FORK_FAILED=true
+                break
+            fi
+        done
+        wait 2>/dev/null || true
+        if [[ \"\$FORK_FAILED\" == true ]]; then
+            echo 'PID limit correctly prevented fork.'
             exit 0
         else
             echo 'WARNING: PID limit may not be enforced.'

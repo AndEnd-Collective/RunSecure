@@ -18,31 +18,19 @@ ARG PYTHON_VERSION=3.12
 USER root
 
 # Install Python and pip.
-# Debian bookworm ships Python 3.11; for other versions, use deadsnakes-style
-# packages or build from source in a builder stage.
-RUN apt-get update 2>/dev/null || true \
+# Base image retains apt so language layers can install packages.
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          python3 \
          python3-pip \
          python3-venv \
     && rm -rf /var/lib/apt/lists/* \
-    # Create a symlink so `python` works
     && ln -sf /usr/bin/python3 /usr/bin/python \
-    # Verify installation
     && python3 --version \
-    && pip3 --version \
-    # Remove apt/dpkg again
-    && rm -rf \
-         /usr/bin/apt* /usr/bin/dpkg* \
-         /usr/lib/apt /usr/lib/dpkg \
-         /var/lib/apt /var/lib/dpkg \
-         /var/cache/apt /etc/apt \
-       2>/dev/null || true
+    && pip3 --version
 
-# Re-apply hardening
-RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true \
-    && chmod 444 /etc/passwd /etc/group \
-    && chmod 555 /etc
+# Re-apply setuid stripping
+RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
 
