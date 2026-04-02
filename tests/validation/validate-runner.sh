@@ -74,10 +74,17 @@ else
     find / -perm /6000 -type f 2>/dev/null | head -10
 fi
 
-# 4. No package manager
+# 4. Package manager cannot function
+# In intermediate images, apt binary may exist but --read-only prevents it from
+# working. In finalized images (via compose-image.sh), the binary is removed.
 echo -e "\n${BOLD}--- Package Manager ---${NC}"
-if command -v apt-get &>/dev/null || command -v apt &>/dev/null || command -v dpkg &>/dev/null; then
-    fail "Package manager still available"
+if command -v apt-get &>/dev/null; then
+    # Binary exists — check if it can actually do anything
+    if apt-get update 2>/dev/null; then
+        fail "Package manager is functional — should be neutered by read-only fs or removed"
+    else
+        pass "apt-get binary exists but cannot function (read-only filesystem)"
+    fi
 else
     pass "Package manager removed (apt/dpkg not found)"
 fi

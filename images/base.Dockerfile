@@ -129,23 +129,14 @@ RUN passwd -l root 2>/dev/null || true \
     && sed -i 's|^root:.*:/bin/bash|root:x:0:0:root:/root:/usr/sbin/nologin|' /etc/passwd \
     && rm -rf /root/.bashrc /root/.profile /root/.bash_history
 
-# ---- Security hardening: remove package manager -----------------------------
-# After all installs are complete, remove apt/dpkg so nothing can be installed
-# at runtime inside the container.
-RUN rm -rf \
-      /usr/bin/apt* \
-      /usr/bin/dpkg* \
-      /usr/lib/apt \
-      /usr/lib/dpkg \
-      /var/lib/apt \
-      /var/lib/dpkg \
-      /var/cache/apt \
-      /etc/apt \
-    2>/dev/null || true
-
-# ---- Security hardening: restrict system paths ------------------------------
-RUN chmod 444 /etc/passwd /etc/group \
-    && chmod 555 /etc
+# ---- NOTE: apt is intentionally KEPT in the base image ---------------------
+# Language layers (node, python, rust) and tool recipes need apt to install
+# packages. The package manager is removed in the FINAL image produced by
+# compose-image.sh. At runtime, --read-only filesystem prevents apt from
+# functioning even if the binary exists.
+#
+# The finalize-hardening.sh script (called by compose-image.sh as the last
+# step) handles: apt removal, setuid re-strip, and /etc lockdown.
 
 # ---- Security hardening: minimal PATH --------------------------------------
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
