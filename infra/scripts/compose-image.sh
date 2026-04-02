@@ -153,16 +153,12 @@ if [[ -n "$TOOLS" ]]; then
     done <<< "$TOOLS"
 fi
 
-# Re-apply hardening and switch back to runner user
+# Finalize hardening (remove apt, re-strip setuid, lock /etc)
 cat >> "$DOCKERFILE" <<FOOTER
 
-# --- Re-apply hardening after tool installation ---
-RUN rm -rf /usr/bin/apt* /usr/bin/dpkg* /usr/lib/apt /usr/lib/dpkg \
-           /var/lib/apt /var/lib/dpkg /var/cache/apt /etc/apt \
-    2>/dev/null || true \\
-    && find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true \\
-    && chmod 444 /etc/passwd /etc/group 2>/dev/null || true \\
-    && chmod 555 /etc 2>/dev/null || true
+# --- Finalize hardening (remove apt, strip setuid, lock /etc) ---
+COPY infra/scripts/finalize-hardening.sh /tmp/finalize-hardening.sh
+RUN chmod +x /tmp/finalize-hardening.sh && /tmp/finalize-hardening.sh && rm /tmp/finalize-hardening.sh
 
 USER runner
 WORKDIR /home/runner
