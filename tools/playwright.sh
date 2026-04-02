@@ -35,6 +35,9 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 # Install Playwright CLI and download Chromium only (not Firefox/WebKit)
-su -s /bin/bash runner -c "npx --yes playwright install chromium"
+# Note: su is removed by base hardening, so use HOME override to install
+# as root but to the runner user's cache location.
+HOME=/home/runner npx --yes playwright install chromium
+chown -R runner:0 /home/runner/.cache/ms-playwright 2>/dev/null || true
 
 echo "[RunSecure] Playwright + Chromium installed successfully."
