@@ -1,0 +1,10 @@
+# RunSecure configuration for the test Python project
+runtime: python:3.12
+tools: []
+egress: []
+labels: [self-hosted, Linux, ARM64, container]
+resources:
+  memory: 2g
+  cpus: 2
+  pids: 256
+  workspace: 2g

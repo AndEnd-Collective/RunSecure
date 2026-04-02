@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated at runtime
+infra/squid/runtime.conf
+
+# Test artifacts
+tests/node-project/node_modules/
+tests/node-project/dist/
+tests/rust-project/target/
+tests/python-project/__pycache__/
+tests/python-project/.pytest_cache/
+
+# Docker
+*.log

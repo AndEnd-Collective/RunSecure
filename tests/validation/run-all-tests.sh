@@ -1,0 +1,281 @@
+#!/bin/bash
+# ============================================================================
+# RunSecure — Full Validation Suite
+# ============================================================================
+# Builds images, runs test projects inside containers, and validates both
+# security hardening and CI capability.
+#
+# Usage:
+#   ./tests/validation/run-all-tests.sh
+#   ./tests/validation/run-all-tests.sh --skip-build    # reuse cached images
+#   ./tests/validation/run-all-tests.sh --quick          # skip rust (slow build)
+#
+# Prerequisites:
+#   - Docker running
+#   - yq installed (brew install yq)
+# ============================================================================
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TESTS_DIR="${RUNSECURE_ROOT}/tests"
+
+SKIP_BUILD=false
+QUICK=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --skip-build) SKIP_BUILD=true ;;
+        --quick)      QUICK=true ;;
+    esac
+done
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+PASS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+RESULTS=()
+
+step() {
+    local name="$1"
+    shift
+    printf "\n${BOLD}━━━ %s ━━━${NC}\n" "$name"
+    local start_time
+    start_time=$(date +%s)
+    if "$@"; then
+        local elapsed=$(( $(date +%s) - start_time ))
+        RESULTS+=("${GREEN}✓${NC} $name ${BOLD}(${elapsed}s)${NC}")
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        local elapsed=$(( $(date +%s) - start_time ))
+        RESULTS+=("${RED}✗${NC} $name ${BOLD}(${elapsed}s)${NC}")
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+}
+
+skip_step() {
+    local name="$1"
+    local reason="$2"
+    RESULTS+=("${YELLOW}○${NC} $name — $reason")
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+}
+
+HARDENING_FLAGS=(
+    --rm
+    --user 1001:0
+    --security-opt=no-new-privileges
+    --cap-drop=ALL
+    --read-only
+    --tmpfs "/tmp:rw,noexec,nosuid,size=2g"
+    --tmpfs "/home/runner/_work:rw,size=4g"
+    --tmpfs "/home/runner/_diag:rw,size=256m"
+    --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m"
+    --memory=4g
+    --memory-swap=4g
+    --cpus=2
+    --pids-limit=512
+)
+
+echo -e "${BOLD}=== RunSecure Validation Suite ===${NC}"
+echo ""
+
+# ============================================================================
+# Phase 1: Build Images
+# ============================================================================
+if [[ "$SKIP_BUILD" == false ]]; then
+    echo -e "${BOLD}--- Phase 1: Building Images ---${NC}\n"
+
+    step "Build runner-base" \
+        docker build -f "${RUNSECURE_ROOT}/images/base.Dockerfile" \
+        -t runner-base:latest "${RUNSECURE_ROOT}"
+
+    step "Build runner-node:24" \
+        docker build -f "${RUNSECURE_ROOT}/images/node.Dockerfile" \
+        --build-arg BASE_TAG=latest \
+        --build-arg NODE_VERSION=24 \
+        -t runner-node:24 "${RUNSECURE_ROOT}"
+
+    step "Build runner-python:3.12" \
+        docker build -f "${RUNSECURE_ROOT}/images/python.Dockerfile" \
+        --build-arg BASE_TAG=latest \
+        --build-arg PYTHON_VERSION=3.12 \
+        -t runner-python:3.12 "${RUNSECURE_ROOT}"
+
+    if [[ "$QUICK" == false ]]; then
+        step "Build runner-rust:stable" \
+            docker build -f "${RUNSECURE_ROOT}/images/rust.Dockerfile" \
+            --build-arg BASE_TAG=latest \
+            --build-arg RUST_VERSION=stable \
+            -t runner-rust:stable "${RUNSECURE_ROOT}"
+    else
+        skip_step "Build runner-rust:stable" "--quick mode"
+    fi
+else
+    echo -e "${YELLOW}Skipping image builds (--skip-build)${NC}\n"
+fi
+
+# ============================================================================
+# Phase 2: Security Validation
+# ============================================================================
+echo -e "\n${BOLD}--- Phase 2: Security Validation ---${NC}\n"
+
+step "Security: runner-base" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${SCRIPT_DIR}/validate-runner.sh:/home/runner/validate.sh:ro" \
+    runner-base:latest bash /home/runner/validate.sh
+
+step "Security: runner-node:24" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${SCRIPT_DIR}/validate-runner.sh:/home/runner/validate.sh:ro" \
+    runner-node:24 bash /home/runner/validate.sh
+
+step "Security: runner-python:3.12" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${SCRIPT_DIR}/validate-runner.sh:/home/runner/validate.sh:ro" \
+    runner-python:3.12 bash /home/runner/validate.sh
+
+if [[ "$QUICK" == false ]]; then
+    step "Security: runner-rust:stable" \
+        docker run "${HARDENING_FLAGS[@]}" \
+        -v "${SCRIPT_DIR}/validate-runner.sh:/home/runner/validate.sh:ro" \
+        runner-rust:stable bash /home/runner/validate.sh
+else
+    skip_step "Security: runner-rust:stable" "--quick mode"
+fi
+
+# ============================================================================
+# Phase 3: Functional Tests (run real project test suites)
+# ============================================================================
+echo -e "\n${BOLD}--- Phase 3: Functional Tests ---${NC}\n"
+
+# Node.js: run test suite inside container
+step "Node.js: npm test" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${TESTS_DIR}/node-project:/home/runner/_work/project:ro" \
+    --tmpfs "/home/runner/_work/project/node_modules:rw,size=512m" \
+    --tmpfs "/home/runner/_work/project/dist:rw,size=64m" \
+    runner-node:24 bash -c "
+        cd /home/runner/_work/project
+        node --test src/*.test.js
+    "
+
+# Node.js: build step
+step "Node.js: build" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${TESTS_DIR}/node-project:/home/runner/_work/project:ro" \
+    --tmpfs "/home/runner/_work/project/dist:rw,size=64m" \
+    runner-node:24 bash -c "
+        cd /home/runner/_work/project
+        node scripts/build.js
+        cat dist/build-info.json
+    "
+
+# Python: run test suite inside container
+step "Python: pytest" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    -v "${TESTS_DIR}/python-project:/home/runner/_work/project:ro" \
+    --tmpfs "/home/runner/.local:rw,size=256m" \
+    --tmpfs "/home/runner/.cache:rw,size=256m" \
+    runner-python:3.12 bash -c "
+        cd /home/runner/_work/project
+        pip3 install --user --quiet --break-system-packages pytest
+        python3 -m pytest tests/ -v
+    "
+
+# Rust: cargo test
+if [[ "$QUICK" == false ]]; then
+    step "Rust: cargo test" \
+        docker run "${HARDENING_FLAGS[@]}" \
+        --tmpfs "/home/runner/.cargo/registry:rw,size=512m" \
+        -v "${TESTS_DIR}/rust-project:/home/runner/_work/project:ro" \
+        --tmpfs "/home/runner/_work/project/target:rw,size=2g" \
+        runner-rust:stable bash -c "
+            cd /home/runner/_work/project
+            cargo test 2>&1
+        "
+else
+    skip_step "Rust: cargo test" "--quick mode"
+fi
+
+# ============================================================================
+# Phase 4: Edge Cases
+# ============================================================================
+echo -e "\n${BOLD}--- Phase 4: Edge Case Validation ---${NC}\n"
+
+# Verify container auto-destruction
+step "Container cleanup (--rm)" bash -c "
+    CONTAINER_ID=\$(docker run -d \
+        --user 1001:0 \
+        --security-opt=no-new-privileges \
+        --cap-drop=ALL \
+        --read-only \
+        --tmpfs /tmp:rw,noexec,nosuid \
+        --rm \
+        runner-base:latest sleep 1)
+    sleep 3
+    if docker inspect \$CONTAINER_ID &>/dev/null; then
+        echo 'Container still exists after exit!'
+        exit 1
+    else
+        echo 'Container auto-removed after exit.'
+        exit 0
+    fi
+"
+
+# Verify cannot write to read-only paths
+step "Read-only root filesystem" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    runner-base:latest bash -c "
+        if touch /test-file 2>/dev/null; then
+            echo 'ERROR: Was able to write to /'
+            exit 1
+        fi
+        if touch /usr/bin/test-file 2>/dev/null; then
+            echo 'ERROR: Was able to write to /usr/bin'
+            exit 1
+        fi
+        echo 'Root filesystem is properly read-only.'
+    "
+
+# Verify fork bomb protection (PID limit)
+step "PID limit enforcement" \
+    docker run "${HARDENING_FLAGS[@]}" \
+    --pids-limit=32 \
+    runner-base:latest bash -c "
+        # Try to create many processes — should hit the limit
+        for i in \$(seq 1 50); do
+            sleep 100 &>/dev/null &
+        done 2>&1
+        PROCS=\$(ps aux 2>/dev/null | wc -l || echo 0)
+        echo \"Processes created: \$PROCS (limit: 32)\"
+        if [[ \$PROCS -lt 50 ]]; then
+            echo 'PID limit is being enforced.'
+            exit 0
+        else
+            echo 'WARNING: PID limit may not be enforced.'
+            exit 1
+        fi
+    "
+
+# ============================================================================
+# Summary
+# ============================================================================
+echo -e "\n${BOLD}━━━ Results ━━━${NC}"
+for r in "${RESULTS[@]}"; do
+    printf "  %b\n" "$r"
+done
+
+echo ""
+if [[ $FAIL_COUNT -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED${NC} — $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
+    exit 1
+else
+    echo -e "${GREEN}${BOLD}ALL PASSED${NC} — $PASS_COUNT passed, $SKIP_COUNT skipped"
+    exit 0
+fi
