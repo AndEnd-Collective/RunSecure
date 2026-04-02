@@ -1,0 +1,9 @@
+.git
+.gitignore
+.DS_Store
+README.md
+LICENSE
+tests/node-project/node_modules
+tests/node-project/dist
+tests/rust-project/target
+tests/python-project/__pycache__

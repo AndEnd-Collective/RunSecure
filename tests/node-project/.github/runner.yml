@@ -1,0 +1,10 @@
+# RunSecure configuration for the test Node.js project
+runtime: node:24
+tools: []
+egress: []
+labels: [self-hosted, Linux, ARM64, container]
+resources:
+  memory: 4g
+  cpus: 2
+  pids: 512
+  workspace: 4g

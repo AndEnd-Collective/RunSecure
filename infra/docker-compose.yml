@@ -1,0 +1,103 @@
+# ============================================================================
+# RunSecure — Docker Compose: Runner + Egress Proxy
+# ============================================================================
+# Launches an ephemeral runner container on an isolated network, with all
+# outbound traffic routed through a Squid proxy that enforces an allowlist.
+#
+# Usage (called by orchestrator, not directly):
+#   RUNNER_IMAGE=runner-node:24 RUNNER_JIT_CONFIG=... docker compose up --abort-on-container-exit
+# ============================================================================
+
+services:
+  # --- Squid egress proxy ---------------------------------------------------
+  proxy:
+    image: ubuntu/squid:latest
+    container_name: runsecure-proxy
+    restart: "no"
+    volumes:
+      - ./squid/runtime.conf:/etc/squid/squid.conf:ro
+      - squid-ssl:/etc/squid/ssl:ro
+    networks:
+      runner-net:
+        aliases:
+          - proxy
+    # Proxy needs outbound access to forward allowed requests
+    ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # --- Ephemeral runner ------------------------------------------------------
+  runner:
+    image: ${RUNNER_IMAGE:-runner-base:latest}
+    container_name: runsecure-runner
+    restart: "no"
+    depends_on:
+      proxy:
+        condition: service_healthy
+
+    # --- JIT config and proxy routing ---
+    environment:
+      - RUNNER_JIT_CONFIG=${RUNNER_JIT_CONFIG}
+      - HTTP_PROXY=http://proxy:3128
+      - HTTPS_PROXY=http://proxy:3128
+      - NO_PROXY=localhost,127.0.0.1
+      - RUNNER_NAME=${RUNNER_NAME:-runsecure-ephemeral}
+
+    # --- Entrypoint ---
+    entrypoint: ["/home/runner/entrypoint.sh"]
+    volumes:
+      - ../infra/scripts/entrypoint.sh:/home/runner/entrypoint.sh:ro
+
+    # --- Hardening: user and privileges ---
+    user: "1001:0"
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:../infra/seccomp/node-runner.json
+    cap_drop:
+      - ALL
+
+    # --- Hardening: filesystem ---
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g
+      - /home/runner/_work:rw,size=12g
+      - /home/runner/_diag:rw,size=256m
+      - /home/runner/actions-runner/_diag:rw,size=256m
+
+    # --- Hardening: resources ---
+    deploy:
+      resources:
+        limits:
+          memory: ${RUNNER_MEMORY:-6g}
+          cpus: "${RUNNER_CPUS:-4}"
+        reservations:
+          memory: 1g
+    pids_limit: ${RUNNER_PIDS:-1024}
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+      nproc:
+        soft: 1024
+        hard: 1024
+
+    # --- Hardening: network (isolated, proxy-only) ---
+    networks:
+      - runner-net
+    dns: []
+
+# --- Isolated network --------------------------------------------------------
+networks:
+  runner-net:
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+
+# --- Named volumes -----------------------------------------------------------
+volumes:
+  squid-ssl:
+    driver: local
