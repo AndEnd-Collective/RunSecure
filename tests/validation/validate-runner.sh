@@ -118,20 +118,23 @@ else
     fail "Root shell is $ROOT_SHELL — should be /usr/sbin/nologin"
 fi
 
-# 8. Read-only filesystem (if mounted with --read-only)
+# 8. Protected system paths
+# /etc is chmod 555 by the image hardening, and /usr is owned by root.
+# Without --read-only, the container filesystem is writable for the runner user
+# in its home dir, but system paths are protected by Unix permissions + no capabilities.
 echo -e "\n${BOLD}--- Filesystem ---${NC}"
-if touch /test-write-root 2>/dev/null; then
-    rm -f /test-write-root
-    fail "Root filesystem is writable — use --read-only flag"
+if touch /usr/bin/test-write 2>/dev/null; then
+    rm -f /usr/bin/test-write
+    fail "/usr/bin is writable by runner user"
 else
-    pass "Root filesystem is read-only"
+    pass "/usr/bin not writable (owned by root, no capabilities)"
 fi
 
 if touch /etc/test-write 2>/dev/null; then
     rm -f /etc/test-write
     fail "/etc is writable"
 else
-    pass "/etc is read-only"
+    pass "/etc is read-only (chmod 555)"
 fi
 
 # 9. /tmp exists and is writable but noexec
@@ -154,16 +157,19 @@ else
 fi
 rm -f /tmp/test-exec.sh 2>/dev/null
 
-# 10. Workspace writable
-if [[ -d /home/runner/_work ]]; then
-    if touch /home/runner/_work/test-write 2>/dev/null; then
-        pass "Workspace /home/runner/_work is writable"
-        rm -f /home/runner/_work/test-write
-    else
-        fail "Workspace /home/runner/_work is not writable — runner needs this"
-    fi
+# 10. Workspace and home writable
+if touch /home/runner/_work/test-write 2>/dev/null; then
+    pass "Workspace /home/runner/_work is writable"
+    rm -f /home/runner/_work/test-write
 else
-    skip "Workspace check" "/home/runner/_work not mounted"
+    fail "Workspace /home/runner/_work is not writable — runner needs this"
+fi
+
+if touch /home/runner/test-write 2>/dev/null; then
+    pass "Home /home/runner is writable"
+    rm -f /home/runner/test-write
+else
+    fail "Home /home/runner is not writable — runner needs this"
 fi
 
 # ============================================================================

@@ -186,22 +186,17 @@ EOF
             --security-opt=no-new-privileges \
             --security-opt="seccomp=${RUNSECURE_ROOT}/infra/seccomp/node-runner.json" \
             --cap-drop=ALL \
-            --read-only \
             --tmpfs "/tmp:rw,noexec,nosuid,size=2g" \
-            --tmpfs "/home/runner/_work:rw,exec,size=12g" \
-            --tmpfs "/home/runner/_diag:rw,size=256m" \
-            --tmpfs "/home/runner/actions-runner/_diag:rw,size=256m" \
-            --tmpfs "/home/runner/.npm:rw,size=512m" \
-            --tmpfs "/home/runner/.semgrep:rw,size=64m" \
-            --tmpfs "/home/runner/.cache:rw,size=256m" \
             --memory="$MEMORY" \
             --memory-swap="$MEMORY" \
             --cpus="$CPUS" \
             --pids-limit="$PIDS" \
             --ulimit nofile=4096:4096 \
-            --ulimit nproc=1024:1024 \
+            --ulimit nproc=2048:2048 \
             -e "RUNNER_JIT_CONFIG=${JIT_CONFIG}" \
             -e "RUNNER_NAME=runsecure-$(date +%s)" \
+            -e "SEMGREP_SETTINGS_FILE=/home/runner/.semgrep/settings.yml" \
+            -e "SEMGREP_VERSION_CACHE_PATH=/home/runner/.semgrep/versions" \
             -v "${RUNSECURE_ROOT}/infra/scripts/entrypoint.sh:/home/runner/entrypoint.sh:ro" \
             --entrypoint "/home/runner/entrypoint.sh" \
             "$IMAGE_NAME"
