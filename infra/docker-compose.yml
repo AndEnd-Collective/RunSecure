@@ -12,7 +12,7 @@ services:
   # --- Squid egress proxy ---------------------------------------------------
   proxy:
     image: ubuntu/squid:latest
-    container_name: runsecure-proxy
+    container_name: ${RUNNER_NAME:-runsecure}-proxy
     restart: "no"
     volumes:
       - ./squid/runtime.conf:/etc/squid/squid.conf:ro
@@ -31,7 +31,7 @@ services:
   # --- Ephemeral runner ------------------------------------------------------
   runner:
     image: ${RUNNER_IMAGE:-runner-base:latest}
-    container_name: runsecure-runner
+    container_name: ${RUNNER_NAME:-runsecure-runner}
     restart: "no"
     depends_on:
       proxy:
