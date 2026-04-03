@@ -86,9 +86,9 @@ if [[ ! -f "$RUNNER_YML" ]]; then
 fi
 
 # --- Read resource limits from runner.yml ------------------------------------
-MEMORY=$(yq '.resources.memory // "6g"' "$RUNNER_YML")
+MEMORY=$(yq '.resources.memory // "8g"' "$RUNNER_YML")
 CPUS=$(yq '.resources.cpus // "4"' "$RUNNER_YML")
-PIDS=$(yq '.resources.pids // "1024"' "$RUNNER_YML")
+PIDS=$(yq '.resources.pids // "2048"' "$RUNNER_YML")
 LABELS=$(yq '.labels // ["self-hosted", "Linux", "ARM64", "container"] | join(",")' "$RUNNER_YML")
 
 # --- Build/cache the project image ------------------------------------------
