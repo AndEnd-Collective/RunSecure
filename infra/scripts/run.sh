@@ -11,7 +11,6 @@
 # Usage:
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo --max-jobs 5
-#   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo --no-proxy
 #
 # Prerequisites:
 #   - Docker
@@ -38,7 +37,6 @@ fi
 PROJECT_DIR=""
 REPO=""
 MAX_JOBS=5
-USE_PROXY=true
 FORCE_REBUILD=false
 
 # --- Parse arguments ---------------------------------------------------------
@@ -47,7 +45,6 @@ while [[ $# -gt 0 ]]; do
         --project)    PROJECT_DIR="$2"; shift 2 ;;
         --repo)       REPO="$2"; shift 2 ;;
         --max-jobs)   MAX_JOBS="$2"; shift 2 ;;
-        --no-proxy)   USE_PROXY=false; shift ;;
         --force)      FORCE_REBUILD=true; shift ;;
         -h|--help)
             echo "Usage: run.sh --project /path/to/project --repo owner/repo [options]"
@@ -56,7 +53,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --project PATH    Path to the project directory (must contain .github/runner.yml)"
             echo "  --repo OWNER/REPO GitHub repository (e.g., NaorPenso/datacentric)"
             echo "  --max-jobs N      Maximum jobs to process (default: 5)"
-            echo "  --no-proxy        Skip egress proxy (less secure, useful for debugging)"
             echo "  --force           Force rebuild of project image"
             echo "  -h, --help        Show this help"
             exit 0
@@ -114,9 +110,7 @@ echo ""
 echo "[RunSecure] Using image: $IMAGE_NAME"
 
 # --- Generate squid proxy config ---------------------------------------------
-if [[ "$USE_PROXY" == true ]]; then
-    "${SCRIPT_DIR}/generate-squid-conf.sh" "$PROJECT_DIR"
-fi
+"${SCRIPT_DIR}/generate-squid-conf.sh" "$PROJECT_DIR"
 
 # --- Job loop ----------------------------------------------------------------
 echo ""
@@ -169,43 +163,18 @@ EOF
 
     echo "[RunSecure] JIT token acquired. Launching container..."
 
-    # Launch runner via docker compose
-    if [[ "$USE_PROXY" == true ]]; then
-        RUNNER_IMAGE="$IMAGE_NAME" \
-        RUNNER_JIT_CONFIG="$JIT_CONFIG" \
-        RUNNER_NAME="${CONTAINER_PREFIX}-job${i}" \
-        RUNNER_MEMORY="$MEMORY" \
-        RUNNER_CPUS="$CPUS" \
-        RUNNER_PIDS="$PIDS" \
-        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" \
-            up --abort-on-container-exit --exit-code-from runner
+    # Launch runner + proxy via docker compose
+    RUNNER_IMAGE="$IMAGE_NAME" \
+    RUNNER_JIT_CONFIG="$JIT_CONFIG" \
+    RUNNER_NAME="${CONTAINER_PREFIX}-job${i}" \
+    RUNNER_MEMORY="$MEMORY" \
+    RUNNER_CPUS="$CPUS" \
+    RUNNER_PIDS="$PIDS" \
+    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" \
+        up --abort-on-container-exit --exit-code-from runner
 
-        # Clean up for next iteration
-        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
-    else
-        # Direct mode (no proxy) — use docker run with hardening flags
-        docker run \
-            --rm \
-            --name "${CONTAINER_PREFIX}-job${i}" \
-            --user 1001:0 \
-            --security-opt=no-new-privileges \
-            --security-opt="seccomp=${RUNSECURE_ROOT}/infra/seccomp/node-runner.json" \
-            --cap-drop=ALL \
-            --tmpfs "/tmp:rw,noexec,nosuid,size=2g" \
-            --memory="$MEMORY" \
-            --memory-swap="$MEMORY" \
-            --cpus="$CPUS" \
-            --pids-limit="$PIDS" \
-            --ulimit nofile=4096:4096 \
-            --ulimit nproc=2048:2048 \
-            -e "RUNNER_JIT_CONFIG=${JIT_CONFIG}" \
-            -e "RUNNER_NAME=${CONTAINER_PREFIX}-job${i}" \
-            -e "SEMGREP_SETTINGS_FILE=/home/runner/.semgrep/settings.yml" \
-            -e "SEMGREP_VERSION_CACHE_PATH=/home/runner/.semgrep/versions" \
-            -v "${RUNSECURE_ROOT}/infra/scripts/entrypoint.sh:/home/runner/entrypoint.sh:ro" \
-            --entrypoint "/home/runner/entrypoint.sh" \
-            "$IMAGE_NAME"
-    fi
+    # Clean up for next iteration
+    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
 
     echo ""
     echo "--- Job $i/$MAX_JOBS: Complete ---"
