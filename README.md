@@ -1,486 +1,683 @@
 # RunSecure
 
-Hardened, containerized GitHub Actions self-hosted runners with egress control.
+Hardened, ephemeral Docker containers for GitHub Actions self-hosted runners — with network egress control.
 
-Ephemeral containers. Domain-allowlisted networking. Multi-language. One config file per project.
-
----
-
-## Why RunSecure
-
-Bare-metal self-hosted runners are a security liability. A compromised GitHub Action or npm dependency can:
-
-- Read SSH keys, AWS credentials, and browser cookies from the host
-- Exfiltrate secrets via `curl` to an attacker-controlled server
-- Persist across jobs by spawning background processes
-- Pivot laterally via the host network
-
-RunSecure eliminates these risks by running each CI job in a **hardened, ephemeral Docker container** with network egress filtered through a proxy. When the job finishes, the container is destroyed.
+Each CI job runs in its own disposable container. When the job finishes, the container is destroyed. Nothing persists between jobs. All outbound network traffic is filtered through a proxy that only allows domains you explicitly approve.
 
 ---
 
-## Quick Start
+## The Problem
 
-### Prerequisites
+Bare-metal self-hosted runners are a shared, persistent environment. A compromised GitHub Action or malicious npm package can:
+
+- Read SSH keys, cloud credentials, and browser cookies from the host filesystem
+- Send stolen secrets to an attacker-controlled server
+- Spawn background processes that survive after the job ends
+- Reach internal services and cloud metadata endpoints over the host network
+
+These are not theoretical risks. The [tj-actions/changed-files supply chain attack](https://github.com/advisories/GHSA-mrrh-fhqg-pjh4) (March 2025) demonstrated exactly this — a popular Action was compromised to exfiltrate secrets from every repository that used it.
+
+## How RunSecure Fixes This
+
+**Ephemeral containers** — every job gets a fresh container, destroyed on completion. No persistent state, no leftover processes.
+
+**Network egress proxy** — outbound connections are routed through a Squid proxy with a domain allowlist. Your CI can reach GitHub and your package registry. Everything else is blocked — including attacker-controlled servers, cloud metadata endpoints, and tunneling services.
+
+**Image hardening** — containers run as a non-root user with all Linux capabilities dropped, setuid binaries stripped, dangerous utilities removed, and a custom seccomp profile blocking syscalls like `ptrace`, `mount`, and `bpf`.
+
+**Stackable by design** — you choose a language runtime and that's it. Tools like Playwright, Semgrep, or Cypress can be layered on top if you need them, but nothing beyond the runtime is required. A simple `runtime: node:24` gives you a fully hardened runner ready to go.
+
+---
+
+## Prerequisites
+
+You need Docker, the GitHub CLI, and yq (a YAML processor):
 
 ```bash
 # macOS
 brew install docker colima yq
 
-# Start Colima with enough resources (16GB minimum for large Node projects)
+# Start Colima with enough resources
+# 16 GB RAM minimum — large Node projects (npm ci + vitest + next build) need it
 colima start --cpu 4 --memory 16 --vm-type vz --mount-type virtiofs
 
 # Verify
 docker info | grep "Total Memory"   # Should show 15+ GiB
-yq --version                        # yq 4+
+yq --version                        # Needs yq v4+
+gh auth status                      # Must be authenticated
 ```
 
-### 1. Build Images
+---
+
+## Getting Started
+
+### Step 1 — Build the Base Image
+
+Every language image depends on this. Build it first:
 
 ```bash
 cd /path/to/RunSecure
 
-# Build the hardened base image
 docker build -f images/base.Dockerfile -t runner-base:latest .
+```
 
-# Build language layer(s) you need
+This creates a Debian slim image (~320 MB) with the GitHub Actions runner binary, git, curl, jq, and the gh CLI — hardened with a non-root user (UID 1001), all setuid bits stripped, and dangerous utilities removed.
+
+### Step 2 — Build a Language Image
+
+Pick the language your project uses:
+
+```bash
+# Node.js 24
 docker build -f images/node.Dockerfile \
   --build-arg NODE_VERSION=24 -t runner-node:24 .
 
+# Node.js 22
+docker build -f images/node.Dockerfile \
+  --build-arg NODE_VERSION=22 -t runner-node:22 .
+
+# Python 3.12
 docker build -f images/python.Dockerfile \
   --build-arg PYTHON_VERSION=3.12 -t runner-python:3.12 .
 
+# Rust stable
 docker build -f images/rust.Dockerfile \
   --build-arg RUST_VERSION=stable -t runner-rust:stable .
 ```
 
-### 2. Add Config to Your Project
+Each language image adds the runtime on top of the base image. You can build multiple languages — they share the same base layer via Docker's layer cache.
 
-Copy `skeleton/runner.yml` to your project:
+### Step 3 — Configure Your Project
+
+Create a `.github/runner.yml` file in your project. The only required field is `runtime`:
+
+```yaml
+runtime: node:24
+```
+
+That's it. This gives you a hardened Node.js 24 runner with the default egress allowlist (GitHub + npm), default resource limits (8 GB RAM, 4 CPUs, 2048 PIDs), and default labels.
+
+For a copy-paste starting point with all options commented out, copy the template:
 
 ```bash
 cp /path/to/RunSecure/skeleton/runner.yml /path/to/your-project/.github/runner.yml
 ```
 
-Edit it for your project's needs (see [Configuration](#configuration) below).
+### Step 4 — Update Your GitHub Workflow
 
-### 3. Run
+Change `runs-on` to use the RunSecure labels:
+
+```yaml
+# Before
+runs-on: ubuntu-latest
+# or
+runs-on: [self-hosted, macOS, ARM64]
+
+# After
+runs-on: [self-hosted, Linux, ARM64, container]
+```
+
+You can remove `setup-node` / `setup-python` steps — the runtime is already baked into the image. Leaving them in is harmless; they'll detect the pre-installed version and skip the download.
+
+An example workflow is provided at `skeleton/workflow-ci.yml`.
+
+### Step 5 — Start the Runner
 
 ```bash
-# Start runner for your project
 ./infra/scripts/run.sh \
   --project /path/to/your-project \
   --repo owner/repo-name
-
-# Without egress proxy (for debugging)
-./infra/scripts/run.sh \
-  --project /path/to/your-project \
-  --repo owner/repo-name \
-  --no-proxy
 ```
 
-### 4. Validate
-
-```bash
-# Run the full test suite to verify everything works
-./tests/validation/run-all-tests.sh --quick
-
-# Run integration tests (egress proxy, CI workflows, attack simulation)
-./tests/integration/run-integration-tests.sh
-```
+The orchestrator will:
+1. Read your project's `.github/runner.yml`
+2. Build or reuse a cached image matching your config
+3. Generate the Squid proxy configuration (base allowlist + your project's egress domains)
+4. Request a JIT (Just-In-Time) token from the GitHub API
+5. Launch the runner container with full hardening
+6. Wait for the job to complete, then destroy the container
+7. Repeat for the next queued job
 
 ---
 
-## Configuration
+## Configuration Reference
 
-Each project needs one file: `.github/runner.yml`
+All configuration lives in your project's `.github/runner.yml`. Only `runtime` is required — everything else has defaults.
 
-### Full Schema
+### `runtime` (required)
+
+The language and version for your runner image.
 
 ```yaml
-# .github/runner.yml
+runtime: node:24          # Node.js 24 (via NodeSource)
+runtime: node:22          # Node.js 22
+runtime: python:3.12      # Python 3.12 (Debian packages)
+runtime: rust:stable       # Rust stable (via rustup)
+```
 
-# REQUIRED: Language runtime and version
-runtime: node:24          # node:22 | python:3.12 | rust:stable
+### `tools` (optional)
 
-# OPTIONAL: CI tools to install on top of the language layer
-# Available recipes: playwright, semgrep, cypress
+Most projects don't need this. The language runtime alone is enough for building, testing, and linting. Only add tools if your CI workflow specifically requires them (e.g., you run Playwright browser tests or Semgrep security scans as part of CI).
+
+Available tools:
+
+```yaml
+tools:
+  - playwright     # Playwright + Chromium (~300 MB, requires Node.js)
+  - semgrep        # Semgrep SAST (~276 MB, auto-installs Python if missing)
+  - cypress        # Cypress E2E (~250 MB, requires Node.js)
+```
+
+Pick only what you need — each tool adds to your image size. You can also [create your own tool recipes](#adding-a-new-tool-recipe).
+
+When tools are specified, RunSecure generates a project-specific image with a content-hash tag. If two projects share the same runtime + tools combination, they share the same cached image.
+
+### `apt`
+
+Extra system packages to install via apt:
+
+```yaml
+apt:
+  - libvips-dev
+  - ffmpeg
+```
+
+These are installed before tools and before final hardening (which removes apt from the image).
+
+### `egress`
+
+Additional domains to allow through the egress proxy, on top of the base allowlist. Use `.domain.com` syntax to allow all subdomains:
+
+```yaml
+egress:
+  - "*.neon.tech"          # Neon Postgres
+  - "api.vercel.com"       # Vercel API (exact domain)
+  - "*.supabase.co"        # Supabase
+  - "*.amazonaws.com"      # AWS services
+  - "*.azure.com"          # Azure services
+  - "*.sentry.io"          # Sentry error reporting
+```
+
+If you're not sure what domains your CI needs, start without an `egress` list. When a step fails due to a blocked connection, check the Squid proxy log for the denied domain and add it.
+
+### `labels`
+
+GitHub runner labels. Your workflow's `runs-on` must match these:
+
+```yaml
+labels: [self-hosted, Linux, ARM64, container]   # default
+```
+
+### `resources`
+
+Container resource limits:
+
+```yaml
+resources:
+  memory: 8g        # RAM limit (default: 8g)
+  cpus: 4           # CPU limit (default: 4)
+  pids: 2048        # Max processes (default: 2048)
+```
+
+If your CI hits OOM errors, increase `memory` here and make sure your Colima VM has enough RAM allocated.
+
+### `jobs`
+
+Per-job image overrides. Use `base` for jobs that don't need the tools layer (faster, smaller image) and `full` for jobs that do:
+
+```yaml
+tools: [playwright, semgrep]
+
+jobs:
+  lint: base         # Language image only (~450 MB) — no tools
+  test: base         # Language image only
+  e2e: full          # Language + tools (~1 GB) — has Playwright
+  security: full     # Language + tools — has Semgrep
+```
+
+### Examples
+
+**Minimal** — just a runtime, nothing else. This is all most projects need:
+
+```yaml
+runtime: node:24
+```
+
+**With external service access** — your tests hit a database or deploy to a platform:
+
+```yaml
+runtime: node:24
+
+egress:
+  - "*.neon.tech"
+  - "api.vercel.com"
+```
+
+**With a tool** — you run E2E browser tests in CI:
+
+```yaml
+runtime: node:24
+
+tools:
+  - playwright
+
+egress:
+  - "*.neon.tech"
+```
+
+**Kitchen sink** — multiple tools, per-job image overrides, custom resources:
+
+```yaml
+runtime: node:24
+
 tools:
   - playwright
   - semgrep
 
-# OPTIONAL: Extra system packages (apt) to install
 apt:
   - libvips-dev
 
-# OPTIONAL: Additional domains allowed through the egress proxy
-# The base allowlist (GitHub, npm, PyPI, crates.io) is always included.
 egress:
   - "*.neon.tech"
   - "api.vercel.com"
 
-# OPTIONAL: GitHub runner labels
-labels: [self-hosted, Linux, ARM64, container]
-
-# OPTIONAL: Container resource limits
 resources:
-  memory: 8g        # default: 8g (container RAM limit)
-  cpus: 4           # default: 4
-  pids: 2048        # default: 2048
+  memory: 12g
+  cpus: 4
+  pids: 2048
 
-# OPTIONAL: Per-job image overrides
-# "base" = language image only (smaller, faster)
-# "full" = language + all tools from the tools: list
 jobs:
   lint: base
   test: base
   e2e: full
+  security: full
 ```
 
-### Minimal Example
-
-```yaml
-# .github/runner.yml — simplest possible config
-runtime: node:24
-```
-
-This gives you a hardened Node.js 24 runner with:
-- Base egress allowlist (GitHub + npm)
-- Default resource limits (8 GB RAM, 4 CPUs, 2048 PIDs)
-- Default labels `[self-hosted, Linux, ARM64, container]`
+The progression is intentional — start minimal and add only what your CI actually requires.
 
 ---
 
-## Architecture
+## Network Egress Control
 
-```
-RunSecure/
-├── images/                          # Docker images (layered)
-│   ├── base.Dockerfile              #   Debian slim + runner binary + hardening
-│   ├── node.Dockerfile              #   + Node.js runtime
-│   ├── python.Dockerfile            #   + Python runtime
-│   └── rust.Dockerfile              #   + Rust toolchain
-│
-├── tools/                           # Install recipes (shell scripts)
-│   ├── playwright.sh                #   Playwright + Chromium
-│   ├── semgrep.sh                   #   Semgrep SAST
-│   └── cypress.sh                   #   Cypress E2E
-│
-├── infra/                           # Runtime infrastructure
-│   ├── docker-compose.yml           #   Production: runner + proxy
-│   ├── squid/                       #   Egress proxy
-│   │   ├── base.conf                #     Base domain allowlist
-│   │   └── Dockerfile               #     Proxy image
-│   ├── seccomp/
-│   │   └── node-runner.json         #   Syscall filter profile
-│   └── scripts/
-│       ├── run.sh                   #   Main orchestrator
-│       ├── compose-image.sh         #   Image builder (reads runner.yml)
-│       ├── generate-squid-conf.sh   #   Merges base + project egress
-│       ├── entrypoint.sh            #   Container startup (JIT config)
-│       └── finalize-hardening.sh    #   Final image hardening (removes apt)
-│
-├── skeleton/                        # Copy to new projects
-│   ├── runner.yml                   #   Template configuration
-│   ├── workflow-ci.yml              #   Example GitHub Actions workflow
-│   └── ONBOARDING.md               #   Step-by-step setup guide
-│
-└── tests/
-    ├── validation/                  # Unit-level container tests
-    │   ├── run-all-tests.sh         #   Build + security + functional tests
-    │   ├── validate-runner.sh       #   In-container hardening checks (36 checks)
-    │   └── validate-network.sh      #   Egress allowlist/blocklist checks
-    ├── integration/                 # End-to-end with proxy
-    │   ├── run-integration-tests.sh #   Full integration orchestrator
-    │   ├── docker-compose.test.yml  #   Test compose (proxy + runner)
-    │   ├── test-egress-proxy.sh     #   25 egress checks
-    │   ├── test-ci-workflow-node.sh #   Real Node CI lifecycle
-    │   ├── test-ci-workflow-python.sh # Real Python CI lifecycle
-    │   └── test-attack-simulation.sh  # 28 attack vector checks
-    ├── node-project/                # Test project: Node.js
-    ├── python-project/              # Test project: Python
-    └── rust-project/                # Test project: Rust
-```
+This is the core security feature. All outbound connections from the runner container are routed through a Squid proxy. The proxy evaluates each connection against a domain allowlist and blocks everything else.
 
-### Image Layer Cake
+### How It Works
 
-```
-┌─────────────────────────────────────┐
-│  finalize-hardening.sh              │  removes apt, strips setuid
-│  (only in composed images)          │  via compose-image.sh
-├─────────────────────────────────────┤
-│  Tools (optional)                   │  Playwright, Semgrep, Cypress
-│  from tools/*.sh recipes            │  ~250-300 MB each
-├─────────────────────────────────────┤
-│  Language runtime                   │  Node / Python / Rust
-│  from images/{lang}.Dockerfile      │  ~120-200 MB
-├─────────────────────────────────────┤
-│  runner-base                        │  Debian slim + GH Actions runner
-│  from images/base.Dockerfile        │  + git, curl, jq, gh CLI
-│                                     │  ~320 MB
-└─────────────────────────────────────┘
-```
+The runner container sits on an internal Docker network with no direct internet access. The HTTP_PROXY and HTTPS_PROXY environment variables are set to point at the Squid proxy, which is the only path to the outside world.
 
-### Network Architecture
+For HTTPS connections, the proxy inspects the domain from the `CONNECT` request and allows or denies it. It does **not** perform TLS interception — the encrypted tunnel passes through opaquely. This means the proxy sees the destination domain but cannot read the traffic content.
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  Internal Docker Network (no internet access)     │
+│  Internal Docker Network (no direct internet)     │
 │                                                    │
 │  ┌─────────────┐        ┌──────────────────────┐ │
-│  │ Runner      │───────▶│ Squid Proxy          │ │
-│  │ (ephemeral) │ HTTP_  │ (egress gate)        │ │
-│  │             │ PROXY  │                      │ │
-│  └─────────────┘        │ Allows:              │ │
-│                          │  github.com          │─┼──▶ Internet
-│                          │  registry.npmjs.org  │ │    (allowed only)
-│                          │  pypi.org            │ │
-│                          │  + project egress    │ │
-│                          │                      │ │
-│                          │ Blocks:              │ │
-│                          │  everything else     │ │
+│  │ Runner      │───────>│ Squid Proxy          │ │
+│  │ Container   │ HTTP_  │                      │ │
+│  │             │ PROXY  │ Checks domain against│ │
+│  └─────────────┘        │ allowlist:           │ │
+│                          │  ✓ github.com       │─┼──> Internet
+│                          │  ✓ registry.npmjs   │ │    (allowed only)
+│                          │  ✓ pypi.org         │ │
+│                          │  ✗ evil.com         │ │
+│                          │  ✗ 169.254.169.254  │ │
 │                          └──────────────────────┘ │
 └──────────────────────────────────────────────────┘
 ```
 
----
+### Base Allowlist (Always Included)
 
-## How It Works
-
-### Image Building
-
-When you run `./infra/scripts/run.sh --project /path/to/project`, the orchestrator:
-
-1. Reads `.github/runner.yml` from your project
-2. Checks if the language base image exists (e.g., `runner-node:24`)
-3. If `tools:` are specified, `compose-image.sh` generates a Dockerfile:
-   ```dockerfile
-   FROM runner-node:24
-   USER root
-   # Tool: playwright (from tools/playwright.sh)
-   COPY tools/playwright.sh /tmp/install-playwright.sh
-   RUN /tmp/install-playwright.sh && rm /tmp/install-playwright.sh
-   # Finalize hardening (removes apt, strips setuid)
-   COPY infra/scripts/finalize-hardening.sh /tmp/finalize-hardening.sh
-   RUN /tmp/finalize-hardening.sh
-   USER runner
-   ```
-4. Builds with a **content-hash tag** (e.g., `runner-project:a3f8c1d2e4f5`). Same config = same hash = Docker cache hit.
-
-### Job Execution
-
-1. Orchestrator requests a **JIT (Just-In-Time) token** from GitHub API
-2. Generates Squid proxy config (base allowlist + project egress domains)
-3. Launches runner container via `docker-compose` with full hardening flags
-4. Container runs a single job and exits
-5. Container is destroyed (`--rm`)
-6. Loop for next job
-
-### What Happens Inside the Container
-
-- **User**: `runner` (UID 1001), not root — cannot write to system paths
-- **Filesystem**: System paths protected by Unix permissions (root-owned, `/etc` chmod 555). Runner can write to its home dir (ephemeral — destroyed with container).
-- **Network**: All traffic routes through Squid proxy on internal Docker network
-- **Capabilities**: All dropped (`--cap-drop=ALL`)
-- **Privileges**: Cannot escalate (`--security-opt=no-new-privileges`)
-- **Processes**: Capped by `--pids-limit`
-- **Memory/CPU**: Capped by resource limits
-- **/tmp**: Writable but `noexec` (can't run downloaded binaries)
-- **Ephemeral**: Container destroyed after each job (`--rm`) — no state persists
-
----
-
-## Supported Runtimes
-
-| Runtime | Build Command | Image Size |
-|---------|--------------|------------|
-| Node.js 24 | `docker build -f images/node.Dockerfile --build-arg NODE_VERSION=24 -t runner-node:24 .` | ~450 MB |
-| Node.js 22 | `docker build -f images/node.Dockerfile --build-arg NODE_VERSION=22 -t runner-node:22 .` | ~450 MB |
-| Python 3.12 | `docker build -f images/python.Dockerfile --build-arg PYTHON_VERSION=3.12 -t runner-python:3.12 .` | ~370 MB |
-| Rust stable | `docker build -f images/rust.Dockerfile --build-arg RUST_VERSION=stable -t runner-rust:stable .` | ~550 MB |
-
-## Available Tool Recipes
-
-| Tool | Recipe | Size Impact | Requires |
-|------|--------|-------------|----------|
-| Playwright + Chromium | `tools/playwright.sh` | ~300 MB | Node.js |
-| Semgrep | `tools/semgrep.sh` | ~276 MB | Python 3 (auto-installed if missing) |
-| Cypress | `tools/cypress.sh` | ~250 MB | Node.js |
-
----
-
-## Egress Proxy
-
-### Base Allowlist (always included)
+These domains are allowed for every project, regardless of configuration:
 
 | Category | Domains |
 |----------|---------|
-| **GitHub** | `.github.com`, `api.github.com`, `.githubusercontent.com`, `.actions.githubusercontent.com`, `.ghcr.io`, `.pkg.github.com` |
+| **GitHub** | `.github.com`, `api.github.com`, `.githubusercontent.com`, `.actions.githubusercontent.com`, `.objects.githubusercontent.com`, `.ghcr.io`, `.pkg.github.com`, `.pipelines.actions.githubusercontent.com` |
 | **npm** | `.npmjs.org` |
 | **PyPI** | `.pypi.org`, `.files.pythonhosted.org` |
-| **Rust** | `.crates.io`, `.rustup.rs`, `.rust-lang.org` |
-| **CI tools** | `.nodejs.org`, `.nodesource.com`, `.semgrep.dev`, `.googleapis.com`, `.playwright.azureedge.net` |
+| **Rust/Cargo** | `.crates.io`, `.rustup.rs`, `.rust-lang.org` |
+| **CI Tools** | `.nodejs.org`, `.nodesource.com`, `.semgrep.dev`, `.googleapis.com`, `.playwright.azureedge.net` |
+
+The base allowlist is defined in `infra/squid/base.conf`. To modify it, edit that file directly.
 
 ### Adding Project-Specific Domains
 
-In your `.github/runner.yml`:
+Add domains to the `egress` list in your `.github/runner.yml`. When the orchestrator starts, it merges the base allowlist with your project-specific domains to produce the runtime proxy configuration.
 
-```yaml
-egress:
-  - "*.neon.tech"          # Neon database
-  - "api.vercel.com"       # Vercel deployments
-  - "*.supabase.co"        # Supabase
-  - "*.amazonaws.com"      # AWS services
+### What Gets Blocked
+
+Everything not in the base allowlist or your `egress` list. This includes:
+
+- Attacker-controlled servers (the primary exfiltration vector)
+- Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
+- Tunneling services (ngrok, localtunnel)
+- Social platforms used as exfiltration channels (Slack webhooks, Discord webhooks)
+- Non-standard ports (only 80 and 443 are allowed)
+- Raw IP HTTP requests to the internet (internal Docker network blocks direct access)
+
+### Debugging Blocked Connections
+
+If your CI job fails because a dependency needs to reach a domain that isn't allowlisted:
+
+1. Check the proxy log for denied requests
+2. Identify the domain
+3. Add it to the `egress` list in your `runner.yml`
+4. Restart the orchestrator
+
+You can also run without the proxy temporarily for debugging:
+
+```bash
+./infra/scripts/run.sh --project /path/to/project --repo owner/repo --no-proxy
 ```
 
-### Everything Else Is Blocked
+---
 
-Any domain not in the base allowlist or your project's `egress:` list is denied. This blocks:
-- Exfiltration to attacker servers
-- Cloud metadata endpoints (169.254.169.254)
-- Tunneling services (ngrok, localtunnel)
-- Social platforms (Slack, Discord) used as exfil channels
+## Image Architecture
+
+Images are stackable. You only build what you need.
+
+The simplest setup is two layers: base + language. That's a fully functional, hardened runner. Tools are a third layer you add only if your CI requires them.
+
+```
+                                        ┌─────────────────────────────┐
+                                        │  finalize-hardening.sh      │
+                     You stop here      ├─────────────────────────────┤
+                     if you don't  ───> │  Tools (if you need them)   │
+                     need tools         │  Playwright / Semgrep / ... │
+┌─────────────────────────────────┐     ├─────────────────────────────┤
+│  Language runtime               │ ──> │  Language runtime            │
+│  Node.js / Python / Rust        │     │  Node.js / Python / Rust     │
+├─────────────────────────────────┤     ├─────────────────────────────┤
+│  runner-base                    │     │  runner-base                 │
+│  Debian slim + GH Actions runner│     │  Debian slim + GH Actions    │
+└─────────────────────────────────┘     └─────────────────────────────┘
+      Most projects                          Only if tools: is set
+```
+
+**Base image** (`runner-base:latest`) — Debian bookworm-slim with the GitHub Actions runner binary, essential tools, a non-root user, and hardening applied. The `apt` package manager is deliberately kept at this stage so downstream layers can install packages.
+
+**Language images** (`runner-node:24`, `runner-python:3.12`, `runner-rust:stable`) — add the language runtime on top of base. Each re-strips setuid bits in case the runtime install added any. **This is the image most projects will use directly.**
+
+**Project images** (`runner-project:<hash>`) — generated only when you specify `tools` or `apt` in your config. Layers tool recipes on top of the language image, then runs `finalize-hardening.sh` which removes apt, re-strips setuid bits, and locks system paths. The image is tagged with a content hash of your configuration so that identical configs across different projects share the same cached image.
+
+If your `runner.yml` only specifies `runtime` (no tools, no extra apt packages), the language image is used as-is — no project image is generated, no extra build step.
+
+### Approximate Image Sizes
+
+Most projects use just the language image:
+
+| Image | Size | What you get |
+|-------|------|-------------|
+| `runner-node:24` | ~450 MB | Node.js + hardened base — enough for build, test, lint |
+| `runner-python:3.12` | ~370 MB | Python + hardened base — enough for pytest, linting, packaging |
+| `runner-rust:stable` | ~550 MB | Rust + hardened base — enough for cargo build, cargo test |
+
+If you add tools, each one adds to the image:
+
+| Tool | Additional size |
+|------|----------------|
+| Playwright + Chromium | +300 MB |
+| Semgrep | +276 MB |
+| Cypress | +250 MB |
+
+---
+
+## Security Hardening
+
+RunSecure applies three independent layers of security. A breach of one layer does not compromise the others.
+
+### Image Hardening (build-time)
+
+Applied when the image is built. Reduces the attack surface available inside the container.
+
+- **Non-root user** — the runner process runs as UID 1001, not root
+- **No su/sudo** — privilege escalation binaries are deleted
+- **Setuid bits stripped** — no binary can gain elevated privileges through setuid
+- **Root account locked** — root shell is set to `/usr/sbin/nologin`
+- **Package manager removed** — apt/dpkg are deleted in final images (attackers can't install tools)
+- **Network recon tools removed** — no ping, nc, ssh, or wget
+- **Persistence tools removed** — no crontab or at
+- **SHA256-verified downloads** — the runner binary is verified by hash before extraction
+- **Pinned package versions** — no version-swap supply chain attacks
+- **Minimal PATH** — only essential directories
+
+### Runtime Containment (launch-time)
+
+Enforced by Docker flags when the container starts. Cannot be bypassed by anything inside the container.
+
+| Flag | Protection |
+|------|-----------|
+| `--rm` | Container is destroyed after the job — no state persists |
+| `--user 1001:0` | Process runs as non-root; system paths are root-owned and unwritable |
+| `--cap-drop=ALL` | All Linux capabilities removed |
+| `--security-opt=no-new-privileges` | Cannot gain new privileges via setuid/setgid at runtime |
+| `--tmpfs /tmp:noexec` | `/tmp` is writable but cannot execute binaries |
+| `--pids-limit` | Prevents fork bombs and unbounded process spawning |
+| `--memory` / `--memory-swap` | Prevents memory exhaustion and OOM attacks |
+| `--cpus` | Prevents CPU exhaustion (cryptomining) |
+| Seccomp profile | Custom profile blocks dangerous syscalls: `ptrace`, `mount`, `bpf`, `keyctl`, kernel module loading, `perf_event_open`, `userfaultfd` |
+
+### Network Isolation (network-level)
+
+The runner container has no direct internet access. All traffic is routed through the Squid proxy on an internal Docker network. See [Network Egress Control](#network-egress-control) above.
+
+---
+
+## Orchestrator Options
+
+```
+./infra/scripts/run.sh [options]
+
+Required:
+  --project PATH     Path to the project directory (must have .github/runner.yml)
+  --repo OWNER/REPO  GitHub repository (e.g., NaorPenso/my-app)
+
+Optional:
+  --max-jobs N       Maximum jobs to process before exiting (default: 5)
+  --no-proxy         Skip the egress proxy (less secure, useful for debugging)
+  --force            Force rebuild of the project image even if cached
+  -h, --help         Show help
+```
+
+The orchestrator loops up to `--max-jobs` times, requesting a fresh JIT token from the GitHub API for each job. Press Ctrl+C to stop it between jobs.
 
 ---
 
 ## Testing
 
-### Validation Tests (per-image, no proxy)
+### Validation Tests
 
-Tests that each image is correctly hardened and functional:
+Per-image tests that verify hardening and functionality without any network (no proxy needed):
 
 ```bash
-# Full suite: build images + security checks + functional tests
+# Full suite: build all images + 36 security checks per image + functional tests
 ./tests/validation/run-all-tests.sh
 
-# Quick (skip Rust build)
+# Quick mode: skip the Rust image (slow to build)
 ./tests/validation/run-all-tests.sh --quick
 
-# Reuse cached images
+# Skip image builds: reuse already-built images
 ./tests/validation/run-all-tests.sh --skip-build
 ```
 
-**What it tests (36 checks per image):**
-- Non-root user, no su/sudo, no setuid binaries
-- Package manager neutered, no network tools
-- Root account locked, system paths protected by permissions
-- /tmp noexec, writable workspace
-- Core tools (git, curl, jq, gh) functional
-- Language runtime present and working
-- Resource limits (PID, memory, CPU) enforced
+These tests run inside containers with the same hardening flags used in production. They verify: non-root user, no su/sudo, no setuid binaries, package manager neutered, no network tools, root account locked, system paths protected, /tmp noexec, writable workspace, core tools functional, language runtime present, and resource limits enforced.
 
-### Integration Tests (with proxy)
+### Integration Tests
 
-End-to-end tests with the Squid egress proxy active:
+End-to-end tests with the Squid proxy running. These prove the full system works as a unit:
 
 ```bash
-# Full suite
+# Full suite: egress + Node CI + Python CI + attack simulation (67 checks)
 ./tests/integration/run-integration-tests.sh
 
-# Individual suites
-./tests/integration/run-integration-tests.sh --test egress   # 25 egress checks
-./tests/integration/run-integration-tests.sh --test node      # Node CI lifecycle
-./tests/integration/run-integration-tests.sh --test python    # Python CI lifecycle
-./tests/integration/run-integration-tests.sh --test attack    # 28 attack simulations
+# Run individual test suites
+./tests/integration/run-integration-tests.sh --test egress    # 25 egress proxy checks
+./tests/integration/run-integration-tests.sh --test node       # Node.js CI lifecycle
+./tests/integration/run-integration-tests.sh --test python     # Python CI lifecycle
+./tests/integration/run-integration-tests.sh --test attack     # 28 attack vector checks
 
 # Skip image builds
 ./tests/integration/run-integration-tests.sh --skip-build
 ```
 
-**What it tests (67 checks total):**
-- Allowed domains succeed (GitHub, npm, PyPI, crates.io)
-- Blocked domains denied (pastebin, webhook.site, ngrok, metadata endpoints)
-- Real `git clone` + `npm install` + `npm test` through proxy
-- Real `pip install` + `pytest` through proxy
-- Docker socket escape, host filesystem access, privilege escalation
-- Reverse shell tools, persistence mechanisms, resource abuse
-- Runtime package installation, namespace isolation, credential exposure
+**Egress tests** — verify that allowed domains (GitHub, npm, PyPI, crates.io) succeed and blocked domains (pastebin, webhook.site, ngrok, cloud metadata, Slack, Discord) are denied. Also checks that exfiltration techniques (POST requests, DNS-over-HTTPS, attacker webhooks) are blocked and that direct internet access bypassing the proxy is impossible.
+
+**CI workflow tests** — run a real git clone, npm install, npm test, pip install, and pytest through the proxy to verify that real CI workloads succeed end-to-end.
+
+**Attack simulation tests** — attempt 28 real attack vectors: Docker socket escape, host filesystem access, privilege escalation (setuid, capabilities), reverse shell tools, persistence mechanisms (cron, systemd, dotfiles), resource abuse (memory bombs, fork bombs), runtime package installation, namespace isolation, kernel attack surface (ptrace, insmod), and credential exposure.
 
 ---
 
-## Updating GitHub Workflows
+## Extending RunSecure
 
-Your workflow `runs-on:` labels need to match the runner config. Change:
+### Adding a New Language
 
-```yaml
-# Before (bare-metal macOS)
-runs-on: [self-hosted, macOS, ARM64]
+Create a new Dockerfile in `images/`. Follow the existing pattern:
 
-# After (containerized Linux)
-runs-on: [self-hosted, Linux, ARM64, container]
+1. Start `FROM runner-base:${BASE_TAG}`
+2. Switch to `USER root`
+3. Install the language runtime via apt or official installer
+4. Re-strip setuid bits: `RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true`
+5. Set the `PATH` (must include `/home/runner/actions-runner` and `/home/runner/actions-runner/bin`)
+6. Switch back to `USER runner`
+
+Example for Go:
+
+```dockerfile
+ARG BASE_TAG=latest
+FROM runner-base:${BASE_TAG}
+ARG GO_VERSION=1.22
+USER root
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" | tar -C /usr/local -xzf -
+RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
+ENV PATH="/usr/local/go/bin:/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
+USER runner
+WORKDIR /home/runner
 ```
 
-The `Setup Node.js` step is no longer needed (Node is baked into the image), but it's harmless to leave it.
+Build it: `docker build -f images/go.Dockerfile --build-arg GO_VERSION=1.22 -t runner-go:1.22 .`
 
----
+Use it: `runtime: go:1.22`
 
-## Adding a New Language
+### Adding a New Tool Recipe
 
-1. Create `images/go.Dockerfile`:
-   ```dockerfile
-   ARG BASE_TAG=latest
-   FROM runner-base:${BASE_TAG}
-   ARG GO_VERSION=1.22
-   USER root
-   RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" | tar -C /usr/local -xzf -
-   RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
-   ENV PATH="/usr/local/go/bin:/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
-   USER runner
-   WORKDIR /home/runner
-   ```
+Create a shell script in `tools/`. The script runs as root during image build and must:
 
-2. Build: `docker build -f images/go.Dockerfile --build-arg GO_VERSION=1.22 -t runner-go:1.22 .`
+1. Install any system dependencies via apt
+2. Install the tool
+3. Clean up apt lists (`rm -rf /var/lib/apt/lists/*`)
+4. Verify the tool works
 
-3. Use in a project: `runtime: go:1.22`
+Example for Trivy:
 
-## Adding a New Tool Recipe
+```bash
+#!/bin/bash
+set -euo pipefail
+curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+trivy --version
+echo "[RunSecure] Trivy installed successfully."
+```
 
-1. Create `tools/trivy.sh`:
-   ```bash
-   #!/bin/bash
-   set -euo pipefail
-   curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-   trivy --version
-   echo "[RunSecure] Trivy installed successfully."
-   ```
+Make it executable: `chmod +x tools/trivy.sh`
 
-2. Make executable: `chmod +x tools/trivy.sh`
-
-3. Use in a project: `tools: [trivy]`
+Use it: `tools: [trivy]`
 
 ---
 
 ## Troubleshooting
 
-### "npm install" hangs or times out
+### npm install hangs or times out
 
-The proxy may be blocking a domain npm needs. Run the egress test first:
+The proxy is likely blocking a domain that npm or one of your dependencies needs. Run the egress test to confirm the proxy is working, then check the proxy log for denied domains:
+
 ```bash
 ./tests/integration/run-integration-tests.sh --test egress
 ```
-If needed, add the missing domain to `egress:` in your `runner.yml`.
 
-### "Permission denied" errors in CI
+Add the missing domain to the `egress` list in your `runner.yml`.
 
-The container runs as UID 1001. Check that your workflow doesn't assume root access. Common fixes:
-- Use `npm ci --cache /home/runner/.npm` instead of default cache paths
-- Write build output to `/home/runner/_work/` (writable, ephemeral)
-- Don't write to `/usr/local/` or other system paths
+### Permission denied errors
+
+The container runs as UID 1001. Common fixes:
+- Use `npm ci --cache /home/runner/.npm` if the default npm cache path is inaccessible
+- Write build output to `/home/runner/_work/` (writable and ephemeral)
+- Do not attempt to write to `/usr/local/`, `/etc/`, or other system paths
 
 ### Container exits immediately
 
-Check that the JIT token is valid. Tokens expire after 1 hour. If using the orchestrator, it requests a fresh token for each job.
+The JIT token has likely expired (they last 1 hour). The orchestrator requests a fresh token for each job automatically, but if you're running the container manually, make sure the token is current.
 
 ### "apt-get: not found" inside the container
 
-This is intentional. The package manager is removed in finalized images. If a tool needs apt, create a [tool recipe](#adding-a-new-tool-recipe) that installs the dependency during image build.
+This is by design. Final images have the package manager removed. If a CI step needs a system package, add it to the `apt` list in your `runner.yml` so it's installed during image build, or create a tool recipe.
+
+### Out of memory during npm ci or build
+
+Increase the container memory limit:
+
+```yaml
+resources:
+  memory: 12g
+```
+
+Also make sure your Colima VM has enough memory:
+
+```bash
+colima stop
+colima start --cpu 4 --memory 20 --vm-type vz --mount-type virtiofs
+```
 
 ### Images are too large
 
-Use per-job image overrides to avoid loading unnecessary tools:
+Use per-job image overrides so lightweight jobs (lint, typecheck) use the smaller base image:
+
 ```yaml
+tools: [playwright]
 jobs:
-  lint: base        # ~450 MB (no Playwright/Semgrep)
+  lint: base      # ~450 MB, no Playwright
   test: base
-  e2e: full         # ~1 GB (with Playwright)
+  e2e: full       # ~750 MB, with Playwright
 ```
+
+---
+
+## Project Layout
+
+```
+RunSecure/
+├── images/                        # Docker images (layered)
+│   ├── base.Dockerfile            #   Base: Debian slim + runner + hardening
+│   ├── node.Dockerfile            #   + Node.js
+│   ├── python.Dockerfile          #   + Python
+│   └── rust.Dockerfile            #   + Rust
+├── tools/                         # Tool install recipes (shell scripts)
+│   ├── playwright.sh              #   Playwright + Chromium
+│   ├── semgrep.sh                 #   Semgrep SAST scanner
+│   └── cypress.sh                 #   Cypress E2E
+├── infra/                         # Runtime infrastructure
+│   ├── docker-compose.yml         #   Production compose (runner + proxy)
+│   ├── squid/                     #   Egress proxy
+│   │   ├── base.conf              #     Domain allowlist
+│   │   └── Dockerfile             #     Proxy image
+│   ├── seccomp/
+│   │   └── node-runner.json       #   Syscall filter profile
+│   └── scripts/
+│       ├── run.sh                 #   Main orchestrator
+│       ├── compose-image.sh       #   Image builder (reads runner.yml)
+│       ├── generate-squid-conf.sh #   Merges base + project egress
+│       ├── entrypoint.sh          #   Container startup (JIT config)
+│       └── finalize-hardening.sh  #   Final image hardening
+├── skeleton/                      # Templates for new projects
+│   ├── runner.yml                 #   Configuration template
+│   ├── workflow-ci.yml            #   Example GitHub Actions workflow
+│   └── ONBOARDING.md             #   Step-by-step setup guide
+└── tests/
+    ├── validation/                # Per-image hardening + functional tests
+    ├── integration/               # End-to-end with proxy + attack sims
+    └── {node,python,rust}-project/  # Test fixture projects
+```
+
+---
+
+## License
+
+MIT
