@@ -5,7 +5,7 @@
 # Runs the full integration test suite:
 #   1. Builds runner images (if needed)
 #   2. Builds Squid proxy image
-#   3. Runs egress proxy tests (allowed/blocked domains)
+#   3. Runs egress proxy tests (allowed/blocked domains, URL filtering, proxy verification)
 #   4. Runs Node.js CI workflow simulation
 #   5. Runs Python CI workflow simulation
 #   6. Runs attack simulation tests
