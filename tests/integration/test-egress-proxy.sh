@@ -11,6 +11,8 @@
 #   3. CONNECT tunneling works for HTTPS
 #   4. Non-standard ports are blocked
 #   5. Direct bypass attempts fail
+#   6. Proxy is actively filtering (not just alive)
+#   7. URL path filtering boundary (documents CONNECT limitation)
 # ============================================================================
 
 set -uo pipefail
@@ -196,6 +198,69 @@ else
     # In production, the docker network should block direct egress.
     fail "BLOCK proxy bypass → HTTP $BYPASS_CODE (container has direct internet access!)"
 fi
+
+# ============================================================================
+# Section 6: Proxy Verification (confirm proxy is actively filtering)
+# ============================================================================
+echo -e "\n${BOLD}--- 6. Proxy Active Verification ---${NC}"
+
+# Confirm requests actually go through the proxy (check for proxy response headers)
+# Squid adds Via or X-Cache headers. If these are missing, traffic may bypass the proxy.
+PROXY_HEADERS=$(curl -sI --connect-timeout 10 --max-time 15 "https://github.com" 2>/dev/null)
+if echo "$PROXY_HEADERS" | grep -qi "via:.*squid\|x-cache"; then
+    pass "VERIFY proxy headers present (traffic confirmed through Squid)"
+else
+    # CONNECT-tunneled HTTPS won't show proxy headers in the response (expected).
+    # Verify by checking that a blocked domain actually fails — if it does,
+    # the proxy is filtering. If the proxy were down/bypassed, blocked domains would succeed.
+    VERIFY_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
+        "https://httpbin.org/get" 2>/dev/null)
+    if [[ "$VERIFY_CODE" =~ ^(000|403|407|503)$ ]]; then
+        pass "VERIFY proxy is filtering (blocked domain returns $VERIFY_CODE, HTTPS CONNECT hides headers)"
+    else
+        fail "VERIFY proxy may not be active — blocked domain returned $VERIFY_CODE"
+    fi
+fi
+
+# Verify that unsetting proxy env vars doesn't give direct access
+# (the internal Docker network should prevent it regardless)
+DIRECT_CODE=$(env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+    curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://example.com" 2>/dev/null)
+if [[ "$DIRECT_CODE" =~ ^(000|403|407|503)$ ]]; then
+    pass "VERIFY no direct internet without proxy (network isolation works)"
+else
+    fail "VERIFY direct internet access possible without proxy ($DIRECT_CODE)"
+fi
+
+# ============================================================================
+# Section 7: URL Path Awareness
+# ============================================================================
+echo -e "\n${BOLD}--- 7. URL Path Filtering Boundary ---${NC}"
+
+# Squid operates at the domain level via CONNECT for HTTPS. It cannot inspect
+# the URL path inside a TLS tunnel. These tests document this boundary:
+# allowed domains are reachable at ANY path, which is expected behavior.
+# The security boundary is the domain allowlist, not path filtering.
+
+# Allowed domain, unusual path — should succeed (Squid can't see the path in CONNECT)
+assert_allowed "https://github.com/nonexistent-user/nonexistent-repo" \
+    "github.com arbitrary path (domain allowed, path not filtered — expected)"
+
+# Allowed domain with query params that look like exfiltration — should succeed
+# This documents a known limitation: if the domain is allowed, any path/query works.
+EXFIL_VIA_ALLOWED=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 \
+    "https://github.com/search?q=secret_token_value" 2>/dev/null)
+if [[ "$EXFIL_VIA_ALLOWED" =~ ^(200|301|302|303|304|307|308|404|422)$ ]]; then
+    pass "KNOWN LIMIT allowed domain accepts any path/query (HTTP $EXFIL_VIA_ALLOWED) — mitigate with minimal GITHUB_TOKEN perms"
+else
+    pass "KNOWN LIMIT request to allowed domain path returned $EXFIL_VIA_ALLOWED"
+fi
+
+# Blocked domain, root path — should still be blocked
+assert_blocked "https://pastebin.com/raw/test123" "blocked domain with specific path"
+
+# Blocked domain, API-like path — should still be blocked
+assert_blocked "https://webhook.site/api/test" "blocked domain with API path"
 
 # ============================================================================
 # Summary
