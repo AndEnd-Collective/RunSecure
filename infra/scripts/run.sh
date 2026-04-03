@@ -91,6 +91,11 @@ CPUS=$(yq '.resources.cpus // "4"' "$RUNNER_YML")
 PIDS=$(yq '.resources.pids // "2048"' "$RUNNER_YML")
 LABELS=$(yq '.labels // ["self-hosted", "Linux", "ARM64", "container"] | join(",")' "$RUNNER_YML")
 
+# --- Derive a human-readable container name prefix from repo -----------------
+# "owner/my-repo" → "rs-my-repo"
+REPO_SHORT=$(echo "$REPO" | sed 's|.*/||; s/[^a-zA-Z0-9_-]/-/g' | tr '[:upper:]' '[:lower:]')
+CONTAINER_PREFIX="rs-${REPO_SHORT}"
+
 # --- Build/cache the project image ------------------------------------------
 echo "=== RunSecure Orchestrator ==="
 echo "Project: $PROJECT_DIR"
@@ -132,7 +137,7 @@ for i in $(seq 1 "$MAX_JOBS"); do
     JIT_RESPONSE=$(gh api -X POST "repos/$REPO/actions/runners/generate-jitconfig" \
         --input - <<EOF
 {
-    "name": "runsecure-$(date +%s)",
+    "name": "${CONTAINER_PREFIX}-job${i}-$(date +%s)",
     "runner_group_id": 1,
     "labels": [$(echo "$LABELS" | sed 's/,/","/g;s/^/"/;s/$/"/')],
     "work_folder": "_work"
@@ -168,7 +173,7 @@ EOF
     if [[ "$USE_PROXY" == true ]]; then
         RUNNER_IMAGE="$IMAGE_NAME" \
         RUNNER_JIT_CONFIG="$JIT_CONFIG" \
-        RUNNER_NAME="runsecure-$(date +%s)" \
+        RUNNER_NAME="${CONTAINER_PREFIX}-job${i}" \
         RUNNER_MEMORY="$MEMORY" \
         RUNNER_CPUS="$CPUS" \
         RUNNER_PIDS="$PIDS" \
@@ -181,7 +186,7 @@ EOF
         # Direct mode (no proxy) — use docker run with hardening flags
         docker run \
             --rm \
-            --name "runsecure-runner-$(date +%s)" \
+            --name "${CONTAINER_PREFIX}-job${i}" \
             --user 1001:0 \
             --security-opt=no-new-privileges \
             --security-opt="seccomp=${RUNSECURE_ROOT}/infra/seccomp/node-runner.json" \
@@ -194,7 +199,7 @@ EOF
             --ulimit nofile=4096:4096 \
             --ulimit nproc=2048:2048 \
             -e "RUNNER_JIT_CONFIG=${JIT_CONFIG}" \
-            -e "RUNNER_NAME=runsecure-$(date +%s)" \
+            -e "RUNNER_NAME=${CONTAINER_PREFIX}-job${i}" \
             -e "SEMGREP_SETTINGS_FILE=/home/runner/.semgrep/settings.yml" \
             -e "SEMGREP_VERSION_CACHE_PATH=/home/runner/.semgrep/versions" \
             -v "${RUNSECURE_ROOT}/infra/scripts/entrypoint.sh:/home/runner/entrypoint.sh:ro" \
