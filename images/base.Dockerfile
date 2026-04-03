@@ -132,11 +132,8 @@ RUN passwd -l root 2>/dev/null || true \
 # ---- NOTE: apt is intentionally KEPT in the base image ---------------------
 # Language layers (node, python, rust) and tool recipes need apt to install
 # packages. The package manager is removed in the FINAL image produced by
-# compose-image.sh. At runtime, --read-only filesystem prevents apt from
-# functioning even if the binary exists.
-#
-# The finalize-hardening.sh script (called by compose-image.sh as the last
-# step) handles: apt removal, setuid re-strip, and /etc lockdown.
+# compose-image.sh via finalize-hardening.sh. In intermediate images, the
+# runner user (UID 1001) cannot install system packages without root access.
 
 # ---- Security hardening: minimal PATH --------------------------------------
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"

@@ -58,7 +58,17 @@ runs-on: [self-hosted, Linux, ARM64, container]
 
 You can also copy `skeleton/workflow-ci.yml` as a starting point for a new workflow.
 
-## Step 4: Build Images (one-time, ~5 minutes)
+## Step 4: Ensure Docker Has Enough Memory
+
+```bash
+# Colima needs 16GB+ for large Node.js projects (npm ci + vitest + next build)
+colima start --cpu 4 --memory 16 --vm-type vz --mount-type virtiofs
+
+# Verify
+docker info | grep "Total Memory"   # Should show 15+ GiB
+```
+
+## Step 5: Build Images (one-time, ~5 minutes)
 
 On the machine that will host the runners:
 
@@ -73,7 +83,7 @@ docker build -f images/node.Dockerfile \
   --build-arg NODE_VERSION=24 -t runner-node:24 .
 ```
 
-## Step 5: Start the Runner
+## Step 6: Start the Runner
 
 ```bash
 cd /path/to/RunSecure
@@ -92,11 +102,11 @@ cd /path/to/RunSecure
 
 The runner will register with GitHub, pick up queued jobs, and process them in ephemeral containers.
 
-## Step 6: Push and Verify
+## Step 7: Push and Verify
 
 Push a commit or open a PR. Watch the GitHub Actions tab to see your workflow running on the containerized runner.
 
-## Step 7: Commit the Config
+## Step 8: Commit the Config
 
 ```bash
 git add .github/runner.yml
@@ -107,11 +117,12 @@ git commit -m "chore: add RunSecure runner configuration"
 
 ## Checklist
 
+- [ ] Colima running with 16GB+ memory (`colima start --memory 16`)
 - [ ] `.github/runner.yml` added to project
 - [ ] `runtime:` set to correct language and version
 - [ ] `egress:` domains added (if needed)
 - [ ] `tools:` added (if using Playwright, Semgrep, etc.)
-- [ ] Workflow `runs-on:` labels updated
+- [ ] Workflow `runs-on:` labels updated to `[self-hosted, Linux, ARM64, container]`
 - [ ] Runner images built on host machine
 - [ ] Orchestrator started and processing jobs
 - [ ] First workflow run confirmed green
@@ -124,8 +135,10 @@ git commit -m "chore: add RunSecure runner configuration"
 
 ```yaml
 resources:
-  memory: 8g    # default is 4g
+  memory: 12g    # default is 8g
 ```
+
+Also ensure Colima has enough: `colima stop && colima start --memory 20`
 
 ### My E2E tests need Playwright
 

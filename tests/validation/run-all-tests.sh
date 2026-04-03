@@ -150,7 +150,7 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- Phase 3: Functional Tests ---${NC}\n"
 
-# Without --read-only, we can bind-mount projects directly and write in-place.
+# Projects are bind-mounted read-only where possible, or copied for write tests.
 
 # Node.js: run test suite inside container
 step "Node.js: npm test" \
@@ -208,7 +208,6 @@ step "Container cleanup (--rm)" bash -c "
         --user 1001:0 \
         --security-opt=no-new-privileges \
         --cap-drop=ALL \
-        --read-only \
         --tmpfs /tmp:rw,noexec,nosuid \
         --rm \
         runner-base:latest sleep 1)
@@ -222,19 +221,15 @@ step "Container cleanup (--rm)" bash -c "
     fi
 "
 
-# Verify cannot write to read-only paths
-step "Read-only root filesystem" \
+# Verify system paths are protected by Unix permissions
+step "System paths protected" \
     docker run "${HARDENING_FLAGS[@]}" \
     runner-base:latest bash -c "
-        if touch /test-file 2>/dev/null; then
-            echo 'ERROR: Was able to write to /'
+        if touch /usr/bin/backdoor 2>/dev/null; then
+            echo 'ERROR: Runner user can write to /usr/bin'
             exit 1
         fi
-        if touch /usr/bin/test-file 2>/dev/null; then
-            echo 'ERROR: Was able to write to /usr/bin'
-            exit 1
-        fi
-        echo 'Root filesystem is properly read-only.'
+        echo 'System paths properly protected by permissions.'
     "
 
 # Verify fork bomb protection (PID limit)

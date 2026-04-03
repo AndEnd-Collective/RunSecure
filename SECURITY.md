@@ -52,15 +52,13 @@ Enforced by Docker flags when the container starts. Cannot be circumvented by co
 | Flag | What it prevents | Verified by |
 |------|-----------------|-------------|
 | `--rm` | State persisting between jobs | `run-all-tests.sh` (cleanup test) |
-| `--read-only` | Writing to the root filesystem (backdoors, config tampering) | `validate-runner.sh` |
+| `--user 1001:0` | Running as root; system paths (root-owned) not writable | `validate-runner.sh` |
 | `--tmpfs /tmp:noexec` | Executing downloaded binaries from /tmp | `validate-runner.sh` |
-| `--tmpfs /home/runner/_work` | Workspace data persisting between jobs | Architecture |
 | `--cap-drop=ALL` | All Linux capability-based attacks | `test-attack-simulation.sh` |
 | `--security-opt=no-new-privileges` | Privilege escalation via setuid/setgid at runtime | `test-attack-simulation.sh` |
 | `--pids-limit` | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test) |
 | `--memory` / `--memory-swap` | Memory exhaustion, OOM attacks | `validate-runner.sh` |
 | `--cpus` | CPU exhaustion (cryptomining) | `validate-runner.sh` |
-| `--user 1001:0` | Running as root | `validate-runner.sh` |
 | Seccomp profile (`node-runner.json`) | Dangerous syscalls (ptrace, mount, bpf, keyctl) | Architecture |
 
 ### Layer 3: Network Isolation (network-level)
@@ -96,7 +94,8 @@ The Docker network architecture prevents the container from reaching the interne
 
 ### Accepted Risks
 
-- **apt binary exists in intermediate images** (language layers). It is removed in final composed images. In intermediate images, `--read-only` at runtime prevents apt from functioning.
+- **apt binary exists in intermediate images** (language layers). It is removed in final composed images via `finalize-hardening.sh`. In intermediate images, the runner user (UID 1001) cannot install system packages without root/capabilities.
+- **Container filesystem is writable by the runner user** in its home directory. The GH Actions runner requires this to write config, diagnostic logs, and download actions at runtime. System paths (`/usr`, `/etc`) are protected by root ownership and `chmod 555`. The container is ephemeral (`--rm`) so nothing persists.
 - **`/proc/self/environ` is readable.** This is standard in containers. The environment should contain only non-secret configuration. GitHub Actions injects secrets at runtime and they are redacted from logs (though this is not a security boundary).
 
 ---

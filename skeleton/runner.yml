@@ -37,11 +37,11 @@ runtime: node:24
 labels: [self-hosted, Linux, ARM64, container]
 
 # OPTIONAL: Container resource limits
+# Ensure Colima VM has enough memory: colima start --memory 16
 resources:
-  memory: 4g        # RAM limit (default: 4g)
-  cpus: 2           # CPU limit (default: 2)
-  pids: 512         # Max processes (default: 512)
-  workspace: 8g     # Tmpfs workspace size (default: 8g)
+  memory: 8g        # RAM limit (default: 8g)
+  cpus: 4           # CPU limit (default: 4)
+  pids: 2048        # Max processes (default: 2048)
 
 # OPTIONAL: Per-job image override
 # "base" = language image only (faster, smaller — good for lint/test/build)

@@ -75,8 +75,8 @@ else
 fi
 
 # 4. Package manager cannot function
-# In intermediate images, apt binary may exist but --read-only prevents it from
-# working. In finalized images (via compose-image.sh), the binary is removed.
+# In finalized images (via compose-image.sh), apt is removed entirely.
+# In intermediate images, the runner user (UID 1001) lacks permissions to install.
 echo -e "\n${BOLD}--- Package Manager ---${NC}"
 if command -v apt-get &>/dev/null; then
     # Binary exists — check if it can actually do anything
