@@ -6,8 +6,14 @@
 # This file tells RunSecure how to build and run your CI container.
 # Only the 'runtime' field is required. Everything else has sensible defaults.
 #
-# Docs: https://github.com/NaorPenso/RunSecure#configuration
+# Docs: https://github.com/AndEnd-Collective/RunSecure#configuration
 # ============================================================================
+
+# OPTIONAL: Pin to a RunSecure release version.
+# When set, the orchestrator pulls pre-built images from GHCR instead of
+# building locally. Use a semver version (no "v" prefix).
+# Omit to build images from local Dockerfiles.
+# version: "1.0.0"
 
 # REQUIRED: Language runtime and version
 # Options: node:22, node:24, python:3.11, python:3.12, rust:stable

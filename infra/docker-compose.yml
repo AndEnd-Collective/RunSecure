@@ -11,7 +11,7 @@
 services:
   # --- Squid egress proxy ---------------------------------------------------
   proxy:
-    image: ubuntu/squid:latest
+    image: ${PROXY_IMAGE:-ubuntu/squid:latest}
     container_name: ${RUNNER_NAME:-runsecure}-proxy
     restart: "no"
     volumes:

@@ -576,6 +576,53 @@ Use it: `tools: [trivy]`
 
 ---
 
+## Versioning and Updates
+
+RunSecure uses container registry publishing for release management. When a new version is tagged (e.g., `v1.2.0`), GitHub Actions builds and pushes multi-arch images to GHCR:
+
+```
+ghcr.io/andend-collective/runsecure/base:1.2.0
+ghcr.io/andend-collective/runsecure/node:1.2.0-24
+ghcr.io/andend-collective/runsecure/python:1.2.0-3.12
+ghcr.io/andend-collective/runsecure/rust:1.2.0-stable
+ghcr.io/andend-collective/runsecure/proxy:1.2.0
+```
+
+### Consuming a published release
+
+Add a `version:` field to your project's `.github/runner.yml`:
+
+```yaml
+version: "1.2.0"
+runtime: node:24
+egress:
+  - "*.neon.tech"
+```
+
+The orchestrator will pull pre-built images from GHCR instead of building locally. Your egress domains, tools, resources, and labels remain yours — RunSecure never touches them.
+
+If the pull fails (offline, version doesn't exist), the orchestrator falls back to building from local Dockerfiles automatically.
+
+### What belongs to whom
+
+| RunSecure (shipped via release) | Your project (in your repo) |
+|---|---|
+| Base image hardening | `runtime:` choice |
+| Proxy base allowlist | `egress:` domains |
+| Seccomp profile | `tools:` selection |
+| Container runtime flags | `resources:` limits |
+| Tool recipes | `labels:` |
+
+These are merged at runtime — updating RunSecure never overwrites your project config. Updating your project config never changes the hardening.
+
+### How updates flow
+
+The orchestrator automatically pulls the latest project config (`git pull`) before reading `runner.yml`, so egress domain changes take effect on the next job without manual intervention on the runner host.
+
+For RunSecure-side updates (new hardening, proxy changes), bump the `version:` in your project's `runner.yml` to the new release. The next job will pull the new images.
+
+---
+
 ## Troubleshooting
 
 ### npm install hangs or times out
