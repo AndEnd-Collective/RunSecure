@@ -363,12 +363,6 @@ If your CI job fails because a dependency needs to reach a domain that isn't all
 3. Add it to the `egress` list in your `runner.yml`
 4. Restart the orchestrator
 
-You can also run without the proxy temporarily for debugging:
-
-```bash
-./infra/scripts/run.sh --project /path/to/project --repo owner/repo --no-proxy
-```
-
 ---
 
 ## Image Architecture
@@ -473,7 +467,6 @@ Required:
 
 Optional:
   --max-jobs N       Maximum jobs to process before exiting (default: 5)
-  --no-proxy         Skip the egress proxy (less secure, useful for debugging)
   --force            Force rebuild of the project image even if cached
   -h, --help         Show help
 ```

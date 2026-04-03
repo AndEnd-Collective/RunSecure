@@ -88,16 +88,9 @@ docker build -f images/node.Dockerfile \
 ```bash
 cd /path/to/RunSecure
 
-# With egress proxy (recommended)
 ./infra/scripts/run.sh \
   --project /path/to/your-project \
   --repo owner/repo-name
-
-# Without proxy (for initial debugging)
-./infra/scripts/run.sh \
-  --project /path/to/your-project \
-  --repo owner/repo-name \
-  --no-proxy
 ```
 
 The runner will register with GitHub, pick up queued jobs, and process them in ephemeral containers.
