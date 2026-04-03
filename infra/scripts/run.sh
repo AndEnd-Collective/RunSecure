@@ -76,16 +76,26 @@ if [[ -z "$REPO" ]]; then
 fi
 
 RUNNER_YML="${PROJECT_DIR}/.github/runner.yml"
+
+# --- Pull latest project config ----------------------------------------------
+if [[ -d "${PROJECT_DIR}/.git" ]]; then
+    echo "[RunSecure] Pulling latest project config..."
+    git -C "$PROJECT_DIR" pull --ff-only --quiet 2>/dev/null || {
+        echo "[RunSecure] WARNING: git pull failed (offline or uncommitted changes). Using local config."
+    }
+fi
+
 if [[ ! -f "$RUNNER_YML" ]]; then
     echo "[RunSecure] ERROR: No .github/runner.yml found in $PROJECT_DIR"
     exit 1
 fi
 
-# --- Read resource limits from runner.yml ------------------------------------
+# --- Read config from runner.yml ---------------------------------------------
 MEMORY=$(yq '.resources.memory // "8g"' "$RUNNER_YML")
 CPUS=$(yq '.resources.cpus // "4"' "$RUNNER_YML")
 PIDS=$(yq '.resources.pids // "2048"' "$RUNNER_YML")
 LABELS=$(yq '.labels // ["self-hosted", "Linux", "ARM64", "container"] | join(",")' "$RUNNER_YML")
+RUNSECURE_VERSION=$(yq '.version // "local"' "$RUNNER_YML")
 
 # --- Derive a human-readable container name prefix from repo -----------------
 # "owner/my-repo" → "rs-my-repo"
@@ -96,6 +106,7 @@ CONTAINER_PREFIX="rs-${REPO_SHORT}"
 echo "=== RunSecure Orchestrator ==="
 echo "Project: $PROJECT_DIR"
 echo "Repo:    $REPO"
+echo "Version: $RUNSECURE_VERSION"
 echo "Labels:  $LABELS"
 echo ""
 
@@ -108,6 +119,20 @@ fi
 IMAGE_NAME=$("${SCRIPT_DIR}/compose-image.sh" "$PROJECT_DIR" $COMPOSE_ARGS | tail -1)
 echo ""
 echo "[RunSecure] Using image: $IMAGE_NAME"
+
+# --- Resolve proxy image (registry or local) ---------------------------------
+REGISTRY_PREFIX="ghcr.io/andend-collective/runsecure"
+if [[ "$RUNSECURE_VERSION" != "local" && "$RUNSECURE_VERSION" != "null" ]]; then
+    PROXY_IMAGE="${REGISTRY_PREFIX}/proxy:${RUNSECURE_VERSION}"
+    echo "[RunSecure] Using proxy: $PROXY_IMAGE"
+    docker pull "$PROXY_IMAGE" 2>/dev/null || {
+        echo "[RunSecure] WARNING: Could not pull proxy image. Using default."
+        PROXY_IMAGE="ubuntu/squid:latest"
+    }
+else
+    PROXY_IMAGE="ubuntu/squid:latest"
+fi
+export PROXY_IMAGE
 
 # --- Generate squid proxy config ---------------------------------------------
 "${SCRIPT_DIR}/generate-squid-conf.sh" "$PROJECT_DIR"

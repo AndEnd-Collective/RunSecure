@@ -10,8 +10,9 @@
 #     -t runner-python:3.12 .
 # ============================================================================
 
+ARG BASE_IMAGE=runner-base
 ARG BASE_TAG=latest
-FROM runner-base:${BASE_TAG} AS python
+FROM ${BASE_IMAGE}:${BASE_TAG} AS python
 
 ARG PYTHON_VERSION=3.12
 

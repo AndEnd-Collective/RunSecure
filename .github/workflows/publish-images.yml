@@ -1,0 +1,143 @@
+# ============================================================================
+# RunSecure — Build and Publish Images to GHCR
+# ============================================================================
+# Triggers on semver tags (v1.0.0, v1.2.3, etc.)
+# Builds multi-arch images and pushes to ghcr.io/andend-collective/runsecure/
+#
+# Image naming:
+#   ghcr.io/andend-collective/runsecure/base:<version>
+#   ghcr.io/andend-collective/runsecure/node:<version>-<node_version>
+#   ghcr.io/andend-collective/runsecure/python:<version>-<python_version>
+#   ghcr.io/andend-collective/runsecure/rust:<version>-<rust_version>
+#   ghcr.io/andend-collective/runsecure/proxy:<version>
+# ============================================================================
+
+name: Publish Images
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/andend-collective/runsecure
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # --- Build and push base image first (all others depend on it) -------------
+  base:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/base.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/base:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_PREFIX }}/base:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+  # --- Build language images (depend on base) --------------------------------
+  languages:
+    needs: base
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: node
+            file: images/node.Dockerfile
+            build_arg: NODE_VERSION=24
+            lang_version: "24"
+          - name: node
+            file: images/node.Dockerfile
+            build_arg: NODE_VERSION=22
+            lang_version: "22"
+          - name: python
+            file: images/python.Dockerfile
+            build_arg: PYTHON_VERSION=3.12
+            lang_version: "3.12"
+          - name: rust
+            file: images/rust.Dockerfile
+            build_arg: RUST_VERSION=stable
+            lang_version: "stable"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
+            BASE_TAG=${{ needs.base.outputs.version }}
+            ${{ matrix.build_arg }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.base.outputs.version }}-${{ matrix.lang_version }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:latest-${{ matrix.lang_version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
+            org.opencontainers.image.version=${{ needs.base.outputs.version }}
+
+  # --- Build proxy image (independent of base) -------------------------------
+  proxy:
+    runs-on: ubuntu-latest
+    needs: base
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: infra/squid
+          file: infra/squid/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}
+            ${{ env.IMAGE_PREFIX }}/proxy:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
+            org.opencontainers.image.version=${{ needs.base.outputs.version }}

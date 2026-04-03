@@ -10,8 +10,9 @@
 #     -t runner-node:24 .
 # ============================================================================
 
+ARG BASE_IMAGE=runner-base
 ARG BASE_TAG=latest
-FROM runner-base:${BASE_TAG} AS node
+FROM ${BASE_IMAGE}:${BASE_TAG} AS node
 
 ARG NODE_VERSION=24
 
