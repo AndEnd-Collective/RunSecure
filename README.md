@@ -25,11 +25,14 @@ RunSecure eliminates these risks by running each CI job in a **hardened, ephemer
 
 ```bash
 # macOS
-brew install docker yq
+brew install docker colima yq
+
+# Start Colima with enough resources (16GB minimum for large Node projects)
+colima start --cpu 4 --memory 16 --vm-type vz --mount-type virtiofs
 
 # Verify
-docker --version   # Docker 20+
-yq --version       # yq 4+
+docker info | grep "Total Memory"   # Should show 15+ GiB
+yq --version                        # yq 4+
 ```
 
 ### 1. Build Images
@@ -121,10 +124,9 @@ labels: [self-hosted, Linux, ARM64, container]
 
 # OPTIONAL: Container resource limits
 resources:
-  memory: 6g        # default: 4g
-  cpus: 4           # default: 2
-  pids: 1024        # default: 512
-  workspace: 12g    # default: 8g (tmpfs size for _work)
+  memory: 8g        # default: 8g (container RAM limit)
+  cpus: 4           # default: 4
+  pids: 2048        # default: 2048
 
 # OPTIONAL: Per-job image overrides
 # "base" = language image only (smaller, faster)
@@ -144,7 +146,7 @@ runtime: node:24
 
 This gives you a hardened Node.js 24 runner with:
 - Base egress allowlist (GitHub + npm)
-- Default resource limits (4 GB RAM, 2 CPUs, 512 PIDs)
+- Default resource limits (8 GB RAM, 4 CPUs, 2048 PIDs)
 - Default labels `[self-hosted, Linux, ARM64, container]`
 
 ---
@@ -276,14 +278,15 @@ When you run `./infra/scripts/run.sh --project /path/to/project`, the orchestrat
 
 ### What Happens Inside the Container
 
-- **User**: `runner` (UID 1001), not root
-- **Filesystem**: Read-only root, writable tmpfs at `/tmp` and `/home/runner/_work`
+- **User**: `runner` (UID 1001), not root — cannot write to system paths
+- **Filesystem**: System paths protected by Unix permissions (root-owned, `/etc` chmod 555). Runner can write to its home dir (ephemeral — destroyed with container).
 - **Network**: All traffic routes through Squid proxy on internal Docker network
 - **Capabilities**: All dropped (`--cap-drop=ALL`)
 - **Privileges**: Cannot escalate (`--security-opt=no-new-privileges`)
 - **Processes**: Capped by `--pids-limit`
 - **Memory/CPU**: Capped by resource limits
 - **/tmp**: Writable but `noexec` (can't run downloaded binaries)
+- **Ephemeral**: Container destroyed after each job (`--rm`) — no state persists
 
 ---
 
@@ -360,8 +363,8 @@ Tests that each image is correctly hardened and functional:
 **What it tests (36 checks per image):**
 - Non-root user, no su/sudo, no setuid binaries
 - Package manager neutered, no network tools
-- Root account locked, read-only filesystem
-- Writable workspace and /tmp
+- Root account locked, system paths protected by permissions
+- /tmp noexec, writable workspace
 - Core tools (git, curl, jq, gh) functional
 - Language runtime present and working
 - Resource limits (PID, memory, CPU) enforced
@@ -461,7 +464,7 @@ If needed, add the missing domain to `egress:` in your `runner.yml`.
 
 The container runs as UID 1001. Check that your workflow doesn't assume root access. Common fixes:
 - Use `npm ci --cache /home/runner/.npm` instead of default cache paths
-- Write build output to `/home/runner/_work/` (writable tmpfs)
+- Write build output to `/home/runner/_work/` (writable, ephemeral)
 - Don't write to `/usr/local/` or other system paths
 
 ### Container exits immediately

@@ -46,10 +46,9 @@ echo "[RunSecure] Reading config: $RUNNER_YML"
 RUNTIME=$(yq '.runtime' "$RUNNER_YML")
 TOOLS=$(yq '.tools // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
 APT_PACKAGES=$(yq '.apt // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
-MEMORY=$(yq '.resources.memory // "6g"' "$RUNNER_YML")
+MEMORY=$(yq '.resources.memory // "8g"' "$RUNNER_YML")
 CPUS=$(yq '.resources.cpus // "4"' "$RUNNER_YML")
-PIDS=$(yq '.resources.pids // "1024"' "$RUNNER_YML")
-WORKSPACE=$(yq '.resources.workspace // "12g"' "$RUNNER_YML")
+PIDS=$(yq '.resources.pids // "2048"' "$RUNNER_YML")
 
 # Parse runtime into language and version
 LANG=$(echo "$RUNTIME" | cut -d: -f1)
