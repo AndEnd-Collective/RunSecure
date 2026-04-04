@@ -198,9 +198,34 @@ else
 fi
 
 # ============================================================================
-# Phase 4: Edge Cases
+# Phase 4: Unit Tests (host-side script tests — no Docker needed)
 # ============================================================================
-echo -e "\n${BOLD}--- Phase 4: Edge Case Validation ---${NC}\n"
+echo -e "\n${BOLD}--- Phase 4: Unit Tests (Script Validation) ---${NC}\n"
+
+step "Unit: generate-squid-conf.sh" \
+    bash "${TESTS_DIR}/unit/test-generate-squid-conf.sh"
+
+step "Unit: compose-image.sh" \
+    bash "${TESTS_DIR}/unit/test-compose-image.sh"
+
+step "Unit: run.sh argument parsing" \
+    bash "${TESTS_DIR}/unit/test-run-args.sh"
+
+step "Unit: runner.yml schema validation" \
+    bash "${TESTS_DIR}/unit/test-runner-yml-schema.sh"
+
+# ============================================================================
+# Phase 5: Hardening Idempotency
+# ============================================================================
+echo -e "\n${BOLD}--- Phase 5: Hardening Idempotency ---${NC}\n"
+
+step "Hardening: finalize-hardening.sh idempotency" \
+    bash "${TESTS_DIR}/validation/test-hardening-idempotency.sh"
+
+# ============================================================================
+# Phase 6: Edge Cases
+# ============================================================================
+echo -e "\n${BOLD}--- Phase 6: Edge Case Validation ---${NC}\n"
 
 # Verify container auto-destruction
 step "Container cleanup (--rm)" bash -c "

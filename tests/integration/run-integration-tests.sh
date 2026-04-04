@@ -8,8 +8,10 @@
 #   3. Runs egress proxy tests (allowed/blocked domains, URL filtering, proxy verification)
 #   4. Runs Node.js CI workflow simulation
 #   5. Runs Python CI workflow simulation
-#   6. Runs attack simulation tests
-#   7. Tears down everything, reports results
+#   6. Runs Rust CI workflow simulation
+#   7. Runs attack simulation tests
+#   8. Runs entrypoint tests
+#   9. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -17,11 +19,13 @@
 #   ./tests/integration/run-integration-tests.sh --test egress    # single suite
 #   ./tests/integration/run-integration-tests.sh --test node
 #   ./tests/integration/run-integration-tests.sh --test python
+#   ./tests/integration/run-integration-tests.sh --test rust
 #   ./tests/integration/run-integration-tests.sh --test attack
+#   ./tests/integration/run-integration-tests.sh --test entrypoint
 #
 # Prerequisites:
 #   - Docker running
-#   - runner-base, runner-node:24, runner-python:3.12 images built
+#   - runner-base, runner-node:24, runner-python:3.12, runner-rust:stable images built
 # ============================================================================
 
 set -uo pipefail
@@ -47,7 +51,7 @@ for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=true ;;
         --test)       ;; # handled below
-        egress|node|python|attack) SINGLE_TEST="$arg" ;;
+        egress|node|python|rust|attack|entrypoint) SINGLE_TEST="$arg" ;;
     esac
 done
 
@@ -128,6 +132,16 @@ if [[ "$SKIP_BUILD" == false ]]; then
         skip_step "Build runner-python:3.12" "cached"
     fi
 
+    # Build rust
+    if ! docker image inspect runner-rust:stable &>/dev/null; then
+        step "Build runner-rust:stable" \
+            docker build -f "${RUNSECURE_ROOT}/images/rust.Dockerfile" \
+            --build-arg BASE_TAG=latest --build-arg RUST_VERSION=stable \
+            -t runner-rust:stable "${RUNSECURE_ROOT}"
+    else
+        skip_step "Build runner-rust:stable" "cached"
+    fi
+
     # Build squid proxy
     step "Build squid proxy" \
         docker build -f "${RUNSECURE_ROOT}/infra/squid/Dockerfile" \
@@ -192,14 +206,36 @@ else
 fi
 
 # ============================================================================
-# Phase 4: Attack Simulation
+# Phase 4: Rust CI Workflow
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "rust" ]]; then
+    echo -e "\n${BOLD}--- Phase 4: Rust CI Workflow ---${NC}"
+    step "Rust CI: cargo build → cargo test → crate fetch" \
+        run_compose_test "test-ci-workflow-rust.sh" "runner-rust:stable" "rust"
+else
+    skip_step "Rust CI workflow" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 5: Attack Simulation
 # ============================================================================
 if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "attack" ]]; then
-    echo -e "\n${BOLD}--- Phase 4: Attack Simulation ---${NC}"
+    echo -e "\n${BOLD}--- Phase 5: Attack Simulation ---${NC}"
     step "Attack sim: escape, escalation, exfil, persistence" \
         run_compose_test "test-attack-simulation.sh" "runner-node:24" "attack"
 else
     skip_step "Attack simulation" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 6: Entrypoint Tests
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "entrypoint" ]]; then
+    echo -e "\n${BOLD}--- Phase 6: Entrypoint Tests ---${NC}"
+    step "Entrypoint: JIT validation, proxy env, credential sanitization" \
+        run_compose_test "test-entrypoint.sh" "runner-node:24" "entrypoint"
+else
+    skip_step "Entrypoint tests" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================
