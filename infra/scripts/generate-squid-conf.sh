@@ -45,6 +45,12 @@ PROJECT_ACL=""
 PROJECT_ACCESS=""
 
 while IFS= read -r domain; do
+    # Sanitize: strip whitespace and reject anything that isn't a valid domain
+    domain=$(echo "$domain" | tr -d '[:space:]')
+    if [[ ! "$domain" =~ ^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+        echo "[RunSecure] WARNING: Skipping invalid egress domain: $domain"
+        continue
+    fi
     echo "  + $domain"
     PROJECT_ACL="${PROJECT_ACL}acl project_egress dstdomain ${domain}\n"
 done <<< "$EGRESS_DOMAINS"

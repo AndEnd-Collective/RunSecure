@@ -174,6 +174,11 @@ fi
 # Add tool recipes
 if [[ -n "$TOOLS" ]]; then
     while IFS= read -r tool; do
+        # Validate tool name: only alphanumeric, hyphens, underscores allowed
+        if [[ ! "$tool" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo "[RunSecure] ERROR: Invalid tool name '$tool' — only alphanumeric, hyphens, underscores allowed."
+            exit 1
+        fi
         RECIPE="${TOOLS_DIR}/${tool}.sh"
         if [[ ! -f "$RECIPE" ]]; then
             echo "[RunSecure] WARNING: No recipe for tool '$tool' at $RECIPE — skipping."
