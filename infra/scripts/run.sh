@@ -125,12 +125,19 @@ REGISTRY_PREFIX="ghcr.io/andend-collective/runsecure"
 if [[ "$RUNSECURE_VERSION" != "local" && "$RUNSECURE_VERSION" != "null" ]]; then
     PROXY_IMAGE="${REGISTRY_PREFIX}/proxy:${RUNSECURE_VERSION}"
     echo "[RunSecure] Using proxy: $PROXY_IMAGE"
-    docker pull "$PROXY_IMAGE" 2>/dev/null || {
-        echo "[RunSecure] WARNING: Could not pull proxy image. Using default."
-        PROXY_IMAGE="ubuntu/squid:latest"
-    }
+    if ! docker pull "$PROXY_IMAGE" 2>/dev/null; then
+        echo "[RunSecure] ERROR: Could not pull proxy image: $PROXY_IMAGE"
+        echo "[RunSecure] Verify the version exists at $REGISTRY_PREFIX or use version: local"
+        exit 1
+    fi
 else
-    PROXY_IMAGE="ubuntu/squid:latest"
+    # Local mode: build proxy from source if not cached
+    PROXY_IMAGE="runsecure-proxy:latest"
+    if ! docker image inspect "$PROXY_IMAGE" &>/dev/null; then
+        echo "[RunSecure] Building proxy image..."
+        docker build -f "${RUNSECURE_ROOT}/infra/squid/Dockerfile" \
+            -t "$PROXY_IMAGE" "${RUNSECURE_ROOT}/infra/squid"
+    fi
 fi
 export PROXY_IMAGE
 
