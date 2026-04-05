@@ -19,7 +19,7 @@ services:
           - proxy
       proxy-external: {}
     healthcheck:
-      test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf 2>/dev/null || exit 0"]
+      test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf || exit 1"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -40,6 +40,7 @@ services:
       - no_proxy=localhost,127.0.0.1,proxy
     volumes:
       - ../../tests:/mnt/tests:ro
+      - ../../infra:/mnt/infra:ro
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
     # --- Hardening (matches production minus read-only) ---
@@ -49,7 +50,7 @@ services:
     cap_drop:
       - ALL
     tmpfs:
-      - /tmp:rw,nosuid,size=2g,uid=1001,gid=0
+      - /tmp:rw,noexec,nosuid,size=2g,uid=1001,gid=0
     mem_limit: 4g
     cpus: 2
     pids_limit: 512
