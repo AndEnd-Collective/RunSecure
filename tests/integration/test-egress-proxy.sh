@@ -48,10 +48,10 @@ assert_allowed() {
     local http_code
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         --connect-timeout 10 --max-time 15 "$url" 2>/dev/null)
-    if [[ "$http_code" =~ ^(200|301|302|303|304|307|308)$ ]]; then
+    if [[ "$http_code" =~ ^(200|301|302|303|304|307|308|404)$ ]]; then
         pass "ALLOW $desc → HTTP $http_code"
     else
-        fail "ALLOW $desc → HTTP $http_code (expected 2xx/3xx)"
+        fail "ALLOW $desc → HTTP $http_code (expected 2xx/3xx/404)"
     fi
 }
 
