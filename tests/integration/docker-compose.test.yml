@@ -25,6 +25,15 @@ services:
       timeout: 2s
       retries: 10
       start_period: 5s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          pids: 32
 
   runner:
     image: ${RUNNER_IMAGE:-runner-node:24}
