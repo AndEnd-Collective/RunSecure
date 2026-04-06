@@ -21,13 +21,15 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim AS base
+FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a AS base
 
 # ---- Build arguments --------------------------------------------------------
 ARG RUNNER_VERSION=2.333.1
 ARG RUNNER_SHA256_ARM64=69ac7e5692f877189e7dddf4a1bb16cbbd6425568cd69a0359895fac48b9ad3b
 ARG RUNNER_SHA256_AMD64=18f8f68ed1892854ff2ab1bab4fcaa2f5abeedc98093b6cb13638991725cab74
 ARG GH_CLI_VERSION=2.74.1
+ARG GH_CLI_SHA256_AMD64=c3d909c338589589b32ee2357a76cea3b2c7bdfe1754ab8a62316fa846692935
+ARG GH_CLI_SHA256_ARM64=33fa56cf99c94327fac125a8c503e65b0c1ce330e3f9868c316172eb9c5b364a
 
 ARG TARGETARCH
 
@@ -54,10 +56,18 @@ RUN apt-get update \
         liblttng-ust1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- Install GitHub CLI (gh) ------------------------------------------------
+# ---- Install GitHub CLI (gh) — SHA256-verified -----------------------------
 RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then \
+         GH_CLI_SHA256="${GH_CLI_SHA256_ARM64}"; \
+       elif [ "$ARCH" = "amd64" ]; then \
+         GH_CLI_SHA256="${GH_CLI_SHA256_AMD64}"; \
+       else \
+         echo "Unsupported architecture: $ARCH" && exit 1; \
+       fi \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${ARCH}.deb" \
         -o /tmp/gh.deb \
+    && echo "${GH_CLI_SHA256}  /tmp/gh.deb" | sha256sum -c - \
     && dpkg -i /tmp/gh.deb \
     && rm /tmp/gh.deb
 
