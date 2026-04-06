@@ -11,7 +11,7 @@
 services:
   # --- Squid egress proxy ---------------------------------------------------
   proxy:
-    image: ${PROXY_IMAGE:-ubuntu/squid:latest}
+    image: ${PROXY_IMAGE:-ghcr.io/andend-collective/runsecure/proxy:latest}
     container_name: ${RUNNER_NAME:-runsecure}-proxy
     init: true
     restart: "no"
@@ -22,6 +22,7 @@ services:
       runner-net:
         aliases:
           - proxy
+      proxy-external: {}
     ports: []
     healthcheck:
       test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf || exit 1"]
@@ -29,6 +30,17 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+
+    # --- Hardening: proxy container ---
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          pids: 64
 
   # --- Ephemeral runner ------------------------------------------------------
   runner:
@@ -93,12 +105,14 @@ services:
     dns: []
 
 # --- Isolated network --------------------------------------------------------
+# runner-net is internal: true — the runner has NO direct internet route.
+# Only the proxy has dual-network membership (runner-net + proxy-external),
+# making Squid a mandatory network gateway, not an optional application proxy.
 networks:
   runner-net:
+    internal: true
+  proxy-external:
     driver: bridge
-    internal: false
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: "true"
 
 # --- Named volumes -----------------------------------------------------------
 volumes:

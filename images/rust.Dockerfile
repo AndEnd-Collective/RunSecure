@@ -35,9 +35,23 @@ RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 # Switch to runner user for rustup (installs to $HOME)
 USER runner
 
-# Install rustup + toolchain as runner user (no root needed)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain "${RUST_VERSION}" --profile minimal \
+# Install rustup + toolchain as runner user (no pipe-to-sh).
+# Downloads the rustup-init binary directly and verifies its SHA256 checksum
+# against the upstream-published checksum file.
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then RUSTUP_ARCH="aarch64-unknown-linux-gnu"; \
+       elif [ "$ARCH" = "amd64" ]; then RUSTUP_ARCH="x86_64-unknown-linux-gnu"; \
+       else echo "Unsupported architecture: $ARCH" && exit 1; fi \
+    && curl --proto '=https' --tlsv1.2 -sSf \
+         "https://static.rust-lang.org/rustup/dist/${RUSTUP_ARCH}/rustup-init" \
+         -o /tmp/rustup-init \
+    && curl --proto '=https' --tlsv1.2 -sSf \
+         "https://static.rust-lang.org/rustup/dist/${RUSTUP_ARCH}/rustup-init.sha256" \
+         -o /tmp/rustup-init.sha256 \
+    && cd /tmp && sha256sum -c rustup-init.sha256 \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --default-toolchain "${RUST_VERSION}" --profile minimal \
+    && rm /tmp/rustup-init /tmp/rustup-init.sha256 \
     && . "$HOME/.cargo/env" \
     && rustc --version \
     && cargo --version
