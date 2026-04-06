@@ -25,6 +25,15 @@ services:
       timeout: 2s
       retries: 10
       start_period: 5s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          pids: 32
 
   runner:
     image: ${RUNNER_IMAGE:-runner-node:24}
@@ -44,10 +53,11 @@ services:
       - ../../infra:/mnt/infra:ro
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
-    # --- Hardening (matches production minus read-only) ---
+    # --- Hardening (matches production) ---
     user: "1001:0"
     security_opt:
       - no-new-privileges:true
+      - seccomp:../../infra/seccomp/node-runner.json
     cap_drop:
       - ALL
     tmpfs:
