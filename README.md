@@ -666,6 +666,23 @@ colima stop
 colima start --cpu 4 --memory 20 --vm-type vz --mount-type virtiofs
 ```
 
+### pip install fails with "externally-managed-environment"
+
+RunSecure's Python image uses Debian's system Python, which enforces [PEP 668](https://peps.python.org/pep-0668/). Use a virtual environment in your workflow steps:
+
+```yaml
+- name: Install dependencies
+  run: |
+    python3 -m venv .venv
+    . .venv/bin/activate
+    pip install -r requirements.txt
+
+- name: Run tests
+  run: |
+    . .venv/bin/activate
+    pytest
+```
+
 ### Images are too large
 
 Use per-job image overrides so lightweight jobs (lint, typecheck) use the smaller base image:

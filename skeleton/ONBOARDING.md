@@ -153,6 +153,25 @@ jobs:
   security: full   # full image with Semgrep
 ```
 
+### My Python CI uses `pip install`
+
+RunSecure uses Debian's system Python, which enforces [PEP 668](https://peps.python.org/pep-0668/) — `pip install` at the system level is blocked. Use a virtual environment:
+
+```yaml
+- name: Install Python dependencies
+  run: |
+    python3 -m venv .venv
+    . .venv/bin/activate
+    pip install -r requirements.txt
+
+- name: Run tests
+  run: |
+    . .venv/bin/activate
+    pytest
+```
+
+Or add `--break-system-packages` to pip commands if you prefer a global install (not recommended for reproducibility).
+
 ### My workflow uses `setup-node` / `setup-python`
 
 You can remove it — the runtime is already in the image. If you keep it, it will find the pre-installed version and proceed normally. No harm either way.

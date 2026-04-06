@@ -1,0 +1,142 @@
+# ============================================================================
+# RunSecure — Release Smoke Test
+# ============================================================================
+# Runs before image publishing to verify that containers build, start,
+# pass healthchecks, and can execute basic CI operations through the proxy.
+#
+# Triggers on semver tags (same as publish) and on PRs that touch
+# Dockerfiles, compose configs, or proxy configs.
+# ============================================================================
+
+name: Smoke Test
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  pull_request:
+    paths:
+      - "images/**"
+      - "infra/**"
+      - "tests/**"
+      - ".github/workflows/smoke-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Build base image
+        run: docker build -f images/base.Dockerfile -t runner-base:latest .
+
+      - name: Build Node image
+        run: |
+          docker build -f images/node.Dockerfile \
+            --build-arg NODE_VERSION=24 \
+            -t runner-node:24 .
+
+      - name: Build Python image
+        run: |
+          docker build -f images/python.Dockerfile \
+            --build-arg PYTHON_VERSION=3.12 \
+            -t runner-python:3.12 .
+
+      - name: Build proxy image
+        run: docker build -f infra/squid/Dockerfile -t runsecure-proxy:latest infra/squid/
+
+      - name: Verify docker compose config is valid
+        run: docker compose -f infra/docker-compose.yml config --quiet
+        env:
+          RUNNER_JIT_CONFIG: dummy
+          RUNNER_IMAGE: runner-node:24
+          PROXY_IMAGE: runsecure-proxy:latest
+
+      - name: Run security validation (Node)
+        run: |
+          docker run --rm \
+            --user 1001:0 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            runner-node:24 \
+            bash -c '
+              echo "=== Security Checks ==="
+              echo -n "Non-root user: "; [ "$(id -u)" = "1001" ] && echo PASS || echo FAIL
+              echo -n "No sudo: "; ! command -v sudo &>/dev/null && echo PASS || echo FAIL
+              echo -n "No su: "; ! command -v su &>/dev/null && echo PASS || echo FAIL
+              echo -n "Node available: "; node --version && echo PASS || echo FAIL
+              echo -n "npm available: "; npm --version && echo PASS || echo FAIL
+              echo "=== Done ==="
+            '
+
+      - name: Run security validation (Python)
+        run: |
+          docker run --rm \
+            --user 1001:0 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            runner-python:3.12 \
+            bash -c '
+              echo "=== Security Checks ==="
+              echo -n "Non-root user: "; [ "$(id -u)" = "1001" ] && echo PASS || echo FAIL
+              echo -n "Python available: "; python3 --version && echo PASS || echo FAIL
+              echo -n "pip available: "; pip3 --version && echo PASS || echo FAIL
+              echo -n "venv works: "; python3 -m venv /tmp/test-venv && echo PASS || echo FAIL
+              echo "=== Done ==="
+            '
+
+      - name: Smoke test proxy startup and healthcheck
+        run: |
+          # Start proxy with init (matching production compose)
+          docker run --rm -d --init --name smoke-proxy runsecure-proxy:latest
+
+          # Wait for squid to initialize
+          echo "Waiting for squid to start..."
+          for i in $(seq 1 20); do
+            if docker exec smoke-proxy squid -k check -f /etc/squid/squid.conf 2>/dev/null; then
+              echo "PASS: Proxy healthcheck passed after ${i}s"
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "FAIL: Proxy healthcheck did not pass within 20s"
+              docker logs smoke-proxy
+              exit 1
+            fi
+            sleep 1
+          done
+
+          docker stop smoke-proxy
+
+      - name: Integration test — egress proxy filtering
+        run: |
+          RUNNER_IMAGE=runner-node:24 \
+            docker compose -f tests/integration/docker-compose.test.yml \
+            up --abort-on-container-exit --exit-code-from runner
+        env:
+          TEST_SCRIPT: test-egress-proxy.sh
+
+      - name: Teardown egress test
+        if: always()
+        run: docker compose -f tests/integration/docker-compose.test.yml down -v 2>/dev/null || true
+
+      - name: Integration test — Python CI through proxy
+        run: |
+          RUNNER_IMAGE=runner-python:3.12 \
+            docker compose -f tests/integration/docker-compose.test.yml \
+            up --abort-on-container-exit --exit-code-from runner
+        env:
+          TEST_SCRIPT: test-ci-workflow-python.sh
+
+      - name: Teardown Python test
+        if: always()
+        run: docker compose -f tests/integration/docker-compose.test.yml down -v 2>/dev/null || true
+
+      - name: Final cleanup
+        if: always()
+        run: |
+          docker compose -f tests/integration/docker-compose.test.yml down -v 2>/dev/null || true
+          docker rm -f smoke-proxy 2>/dev/null || true
