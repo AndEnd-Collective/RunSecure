@@ -53,10 +53,11 @@ services:
       - ../../infra:/mnt/infra:ro
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
-    # --- Hardening (matches production minus read-only) ---
+    # --- Hardening (matches production) ---
     user: "1001:0"
     security_opt:
       - no-new-privileges:true
+      - seccomp:../../infra/seccomp/node-runner.json
     cap_drop:
       - ALL
     tmpfs:
