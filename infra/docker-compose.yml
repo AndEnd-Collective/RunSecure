@@ -23,10 +23,11 @@ services:
           - proxy
     ports: []
     healthcheck:
-      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 3
+      start_period: 10s
 
   # --- Ephemeral runner ------------------------------------------------------
   runner:
