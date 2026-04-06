@@ -75,9 +75,9 @@ services:
         limits:
           memory: ${RUNNER_MEMORY:-8g}
           cpus: "${RUNNER_CPUS:-4}"
+          pids: ${RUNNER_PIDS:-2048}
         reservations:
           memory: 1g
-    pids_limit: ${RUNNER_PIDS:-2048}
     ulimits:
       nofile:
         soft: 4096
