@@ -13,6 +13,7 @@ services:
   proxy:
     image: ${PROXY_IMAGE:-ubuntu/squid:latest}
     container_name: ${RUNNER_NAME:-runsecure}-proxy
+    init: true
     restart: "no"
     volumes:
       - ./squid/runtime.conf:/etc/squid/squid.conf:ro
