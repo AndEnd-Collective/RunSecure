@@ -71,7 +71,26 @@ jobs:
       - name: Build
         run: npm run build
 
-  # E2E tests (only if you have Playwright/Cypress in your tools list)
+  # --- Python example (uncomment if using runtime: python:3.12) ---
+  # python-test:
+  #   name: Python Tests
+  #   runs-on: [self-hosted, Linux, ARM64, container]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     # IMPORTANT: Debian enforces PEP 668 — use a venv for pip installs.
+  #     - name: Install dependencies
+  #       run: |
+  #         python3 -m venv .venv
+  #         . .venv/bin/activate
+  #         pip install -r requirements.txt
+  #
+  #     - name: Run tests
+  #       run: |
+  #         . .venv/bin/activate
+  #         pytest
+
+  # --- E2E tests (only if you have Playwright/Cypress in your tools list) ---
   # e2e:
   #   name: E2E Tests
   #   runs-on: [self-hosted, Linux, ARM64, container]
