@@ -11,6 +11,7 @@ services:
       context: ../../infra/squid
       dockerfile: Dockerfile
     container_name: runsecure-test-proxy
+    init: true
     volumes:
       - ${SQUID_CONF:-../../infra/squid/base.conf}:/etc/squid/squid.conf:ro
     networks:
