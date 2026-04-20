@@ -57,13 +57,32 @@ done <<< "$EGRESS_DOMAINS"
 
 PROJECT_ACCESS="http_access allow CONNECT SSL_ports project_egress\nhttp_access allow project_egress"
 
-# Insert project domains into the config
-sed \
-    -e "/# RUNSECURE_PROJECT_EGRESS_START/,/# RUNSECURE_PROJECT_EGRESS_END/c\\
-# RUNSECURE_PROJECT_EGRESS_START\\
-$(echo -e "$PROJECT_ACL")# RUNSECURE_PROJECT_EGRESS_END" \
-    -e "/# --- DENY everything else ---/i\\
-$(echo -e "$PROJECT_ACCESS")" \
-    "$BASE_CONF" > "$RUNTIME_CONF"
+# Insert project domains into the config.
+# Implementation note: previously this used GNU-sed `c\` and `i\` commands
+# which fail on BSD sed (default on macOS). awk is portable across both
+# sed flavours, and ENVIRON[] (instead of -v) accepts multi-line values.
+RS_PROJECT_ACL=$(printf '%b' "$PROJECT_ACL") \
+RS_PROJECT_ACCESS=$(printf '%b' "$PROJECT_ACCESS") \
+awk '
+    in_egress_block {
+        if (/# RUNSECURE_PROJECT_EGRESS_END/) {
+            # ENVIRON value loses its trailing newline to command substitution,
+            # so always emit one before the END marker.
+            print "# RUNSECURE_PROJECT_EGRESS_START"
+            print ENVIRON["RS_PROJECT_ACL"]
+            print "# RUNSECURE_PROJECT_EGRESS_END"
+            in_egress_block = 0
+        }
+        next
+    }
+    /# RUNSECURE_PROJECT_EGRESS_START/ {
+        in_egress_block = 1
+        next
+    }
+    /# --- DENY everything else ---/ {
+        printf "%s\n", ENVIRON["RS_PROJECT_ACCESS"]
+    }
+    { print }
+' "$BASE_CONF" > "$RUNTIME_CONF"
 
 echo "[RunSecure] Generated: $RUNTIME_CONF"
