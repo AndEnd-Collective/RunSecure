@@ -77,6 +77,11 @@ services:
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
     # --- Hardening (matches production) ---
+    # M11/M12: use the SAME deploy.resources + ulimits keys as the prod
+    # compose. Previously this used the legacy `mem_limit/cpus/pids_limit`
+    # top-level keys, which docker-compose v2 still honours but which
+    # don't exercise the same code path as the deploy.resources.limits
+    # block in prod — divergence would only surface at deployment time.
     user: "1001:0"
     security_opt:
       - no-new-privileges:true
@@ -85,9 +90,21 @@ services:
       - ALL
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g,uid=1001,gid=0
-    mem_limit: 4g
-    cpus: 2
-    pids_limit: 512
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
+          pids: 512
+        reservations:
+          memory: 512m
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+      nproc:
+        soft: 2048
+        hard: 2048
     networks:
       - test-net
 

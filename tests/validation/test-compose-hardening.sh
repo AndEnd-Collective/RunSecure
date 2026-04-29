@@ -88,6 +88,37 @@ assert_in_service "$PROD_COMPOSE" "runner"  '^[[:space:]]*init:[[:space:]]+true'
 assert_in_service "$PROD_COMPOSE" "proxy"   '^[[:space:]]*init:[[:space:]]+true' "H3: init: true on proxy (prod, was already set)"
 assert_in_service "$TEST_COMPOSE" "runner"  '^[[:space:]]*init:[[:space:]]+true' "H3: init: true on runner (test)"
 
+# --- M11: test compose uses deploy.resources, not legacy mem_limit/cpus -----
+# The legacy keys (top-level mem_limit/cpus/pids_limit) are still honoured
+# by docker-compose v2 but exercise a different code path than the
+# deploy.resources.limits block in prod. Test must mirror prod's syntax.
+TEST_RUNNER_RANGE=$(_service_range "$TEST_COMPOSE" runner)
+if [[ -n "$TEST_RUNNER_RANGE" ]]; then
+    start="${TEST_RUNNER_RANGE%:*}"; end="${TEST_RUNNER_RANGE#*:}"
+    # Strip comments before checking for legacy YAML keys.
+    # Legacy keys live at exactly 4-space indent (top level of the
+    # service block); the modern equivalents are nested deeper under
+    # deploy.resources.limits with 10-space indent — different regex.
+    if sed -n "${start},${end}p" "$TEST_COMPOSE" | grep -v '^\s*#' | grep -qE '^    (mem_limit|cpus|pids_limit):'; then
+        fail "M11" "test runner still uses legacy mem_limit/cpus/pids_limit instead of deploy.resources"
+    else
+        pass "M11: test runner uses deploy.resources (no legacy mem_limit/cpus/pids_limit)"
+    fi
+fi
+assert_in_service "$TEST_COMPOSE" "runner"  '^[[:space:]]*deploy:'        "M11: test runner has deploy block"
+assert_in_service "$TEST_COMPOSE" "runner"  '^[[:space:]]*resources:'     "M11: test runner has deploy.resources"
+
+# --- M12: test runner has ulimits matching prod ------------------------------
+assert_in_service "$TEST_COMPOSE" "runner" '^[[:space:]]*ulimits:'        "M12: test runner has ulimits"
+assert_in_service "$TEST_COMPOSE" "runner" '^[[:space:]]*nofile:'         "M12: test runner has nofile ulimit"
+assert_in_service "$TEST_COMPOSE" "runner" '^[[:space:]]*nproc:'          "M12: test runner has nproc ulimit"
+
+# --- M13: prod runner has both uppercase AND lowercase proxy env vars -------
+assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*HTTP_PROXY=' "M13: prod runner has HTTP_PROXY (uppercase)"
+assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*http_proxy=' "M13: prod runner has http_proxy (lowercase)"
+assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*HTTPS_PROXY=' "M13: prod runner has HTTPS_PROXY (uppercase)"
+assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*https_proxy=' "M13: prod runner has https_proxy (lowercase)"
+
 # --- Print results -----------------------------------------------------------
 echo ""
 echo "=== Compose Hardening Assertions ==="

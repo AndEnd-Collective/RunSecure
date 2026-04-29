@@ -69,11 +69,20 @@ services:
         condition: service_healthy
 
     # --- JIT config and proxy routing ---
+    # M13: emit BOTH upper- and lower-case proxy env vars. Most CLI
+    # tools honour both forms, but a stubborn minority (curl when used
+    # without --proxy, some Python libs that consult lowercase only,
+    # apt under specific configurations) only read one. Setting both
+    # avoids a subset of jobs silently bypassing the proxy because of
+    # case-sensitivity quirks.
     environment:
       - RUNNER_JIT_CONFIG=${RUNNER_JIT_CONFIG}
       - HTTP_PROXY=http://proxy:3128
       - HTTPS_PROXY=http://proxy:3128
       - NO_PROXY=localhost,127.0.0.1
+      - http_proxy=http://proxy:3128
+      - https_proxy=http://proxy:3128
+      - no_proxy=localhost,127.0.0.1
       - RUNNER_NAME=${RUNNER_NAME:-runsecure-ephemeral}
       - SEMGREP_SETTINGS_FILE=/home/runner/.semgrep/settings.yml
       - SEMGREP_VERSION_CACHE_PATH=/home/runner/.semgrep/versions
