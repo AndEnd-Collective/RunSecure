@@ -45,6 +45,9 @@ services:
       - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
+      # M5: same seccomp profile as the runner — tests that the profile
+      # actually permits squid/dnsmasq/haproxy to start.
+      - seccomp:../../infra/seccomp/node-runner.json
     deploy:
       resources:
         limits:

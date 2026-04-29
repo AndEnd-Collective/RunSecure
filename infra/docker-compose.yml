@@ -41,6 +41,10 @@ services:
       - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
+      # M5: apply the same syscall allowlist as the runner. The profile
+      # is permissive enough to support squid/dnsmasq/haproxy and tightens
+      # the proxy's syscall surface from the unrestricted Docker default.
+      - seccomp:../infra/seccomp/node-runner.json
     deploy:
       resources:
         limits:
