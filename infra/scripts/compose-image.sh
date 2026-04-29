@@ -73,6 +73,22 @@ TOOLS=$(_yq '.tools // [] | .[]' "$RUNNER_YML")
 APT_PACKAGES=$(_yq '.apt // [] | .[]' "$RUNNER_YML")
 RUNSECURE_VERSION=$(_yq '.version // "local"' "$RUNNER_YML")
 
+# H2: hardening.remove + hardening.stub — comma-separated lists baked
+# into the image as env vars consumed by finalize-hardening.sh. The
+# schema validator already rejected anything that isn't a clean tool
+# name, but we redo the regex check here as a sink-side guard.
+HARDENING_REMOVE=$(_yq '(.hardening.remove // []) | join(",")' "$RUNNER_YML")
+HARDENING_STUB=$(_yq '(.hardening.stub // []) | join(",")' "$RUNNER_YML")
+[[ "$HARDENING_REMOVE" == "null" ]] && HARDENING_REMOVE=""
+[[ "$HARDENING_STUB"   == "null" ]] && HARDENING_STUB=""
+for _name in ${HARDENING_REMOVE//,/ } ${HARDENING_STUB//,/ }; do
+    [[ -z "$_name" ]] && continue
+    if [[ ! "$_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "[RunSecure] ERROR: invalid hardening tool name '$_name' rejected by H2 sink-side guard" >&2
+        exit 1
+    fi
+done
+
 # Parse runtime into language and version
 LANG=$(echo "$RUNTIME" | cut -d: -f1)
 LANG_VERSION=$(echo "$RUNTIME" | cut -d: -f2)
@@ -231,12 +247,22 @@ if [[ -n "$TOOLS" ]]; then
     done <<< "$TOOLS"
 fi
 
-# Finalize hardening (remove apt, re-strip setuid, lock /etc)
+# Finalize hardening (remove apt, re-strip setuid, lock /etc, H2 prune)
 cat >> "$DOCKERFILE" <<FOOTER
 
 # --- Finalize hardening (remove apt, strip setuid, lock /etc) ---
+# H2: pass the user's hardening.remove / hardening.stub lists as build
+# args. finalize-hardening.sh reads these from the environment.
+ARG RUNSECURE_HARDENING_REMOVE=""
+ARG RUNSECURE_HARDENING_STUB=""
+ENV RUNSECURE_HARDENING_REMOVE=\${RUNSECURE_HARDENING_REMOVE}
+ENV RUNSECURE_HARDENING_STUB=\${RUNSECURE_HARDENING_STUB}
 COPY infra/scripts/finalize-hardening.sh /tmp/finalize-hardening.sh
 RUN chmod +x /tmp/finalize-hardening.sh && /tmp/finalize-hardening.sh && rm /tmp/finalize-hardening.sh
+# Don't carry the build-time vars into the runtime image — they're
+# consumed during finalize-hardening only.
+ENV RUNSECURE_HARDENING_REMOVE=""
+ENV RUNSECURE_HARDENING_STUB=""
 
 USER runner
 WORKDIR /home/runner
@@ -249,6 +275,8 @@ echo ""
 # Build the project image (using RunSecure root as context for tool scripts)
 docker build \
     -f "$DOCKERFILE" \
+    --build-arg "RUNSECURE_HARDENING_REMOVE=${HARDENING_REMOVE}" \
+    --build-arg "RUNSECURE_HARDENING_STUB=${HARDENING_STUB}" \
     -t "$PROJECT_IMAGE" \
     "${RUNSECURE_ROOT}"
 

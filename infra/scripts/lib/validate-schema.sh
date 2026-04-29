@@ -132,6 +132,53 @@ while IFS= read -r entry; do
 done < <(_yq '.tcp_egress // [] | .[]' "$RUNNER_YML")
 
 # ============================================================================
+# 4a. hardening: optional block — list of tools to remove or stub (H2)
+# ============================================================================
+# Schema:
+#   hardening:
+#     remove: [curl, git, jq, unzip]    # rm the binary outright
+#     stub:   [curl, jq]                # replace with friendly stub
+#
+# An entry must not appear in both lists. Names use the same character
+# class as tools (alphanumeric, hyphen, underscore) since they map onto
+# binary names on PATH and we don't want shell metachars there.
+hardening_exists=$(_yq 'has("hardening")' "$RUNNER_YML")
+if [[ "$hardening_exists" == "true" ]]; then
+    # Reject unknown sub-keys
+    while IFS= read -r hk; do
+        [[ -z "$hk" || "$hk" == "null" ]] && continue
+        case "$hk" in
+            remove|stub) ;;
+            *) _err "hardening.${hk}: unknown sub-key — only 'remove' and 'stub' are recognized" ;;
+        esac
+    done < <(_yq '.hardening | keys | .[]' "$RUNNER_YML")
+
+    _seen_remove=$(mktemp /tmp/runsecure-hard-rm-XXXXXX)
+    _seen_stub=$(mktemp /tmp/runsecure-hard-stub-XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '${_seen_ports_file}' '${_seen_remove}' '${_seen_stub}'" EXIT
+
+    while IFS= read -r tool; do
+        [[ -z "$tool" || "$tool" == "null" ]] && continue
+        if ! echo "$tool" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            _err "hardening.remove: invalid tool name '$tool' — only alphanumeric, hyphen, underscore allowed"
+        fi
+        echo "$tool" >> "$_seen_remove"
+    done < <(_yq '.hardening.remove // [] | .[]' "$RUNNER_YML")
+
+    while IFS= read -r tool; do
+        [[ -z "$tool" || "$tool" == "null" ]] && continue
+        if ! echo "$tool" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            _err "hardening.stub: invalid tool name '$tool' — only alphanumeric, hyphen, underscore allowed"
+        fi
+        if grep -qxF "$tool" "$_seen_remove" 2>/dev/null; then
+            _err "hardening: '$tool' appears in both 'remove' and 'stub' — pick one"
+        fi
+        echo "$tool" >> "$_seen_stub"
+    done < <(_yq '.hardening.stub // [] | .[]' "$RUNNER_YML")
+fi
+
+# ============================================================================
 # 4b. apt: package name validation (H1)
 # ============================================================================
 # Apt package names per Debian Policy §5.6.7: lower-case letters, digits,
