@@ -1,0 +1,82 @@
+# ============================================================================
+# RunSecure — Trivy Vulnerability Scan (M7)
+# ============================================================================
+# Builds the language images and scans them for OS-level CVEs and known
+# misconfigurations. Runs on every PR that touches images/ or tools/, and
+# on a weekly schedule so newly disclosed vulnerabilities show up even
+# when no code changes.
+#
+# Failure threshold: HIGH+CRITICAL with a fix available. Issues without
+# upstream fixes are reported via the SARIF upload to the Security tab
+# but don't block the build (chasing unfixable issues creates noise).
+# ============================================================================
+
+name: trivy-scan
+
+on:
+  pull_request:
+    paths:
+      - 'images/**'
+      - 'tools/**'
+      - '.github/workflows/trivy-scan.yml'
+  schedule:
+    # Weekly: Monday 09:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: runner-base
+            dockerfile: images/base.Dockerfile
+            build_arg: ''
+          - image_name: runner-node-24
+            dockerfile: images/node.Dockerfile
+            build_arg: 'NODE_VERSION=24'
+          - image_name: runner-python-3.12
+            dockerfile: images/python.Dockerfile
+            build_arg: 'PYTHON_VERSION=3.12'
+    env:
+      IMAGE_NAME: ${{ matrix.image_name }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      BUILD_ARG: ${{ matrix.build_arg }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build base image (when target is not base)
+        if: matrix.image_name != 'runner-base'
+        run: |
+          docker build -f images/base.Dockerfile -t runner-base:latest .
+
+      - name: Build target image
+        run: |
+          if [ -n "$BUILD_ARG" ]; then
+            docker build -f "$DOCKERFILE" --build-arg "$BUILD_ARG" -t "${IMAGE_NAME}:scan" .
+          else
+            docker build -f "$DOCKERFILE" -t "${IMAGE_NAME}:scan" .
+          fi
+
+      - name: Trivy scan — fail on HIGH/CRITICAL with fixes
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: '${{ matrix.image_name }}:scan'
+          format: 'sarif'
+          output: 'trivy-${{ matrix.image_name }}.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-${{ matrix.image_name }}.sarif'
+          category: 'trivy-${{ matrix.image_name }}'
