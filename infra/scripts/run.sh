@@ -202,7 +202,7 @@ EOF
 
     # --- Source diag rotation helper ---
     RUN_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    RUN_SH_REPO_ROOT="$(cd "$RUN_SH_DIR/.." && pwd)"
+    RUN_SH_REPO_ROOT="$RUNSECURE_ROOT"
     # SC1091: path is dynamic; pass -x to shellcheck for full analysis.
     # shellcheck disable=SC1091
     source "$RUN_SH_DIR/lib/diag-rotation.sh"
