@@ -103,7 +103,7 @@ EOF
 )"
 
 # --- Invalid: host:false no servers no hosts_file ---------------------------
-check "dns host:false missing servers and hosts_file" 1 "dns.servers.*required" "$(cat <<'EOF'
+check "dns host:false missing servers and hosts_file" 1 "requires at least dns.servers" "$(cat <<'EOF'
 runtime: node:24
 dns:
   host: false

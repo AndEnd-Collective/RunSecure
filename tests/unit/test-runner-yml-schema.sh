@@ -16,7 +16,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/compose-image.sh"
-GENERATE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/generate-squid-conf.sh"
+GENERATE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/generate-egress-conf.sh"
 
 PASS=0
 FAIL=0
@@ -70,7 +70,7 @@ mkdir -p "$PROJECT_NO_RUNTIME/.github"
 cat > "$PROJECT_NO_RUNTIME/.github/runner.yml" <<'YAML'
 tools:
   - cypress
-egress:
+http_egress:
   - .example.com
 YAML
 
@@ -95,7 +95,7 @@ mkdir -p "$PROJECT_BAD_YAML/.github"
 cat > "$PROJECT_BAD_YAML/.github/runner.yml" <<'YAML'
 runtime: node:24
   tools: [cypress   # invalid — missing bracket, bad indent
-  egress:
+  http_egress:
     - broken
 YAML
 
@@ -156,7 +156,7 @@ PROJECT_STR_EGRESS="${TMPDIR}/project-str-egress"
 mkdir -p "$PROJECT_STR_EGRESS/.github"
 cat > "$PROJECT_STR_EGRESS/.github/runner.yml" <<'YAML'
 runtime: node:24
-egress: ".example.com"
+http_egress: ".example.com"
 YAML
 
 EXIT_CODE=0
@@ -212,7 +212,7 @@ mkdir -p "$PROJECT_EXTRA/.github"
 cat > "$PROJECT_EXTRA/.github/runner.yml" <<'YAML'
 runtime: node:24
 tools: []
-egress: []
+http_egress: []
 unknown_field: "should be ignored"
 extra:
   nested: true
