@@ -1,0 +1,35 @@
+# ============================================================================
+# RunSecure — dnsmasq Configuration Template
+# ============================================================================
+# Generated at runtime by infra/scripts/generate-egress-conf.sh from the
+# project's dns: block in runner.yml.
+#
+# DO NOT edit by hand — rewritten on every orchestrator run.
+# ============================================================================
+
+# Do not read /etc/resolv.conf — use only the servers listed below.
+no-resolv
+
+# Do not read /etc/hosts — use only the hosts file below (if any).
+no-hosts
+
+# Listen on all interfaces within the proxy container.
+listen-address=0.0.0.0
+port=53
+
+# Log queries (helps with audit; disable via dns.log_queries: false).
+# LOG_QUERIES_PLACEHOLDER
+
+# Upstream DNS servers (from dns.servers in runner.yml).
+# SERVER_ENTRIES_PLACEHOLDER
+
+# Optional static hosts file (from dns.hosts_file in runner.yml).
+# HOSTS_FILE_PLACEHOLDER
+
+# Optional query whitelist (from dns.whitelist_file in runner.yml).
+# Queries for domains NOT in the whitelist are refused.
+# WHITELIST_PLACEHOLDER
+
+# Refuse all other queries (policy: deny unless whitelisted).
+# This line is appended only when dns.whitelist_file is set.
+# DENY_OTHER_PLACEHOLDER

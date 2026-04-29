@@ -13,7 +13,14 @@
 #   8. Runs entrypoint tests
 #   9. Runs log-loss fix tests (host _diag/ bind mount + gh api)
 #  10. Runs log-loss retention kill switch tests (RUNSECURE_DIAG_RETENTION=0)
-#  11. Tears down everything, reports results
+#  11. Runs schema rejection tests (host-side, no Docker)
+#  12. Runs SSRF protection tests (host-side, no Docker)
+#  13. Runs TCP validation tests (host-side, no Docker)
+#  14. Runs DNS config validation tests (host-side, no Docker)
+#  15. Runs TCP egress deprecation tests (host-side, no Docker)
+#  16. Runs TCP egress tests (Docker — requires HAProxy configured)
+#  17. Runs DNS validation tests (Docker — requires dnsmasq configured)
+#  18. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -26,6 +33,13 @@
 #   ./tests/integration/run-integration-tests.sh --test entrypoint
 #   ./tests/integration/run-integration-tests.sh --test log-loss
 #   ./tests/integration/run-integration-tests.sh --test log-loss-retention
+#   ./tests/integration/run-integration-tests.sh --test schema
+#   ./tests/integration/run-integration-tests.sh --test ssrf
+#   ./tests/integration/run-integration-tests.sh --test tcp-validate
+#   ./tests/integration/run-integration-tests.sh --test dns-validate
+#   ./tests/integration/run-integration-tests.sh --test tcp-deprecation
+#   ./tests/integration/run-integration-tests.sh --test tcp-egress
+#   ./tests/integration/run-integration-tests.sh --test dns
 #
 # Prerequisites:
 #   - Docker running
@@ -60,7 +74,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-deprecation|tcp-egress|dns)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -283,6 +297,83 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "log-loss-retention" ]]; then
         run_host_test "test-log-loss-retention-disabled.sh"
 else
     skip_step "Log-loss retention kill switch" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 9: Schema Rejection Tests (host-side)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "schema" ]]; then
+    echo -e "\n${BOLD}--- Phase 9: Schema Rejection Tests ---${NC}"
+    step "Schema: invalid runner.yml fields and values rejected" \
+        run_host_test "test-strict-schema-rejection.sh"
+else
+    skip_step "Schema rejection tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 10: SSRF Protection Tests (host-side)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "ssrf" ]]; then
+    echo -e "\n${BOLD}--- Phase 10: SSRF Protection Tests ---${NC}"
+    step "SSRF: private/reserved IP ranges blocked in fetch-runtime-file" \
+        run_host_test "test-ssrf-protection.sh"
+else
+    skip_step "SSRF protection tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 11: TCP Validation Tests (host-side)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "tcp-validate" ]]; then
+    echo -e "\n${BOLD}--- Phase 11: TCP Validation Tests ---${NC}"
+    step "TCP validation: host:port format + port uniqueness enforced" \
+        run_host_test "test-tcp-validation.sh"
+else
+    skip_step "TCP validation tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 12: DNS Config Validation Tests (host-side)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "dns-validate" ]]; then
+    echo -e "\n${BOLD}--- Phase 12: DNS Config Validation Tests ---${NC}"
+    step "DNS validation: dns: block schema enforcement" \
+        run_host_test "test-dns-config-validation.sh"
+else
+    skip_step "DNS config validation tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 13: TCP Egress Deprecation Tests (host-side)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "tcp-deprecation" ]]; then
+    echo -e "\n${BOLD}--- Phase 13: TCP Egress Deprecation Tests ---${NC}"
+    step "TCP deprecation: old 'egress:' key still accepted alongside new keys" \
+        run_host_test "test-tcp-egress-deprecation.sh"
+else
+    skip_step "TCP egress deprecation tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 14: TCP Egress Tests (Docker-based)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "tcp-egress" ]]; then
+    echo -e "\n${BOLD}--- Phase 14: TCP Egress Tests (Docker) ---${NC}"
+    step "TCP egress: HAProxy proxies TCP connections from runner" \
+        run_compose_test "test-tcp-egress.sh" "runner-node:24" "tcp-egress"
+else
+    skip_step "TCP egress tests (Docker)" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 15: DNS Validation Tests (Docker-based)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "dns" ]]; then
+    echo -e "\n${BOLD}--- Phase 15: DNS Validation Tests (Docker) ---${NC}"
+    step "DNS: dnsmasq serves custom records and runner uses proxy DNS" \
+        run_compose_test "test-dns-validation.sh" "runner-node:24" "dns"
+else
+    skip_step "DNS validation tests (Docker)" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================

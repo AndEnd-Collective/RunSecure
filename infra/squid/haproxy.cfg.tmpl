@@ -1,0 +1,37 @@
+# ============================================================================
+# RunSecure — HAProxy TCP Egress Template
+# ============================================================================
+# Generated at runtime by infra/scripts/generate-egress-conf.sh from the
+# project's tcp_egress list in runner.yml.
+#
+# DO NOT edit by hand — rewritten on every orchestrator run.
+#
+# Each tcp_egress entry "host:port" becomes a frontend/backend pair:
+#   - frontend listens on 0.0.0.0:<port> (internal network only)
+#   - backend proxies to host:<port>
+#
+# This file uses shell-variable placeholders (%%VAR%%) so the generator
+# can do simple text substitution without requiring a template engine.
+# ============================================================================
+
+global
+    log /dev/log local0
+    maxconn 1024
+    stats socket /var/lib/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    # Run as the proxy user (already set by container USER directive)
+    # but HAProxy needs daemon mode when started via -D flag.
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    retries 3
+
+# --- Per-entry frontend/backend pairs are appended below by the generator ---
+# HAPROXY_ENTRIES_START
+# HAPROXY_ENTRIES_END
