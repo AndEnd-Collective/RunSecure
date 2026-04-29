@@ -46,10 +46,32 @@ fi
 # --- Parse runner.yml --------------------------------------------------------
 echo "[RunSecure] Reading config: $RUNNER_YML"
 
-RUNTIME=$(yq '.runtime' "$RUNNER_YML")
-TOOLS=$(yq '.tools // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
-APT_PACKAGES=$(yq '.apt // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
-RUNSECURE_VERSION=$(yq '.version // "local"' "$RUNNER_YML")
+# Run schema validator first — fails-closed on malformed YAML, unknown
+# fields, or invalid apt/tcp_egress/dns values. Without this the project
+# image build proceeds with whatever yq returns from a broken file
+# (silent zero entries) and produces a degraded image.
+bash "${SCRIPT_DIR}/lib/validate-schema.sh" "$RUNNER_YML"
+
+# Local fail-closed yq wrapper — same pattern as validate-schema.sh.
+_yq() {
+    local expr="$1"
+    local file="$2"
+    local out
+    local err_file
+    err_file=$(mktemp /tmp/runsecure-yq-err-XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '${err_file}'" RETURN
+    if ! out=$(yq "$expr" "$file" 2>"$err_file"); then
+        echo "[RunSecure] ERROR: yq failed parsing $file (expression: $expr): $(cat "$err_file")" >&2
+        exit 1
+    fi
+    printf '%s\n' "$out"
+}
+
+RUNTIME=$(_yq '.runtime' "$RUNNER_YML")
+TOOLS=$(_yq '.tools // [] | .[]' "$RUNNER_YML")
+APT_PACKAGES=$(_yq '.apt // [] | .[]' "$RUNNER_YML")
+RUNSECURE_VERSION=$(_yq '.version // "local"' "$RUNNER_YML")
 
 # Parse runtime into language and version
 LANG=$(echo "$RUNTIME" | cut -d: -f1)
@@ -161,11 +183,29 @@ HEADER
 
 # Add extra apt packages if specified
 if [[ -n "$APT_PACKAGES" ]]; then
+    # H1: re-validate every apt name before writing it into the Dockerfile.
+    # The schema validator already runs above (and rejects bad names), but
+    # we re-check here as a defense-in-depth gate immediately adjacent to
+    # the sink — any future code path that bypasses validate-schema.sh
+    # must still pass through this guard.
+    while IFS= read -r pkg; do
+        [[ -z "$pkg" ]] && continue
+        if [[ ! "$pkg" =~ ^[a-z0-9][a-z0-9+.-]*$ ]]; then
+            echo "[RunSecure] ERROR: invalid apt package name '$pkg' rejected by H1 sink-side guard" >&2
+            exit 1
+        fi
+    done <<< "$APT_PACKAGES"
+
     echo "" >> "$DOCKERFILE"
     echo "# --- Extra system packages from runner.yml ---" >> "$DOCKERFILE"
-    echo "RUN apt-get update 2>/dev/null || true \\" >> "$DOCKERFILE"
+    # M8: apt-get update must succeed. Previously `2>/dev/null || true`
+    # masked any update failure (network outage, stale repo signature,
+    # disk-full etc.); apt-get install would then proceed with a stale
+    # or empty index and pull whichever versions happened to be cached.
+    echo "RUN apt-get update \\" >> "$DOCKERFILE"
     echo "    && apt-get install -y --no-install-recommends \\" >> "$DOCKERFILE"
     while IFS= read -r pkg; do
+        [[ -z "$pkg" ]] && continue
         echo "         ${pkg} \\" >> "$DOCKERFILE"
     done <<< "$APT_PACKAGES"
     echo "    && rm -rf /var/lib/apt/lists/*" >> "$DOCKERFILE"

