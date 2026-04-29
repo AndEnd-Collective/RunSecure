@@ -18,12 +18,13 @@ PASS=0
 FAIL=0
 RESULTS=()
 
+# check NAME EXPECTED_EXIT EXPECTED_EXACT_STRING YML_CONTENT
+# expected_exact_string: empty string = don't check output content
 check() {
     local name="$1"
     local expected_exit="$2"
-    local expected_pattern="$3"
-    shift 3
-    local yml_content="$1"
+    local expected_string="$3"
+    local yml_content="$4"
 
     local tmpfile
     tmpfile=$(mktemp /tmp/runner-XXXXXX.yml)
@@ -39,7 +40,8 @@ check() {
     if [[ "$actual_exit" != "$expected_exit" ]]; then
         ok=false
     fi
-    if [[ -n "$expected_pattern" ]] && ! echo "$output" | grep -qE "$expected_pattern"; then
+    # Exact-string match (substring, not regex, when string is non-empty)
+    if [[ -n "$expected_string" ]] && ! echo "$output" | grep -qF "$expected_string"; then
         ok=false
     fi
 
@@ -47,7 +49,41 @@ check() {
         RESULTS+=("PASS: $name")
         PASS=$((PASS + 1))
     else
-        RESULTS+=("FAIL: $name (exit=$actual_exit expected=$expected_exit output='$output')")
+        RESULTS+=("FAIL: $name (exit=$actual_exit expected=$expected_exit output='$output' expected_string='$expected_string')")
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# check_warn NAME EXPECTED_WARN_STRING YML_CONTENT
+# Asserts: exits 0 AND the exact warning string appears in stderr/stdout
+check_warn() {
+    local name="$1"
+    local expected_string="$2"
+    local yml_content="$3"
+
+    local tmpfile
+    tmpfile=$(mktemp /tmp/runner-XXXXXX.yml)
+    printf '%s\n' "$yml_content" > "$tmpfile"
+
+    local output
+    output=$(bash "$VALIDATE" "$tmpfile" 2>&1)
+    local actual_exit=$?
+
+    rm -f "$tmpfile"
+
+    local ok=true
+    if [[ "$actual_exit" != "0" ]]; then
+        ok=false
+    fi
+    if ! echo "$output" | grep -qF "$expected_string"; then
+        ok=false
+    fi
+
+    if [[ "$ok" == true ]]; then
+        RESULTS+=("PASS: $name")
+        PASS=$((PASS + 1))
+    else
+        RESULTS+=("FAIL: $name (exit=$actual_exit expected=0 output='$output' expected_string='$expected_string')")
         FAIL=$((FAIL + 1))
     fi
 }
@@ -86,41 +122,49 @@ EOF
 )"
 
 # --- runtime: required -------------------------------------------------------
-check "missing runtime" 1 "runtime.*required" "$(cat <<'EOF'
+check "missing runtime" 1 "runtime is required" "$(cat <<'EOF'
 tools:
   - playwright
 EOF
 )"
 
 # --- runtime: must be a known variant ----------------------------------------
-check "invalid runtime variant" 1 "runtime.*invalid" "$(cat <<'EOF'
+check "invalid runtime variant" 1 "runtime 'java:21' is invalid" "$(cat <<'EOF'
 runtime: java:21
 EOF
 )"
 
 # --- tcp_egress: must be host:port -------------------------------------------
-check "tcp_egress missing port" 1 "tcp_egress.*host:port" "$(cat <<'EOF'
+check "tcp_egress missing port" 1 \
+    'tcp_egress: invalid entry "ep-foo.neon.tech" — expected host:port' \
+    "$(cat <<'EOF'
 runtime: node:24
 tcp_egress:
   - ep-foo.neon.tech
 EOF
 )"
 
-check "tcp_egress invalid port zero" 1 "tcp_egress.*port" "$(cat <<'EOF'
+check "tcp_egress invalid port zero" 1 \
+    'tcp_egress: port 0 in "ep-foo.neon.tech:0" out of range (1-65535)' \
+    "$(cat <<'EOF'
 runtime: node:24
 tcp_egress:
   - ep-foo.neon.tech:0
 EOF
 )"
 
-check "tcp_egress invalid port too high" 1 "tcp_egress.*port" "$(cat <<'EOF'
+check "tcp_egress invalid port too high" 1 \
+    'tcp_egress: port 99999 in "ep-foo.neon.tech:99999" out of range (1-65535)' \
+    "$(cat <<'EOF'
 runtime: node:24
 tcp_egress:
   - ep-foo.neon.tech:99999
 EOF
 )"
 
-check "tcp_egress duplicate ports" 1 "tcp_egress.*duplicate.*port" "$(cat <<'EOF'
+check "tcp_egress duplicate ports" 1 \
+    'tcp_egress: port 5432 declared by both "host-a.example.com:5432" and "host-b.example.com:5432" — each port must be unique' \
+    "$(cat <<'EOF'
 runtime: node:24
 tcp_egress:
   - host-a.example.com:5432
@@ -129,7 +173,9 @@ EOF
 )"
 
 # --- dns: host:false requires servers (unless hosts_file set) ----------------
-check "dns host:false no servers no hosts_file" 1 "dns.servers.*required" "$(cat <<'EOF'
+check "dns host:false no servers no hosts_file" 1 \
+    "dns.host: false requires at least dns.servers or dns.hosts_file" \
+    "$(cat <<'EOF'
 runtime: node:24
 dns:
   host: false
@@ -145,24 +191,66 @@ dns:
 EOF
 )"
 
-# --- egress: old key deprecated but still parsed (backward compat) -----------
-check "old egress key still accepted" 0 "" "$(cat <<'EOF'
+# --- egress: old key deprecated — emits WARNING, exits 0 --------------------
+check_warn "old egress key emits deprecation warning" \
+    "WARNING: egress: is deprecated; rename to http_egress:" \
+    "$(cat <<'EOF'
 runtime: node:24
 egress:
   - .npmjs.org
 EOF
 )"
 
+# --- egress: + http_egress: both set → error with exact message --------------
+check "egress and http_egress both set is an error" 1 \
+    "http_egress and egress (deprecated) both set — pick one" \
+    "$(cat <<'EOF'
+runtime: node:24
+egress:
+  - .npmjs.org
+http_egress:
+  - .neon.tech
+EOF
+)"
+
+# --- dns.host: true with extra DNS fields → warning, exits 0 ----------------
+check_warn "dns.host true with servers emits warning" \
+    "WARNING: dns.host: true (default) — dns.servers/hosts_file/whitelist_file/log_queries are ignored" \
+    "$(cat <<'EOF'
+runtime: node:24
+dns:
+  host: true
+  servers:
+    - 8.8.8.8
+EOF
+)"
+
+# --- dns.servers RFC1918 without hosts_file → warning, exits 0 --------------
+check_warn "dns.servers RFC1918 without hosts_file emits warning" \
+    "WARNING: dns.servers:" \
+    "$(cat <<'EOF'
+runtime: node:24
+dns:
+  host: false
+  servers:
+    - 10.0.0.53
+EOF
+)"
+
 # --- http_egress: invalid domain rejected ------------------------------------
-check "http_egress with IP rejected" 1 "http_egress.*invalid" "$(cat <<'EOF'
+check "http_egress with IP rejected" 1 \
+    "http_egress entry '192.168.1.1' is invalid" \
+    "$(cat <<'EOF'
 runtime: node:24
 http_egress:
   - 192.168.1.1
 EOF
 )"
 
-# --- unknown top-level key rejected ------------------------------------------
-check "unknown top-level key rejected" 1 "unknown.*field|unrecognized.*field" "$(cat <<'EOF'
+# --- unknown top-level key rejected — exact message per spec §3.3 ------------
+check "unknown top-level key rejected" 1 \
+    'runner.yml contains unknown field "banana" — your RunSecure version may be older than this config requires' \
+    "$(cat <<'EOF'
 runtime: node:24
 banana: true
 EOF

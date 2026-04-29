@@ -108,7 +108,7 @@ EOF
 )"
 
 # --- Invalid: duplicate ports -----------------------------------------------
-check "tcp_egress duplicate port 5432" 1 "duplicate.*port|port.*collision" "$(cat <<'EOF'
+check "tcp_egress duplicate port 5432" 1 "each port must be unique" "$(cat <<'EOF'
 runtime: node:24
 tcp_egress:
   - host-a.example.com:5432

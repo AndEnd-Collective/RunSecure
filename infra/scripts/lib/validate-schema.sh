@@ -3,7 +3,8 @@
 # RunSecure — runner.yml Schema Validator
 # ============================================================================
 # Validates a runner.yml file against the RunSecure schema (spec §3).
-# Exits 0 if valid, exits 1 with a descriptive error message if invalid.
+# Exits 0 if valid (with optional warnings to stderr), exits 1 with a
+# descriptive error message if invalid.
 #
 # Usage:
 #   bash validate-schema.sh /path/to/runner.yml
@@ -21,12 +22,12 @@ if [[ ! -f "$RUNNER_YML" ]]; then
     exit 1
 fi
 
-_err() { echo "[validate-schema] ERROR: $*" >&2; exit 1; }
+_err()  { echo "[validate-schema] ERROR: $*" >&2; exit 1; }
+_warn() { echo "[validate-schema] WARNING: $*" >&2; }
 
 # ============================================================================
 # 1. Known top-level keys (spec §3)
 # ============================================================================
-# Read all actual top-level keys and check each against the known list
 while IFS= read -r key; do
     [[ -z "$key" || "$key" == "null" ]] && continue
     case "$key" in
@@ -34,13 +35,27 @@ while IFS= read -r key; do
             # Known key — ok
             ;;
         *)
-            _err "unknown field '$key' — unrecognized field in runner.yml. Allowed: version runtime tools apt egress http_egress tcp_egress dns labels resources jobs"
+            _err "runner.yml contains unknown field \"${key}\" — your RunSecure version may be older than this config requires"
             ;;
     esac
 done < <(yq 'keys | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
 # ============================================================================
-# 2. runtime: required and must match known variants
+# 2. egress: / http_egress: mutual-exclusion and deprecation
+# ============================================================================
+has_egress=$(yq 'has("egress")' "$RUNNER_YML" 2>/dev/null || echo "false")
+has_http_egress=$(yq 'has("http_egress")' "$RUNNER_YML" 2>/dev/null || echo "false")
+
+if [[ "$has_egress" == "true" && "$has_http_egress" == "true" ]]; then
+    _err "http_egress and egress (deprecated) both set — pick one"
+fi
+
+if [[ "$has_egress" == "true" && "$has_http_egress" != "true" ]]; then
+    _warn "egress: is deprecated; rename to http_egress:"
+fi
+
+# ============================================================================
+# 3. runtime: required and must match known variants
 # ============================================================================
 runtime=$(yq '.runtime // ""' "$RUNNER_YML" 2>/dev/null || true)
 
@@ -48,23 +63,19 @@ if [[ -z "$runtime" || "$runtime" == "null" ]]; then
     _err "runtime is required but missing from runner.yml"
 fi
 
-# Validate runtime format: lang:version
-# Accepted: node:<N>, python:<M.N>, rust:<channel>
 if ! echo "$runtime" | grep -qE '^(node:[0-9]+|python:[0-9]+\.[0-9]+|rust:(stable|beta|nightly|[0-9]+\.[0-9]+(\.[0-9]+)?))$'; then
     _err "runtime '$runtime' is invalid — must be one of: node:24, node:22, python:3.12, python:3.11, rust:stable, rust:beta, rust:nightly"
 fi
 
 # ============================================================================
-# 3. http_egress / egress: valid domain patterns only
+# 4. http_egress / egress: valid domain patterns only
 # ============================================================================
 for field in http_egress egress; do
     while IFS= read -r domain; do
         [[ "$domain" == "null" || -z "$domain" ]] && continue
-        # Allow optional leading dot for wildcard, then standard domain chars
         if ! echo "$domain" | grep -qE '^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$'; then
             _err "http_egress entry '$domain' is invalid — must be a domain like '.npmjs.org' or 'api.example.com'"
         fi
-        # Reject bare IP addresses in http_egress
         if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
             _err "http_egress entry '$domain' is invalid — IP addresses are not allowed; use domain names"
         fi
@@ -72,56 +83,49 @@ for field in http_egress egress; do
 done
 
 # ============================================================================
-# 4. tcp_egress: must be host:port, port in [1,65535], no duplicate ports
+# 5. tcp_egress: must be host:port, port in [1,65535], no duplicate ports
 # ============================================================================
-# We use a temp file to track seen ports (bash 3.2 has no associative arrays)
 _seen_ports_file=$(mktemp /tmp/runsecure-ports-XXXXXX)
 trap 'rm -f "$_seen_ports_file"' EXIT
 
 while IFS= read -r entry; do
     [[ "$entry" == "null" || -z "$entry" ]] && continue
 
-    # Must match host:port format (no colons in host)
     if ! echo "$entry" | grep -qE '^[^:]+:[0-9]+$'; then
-        _err "tcp_egress entry '$entry' is invalid — must be in host:port format (e.g., ep-foo.neon.tech:5432)"
+        _err "tcp_egress: invalid entry \"${entry}\" — expected host:port"
     fi
 
     port="${entry##*:}"
     host="${entry%:*}"
 
-    # Port must be 1-65535
     if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
-        _err "tcp_egress entry '$entry' has invalid port $port — must be between 1 and 65535"
+        _err "tcp_egress: port ${port} in \"${entry}\" out of range (1-65535)"
     fi
 
-    # Port 80 and 443 reserved for HTTP/HTTPS
     if [[ "$port" -eq 80 || "$port" -eq 443 ]]; then
         _err "tcp_egress entry '$entry' uses port $port — ports 80 and 443 are reserved for HTTP/HTTPS; use http_egress instead"
     fi
 
-    # Hostname must be non-empty
     if [[ -z "$host" ]]; then
         _err "tcp_egress entry '$entry' has an empty hostname"
     fi
 
-    # Duplicate port check (each port must be unique for HAProxy listener)
-    if grep -qE "^${port}$" "$_seen_ports_file" 2>/dev/null; then
-        _err "tcp_egress has duplicate port $port — each port must be unique (port collision for HAProxy frontend)"
+    # Duplicate port check
+    if grep -qE "^${port}:" "$_seen_ports_file" 2>/dev/null; then
+        existing_entry=$(grep -E "^${port}:" "$_seen_ports_file" | head -1 | cut -d: -f2-)
+        _err "tcp_egress: port ${port} declared by both \"${existing_entry}\" and \"${entry}\" — each port must be unique"
     fi
-    echo "$port" >> "$_seen_ports_file"
+    printf '%s:%s\n' "$port" "$entry" >> "$_seen_ports_file"
 
 done < <(yq '.tcp_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
 # ============================================================================
-# 5. dns: optional block validation
+# 6. dns: optional block validation
 # ============================================================================
 dns_exists=$(yq 'has("dns")' "$RUNNER_YML" 2>/dev/null || echo "false")
 
 if [[ "$dns_exists" == "true" ]]; then
-    # Read .dns.host directly — yq v4 prints boolean false as the string "false"
-    # We cannot use // "null" because yq treats boolean false as falsy
     dns_host_raw=$(yq '.dns.host' "$RUNNER_YML" 2>/dev/null || echo "null")
-    # yq outputs "null" (unquoted) when the key is absent
     dns_host="${dns_host_raw}"
 
     if [[ "$dns_host" == "false" ]]; then
@@ -130,7 +134,7 @@ if [[ "$dns_exists" == "true" ]]; then
         hosts_file=$(yq '.dns.hosts_file // ""' "$RUNNER_YML" 2>/dev/null || echo "")
 
         if [[ "$server_count" -eq 0 && ( -z "$hosts_file" || "$hosts_file" == "null" ) ]]; then
-            _err "dns.servers is required when dns.host is false (and no dns.hosts_file is set) — specify at least one upstream DNS server"
+            _err "dns.host: false requires at least dns.servers or dns.hosts_file"
         fi
 
         # Validate server entries are IP addresses
@@ -139,14 +143,36 @@ if [[ "$dns_exists" == "true" ]]; then
             if ! echo "$srv" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^\[?[0-9a-fA-F:]+\]?$'; then
                 _err "dns.servers entry '$srv' is invalid — must be an IP address"
             fi
+            # Warn on RFC1918/loopback/link-local/CGNAT servers when no hosts_file
+            if [[ -z "$hosts_file" || "$hosts_file" == "null" ]]; then
+                local_ip=false
+                if echo "$srv" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'; then
+                    local_ip=true
+                fi
+                if [[ "$local_ip" == "true" ]]; then
+                    _warn "dns.servers: ${srv} is in RFC1918/loopback/link-local/CGNAT range; verify this is intended (paired with hosts_file would suppress this)"
+                fi
+            fi
         done < <(yq '.dns.servers // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
-    elif [[ "$dns_host" != "true" && "$dns_host" != "null" ]]; then
+    elif [[ "$dns_host" == "true" || "$dns_host" == "null" ]]; then
+        # dns.host: true (or absent) — extra DNS fields are silently ignored
+        # Warn if user specified dns.servers / hosts_file / whitelist_file / log_queries
+        _extra_dns_count=0
+        for _dns_field in servers hosts_file whitelist_file log_queries; do
+            _val=$(yq ".dns.${_dns_field}" "$RUNNER_YML" 2>/dev/null || echo "null")
+            if [[ "$_val" != "null" && -n "$_val" ]]; then
+                _extra_dns_count=$(( _extra_dns_count + 1 ))
+            fi
+        done
+        if [[ "$_extra_dns_count" -gt 0 ]]; then
+            _warn "dns.host: true (default) — dns.servers/hosts_file/whitelist_file/log_queries are ignored"
+        fi
+    else
         _err "dns.host must be 'true' or 'false', got: '$dns_host'"
     fi
 
     # Validate log_queries is boolean if present
-    # yq v4 prints boolean false directly as "false"; absent key prints "null"
     log_q=$(yq '.dns.log_queries' "$RUNNER_YML" 2>/dev/null || echo "null")
     if [[ "$log_q" != "null" && "$log_q" != "true" && "$log_q" != "false" ]]; then
         _err "dns.log_queries must be true or false, got: '$log_q'"
