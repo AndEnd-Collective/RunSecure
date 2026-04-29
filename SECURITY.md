@@ -96,13 +96,19 @@ The Docker network architecture prevents the container from reaching the interne
 
 6. **TCP port collisions.** Each `tcp_egress` port must be unique. If two services use the same port number, only one can be added.
 
-7. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
+7. **TCP egress is content-opaque.** haproxy forwards bytes; no TLS termination, no protocol-aware ACL. Audit story is "who connected to what, when, for how long" — not "what was sent."
 
-8. **CONNECT method only.** HTTP/HTTPS goes through Squid CONNECT — no TLS interception. Some HTTP/1.0 clients without CONNECT support may fail.
+8. **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
 
-9. **DNS log sensitivity.** When `dns.host: false` and `dns.log_queries: true`, query names appear in `_diag-proxy/`. Set `dns.log_queries: false` on sensitive CI hosts.
+9. **`egress:` field is deprecated.** Renamed to `http_egress:`. Continues to work in this release with a warning; removed in the release after.
 
-10. **`_diag/` and `_diag-proxy/` host-mounted volumes.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
+10. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
+
+11. **CONNECT method only.** HTTP/HTTPS goes through Squid CONNECT — no TLS interception. Some HTTP/1.0 clients without CONNECT support may fail.
+
+12. **DNS log sensitivity.** When `dns.host: false` and `dns.log_queries: true`, query names appear in `_diag-proxy/`. Set `dns.log_queries: false` on sensitive CI hosts.
+
+13. **`_diag/` and `_diag-proxy/` host-mounted volumes.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 
 ### Accepted Risks
 

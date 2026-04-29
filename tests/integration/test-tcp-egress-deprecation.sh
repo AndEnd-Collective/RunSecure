@@ -39,7 +39,7 @@ check() {
     if [[ "$actual_exit" != "$expected_exit" ]]; then
         ok=false
     fi
-    if [[ -n "$expected_pattern" ]] && ! echo "$output" | grep -qE "$expected_pattern"; then
+    if [[ -n "$expected_pattern" ]] && ! echo "$output" | grep -qF "$expected_pattern"; then
         ok=false
     fi
 
@@ -70,8 +70,10 @@ http_egress:
 EOF
 )"
 
-# --- Both keys accepted (generator merges them) ------------------------------
-check "both egress and http_egress keys accepted" 0 "" "$(cat <<'EOF'
+# --- Both egress and http_egress → error (per spec: pick one) ---------------
+check "both egress and http_egress is an error" 1 \
+    "http_egress and egress (deprecated) both set — pick one" \
+    "$(cat <<'EOF'
 runtime: node:24
 egress:
   - .neon.tech

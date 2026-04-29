@@ -43,6 +43,18 @@ check "DNS resolves test-service.internal.example.com (from hosts file)" \
 check "Runner DNS points to proxy" \
     bash -c "cat /etc/resolv.conf | grep -qE '10\.11\.12\.13'"
 
+# --- whitelist enforcement ----------------------------------------------------
+# TODO: whitelist enforcement test — requires a dnsmasq instance running with
+# a whitelist_file containing a single allowed pattern (e.g. "allowed.example")
+# so that:
+#   - "something.allowed.example" resolves (forwarded upstream)
+#   - "denied.example.com" returns NXDOMAIN
+# This test is skipped here because the Docker-based DNS test infrastructure
+# (docker-compose.test.yml + proxy container) does not yet expose a
+# whitelist-file fixture that can be injected at test time without significant
+# refactoring of the test compose setup.  The whitelist path in dnsmasq.conf.tmpl
+# is already wired; the gap is the per-test fixture injection mechanism.
+
 echo ""
 echo "=== DNS Validation Tests: $PASS passed, $FAIL failed ==="
 if [[ $FAIL -gt 0 ]]; then

@@ -2,7 +2,8 @@
 # ============================================================================
 # RunSecure — Proxy Entrypoint (Squid + HAProxy + dnsmasq supervisor)
 # ============================================================================
-# Starts all proxy daemons and monitors them. Exits with Squid's exit code.
+# Starts all enabled proxy daemons and monitors them with wait -n so that
+# any single crash triggers an immediate container exit (fail-closed).
 #
 # Environment variables (all optional):
 #   HAPROXY_CFG   — path to haproxy config (default: /etc/haproxy/haproxy.cfg)
@@ -22,68 +23,48 @@ ENABLE_DNSMASQ="${ENABLE_DNSMASQ:-false}"
 
 log() { echo "[proxy-entrypoint] $*"; }
 
-# --- Start dnsmasq (if enabled) ----------------------------------------------
-if [[ "$ENABLE_DNSMASQ" == "true" ]]; then
-    if [[ ! -f "$DNSMASQ_CFG" ]]; then
-        log "ERROR: dnsmasq config not found: $DNSMASQ_CFG"
+PIDS=()
+
+# --- Start dnsmasq (if enabled) ---------------------------------------------
+if [[ "${ENABLE_DNSMASQ}" == "true" ]]; then
+    if [[ ! -f "${DNSMASQ_CFG}" ]]; then
+        log "ERROR: dnsmasq config not found: ${DNSMASQ_CFG}"
         exit 1
     fi
-    log "Starting dnsmasq..."
-    dnsmasq --no-daemon --conf-file="$DNSMASQ_CFG" &
-    DNSMASQ_PID=$!
-    log "dnsmasq started (PID $DNSMASQ_PID)"
-else
-    DNSMASQ_PID=""
+    log "starting dnsmasq..."
+    # Rewrite resolv.conf so squid + haproxy resolve through dnsmasq
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    dnsmasq -k --conf-file="${DNSMASQ_CFG}" &
+    PIDS+=($!)
+    log "dnsmasq started (PID ${PIDS[-1]})"
 fi
 
-# --- Start HAProxy (if enabled) ---------------------------------------------
-if [[ "$ENABLE_HAPROXY" == "true" ]]; then
-    if [[ ! -f "$HAPROXY_CFG" ]]; then
-        log "ERROR: HAProxy config not found: $HAPROXY_CFG"
+# --- Start HAProxy (if enabled) — foreground worker mode so we can wait on it
+if [[ "${ENABLE_HAPROXY}" == "true" ]]; then
+    if [[ ! -f "${HAPROXY_CFG}" ]]; then
+        log "ERROR: HAProxy config not found: ${HAPROXY_CFG}"
         exit 1
     fi
-    log "Starting HAProxy..."
-    haproxy -f "$HAPROXY_CFG" -D -p /var/lib/haproxy/haproxy.pid
-    log "HAProxy started"
+    log "starting haproxy..."
+    # -W  worker mode (master/worker; reaps workers automatically)
+    # -db debug-no-fork (keeps the master in the foreground)
+    haproxy -W -db -f "${HAPROXY_CFG}" &
+    PIDS+=($!)
+    log "haproxy started (PID ${PIDS[-1]})"
 fi
 
-# --- Start Squid (foreground — this is PID1 ownership) ----------------------
-log "Starting Squid..."
-# Squid must initialize its cache dirs on first run.
-squid -N -f "$SQUID_CFG" &
-SQUID_PID=$!
-log "Squid started (PID $SQUID_PID)"
+# --- Start Squid (foreground) -----------------------------------------------
+log "starting squid..."
+squid -N -f "${SQUID_CFG}" &
+PIDS+=($!)
+log "squid started (PID ${PIDS[-1]})"
 
-# --- Trap signals and propagate to children ---------------------------------
-_shutdown() {
-    log "Received shutdown signal. Stopping services..."
-    if [[ -n "$SQUID_PID" ]] && kill -0 "$SQUID_PID" 2>/dev/null; then
-        squid -k shutdown -f "$SQUID_CFG" 2>/dev/null || kill -TERM "$SQUID_PID" 2>/dev/null || true
-    fi
-    if [[ "$ENABLE_HAPROXY" == "true" ]]; then
-        if [[ -f /var/lib/haproxy/haproxy.pid ]]; then
-            kill -TERM "$(cat /var/lib/haproxy/haproxy.pid)" 2>/dev/null || true
-        fi
-    fi
-    if [[ -n "$DNSMASQ_PID" ]] && kill -0 "$DNSMASQ_PID" 2>/dev/null; then
-        kill -TERM "$DNSMASQ_PID" 2>/dev/null || true
-    fi
-}
-trap _shutdown TERM INT
+log "all enabled processes started; PIDs: ${PIDS[*]}"
 
-# --- Monitor loop: exit if Squid dies ---------------------------------------
-wait "$SQUID_PID"
-SQUID_EXIT=$?
-
-log "Squid exited with code $SQUID_EXIT. Shutting down other services..."
-
-if [[ "$ENABLE_HAPROXY" == "true" ]]; then
-    if [[ -f /var/lib/haproxy/haproxy.pid ]]; then
-        kill -TERM "$(cat /var/lib/haproxy/haproxy.pid)" 2>/dev/null || true
-    fi
-fi
-if [[ -n "$DNSMASQ_PID" ]] && kill -0 "$DNSMASQ_PID" 2>/dev/null; then
-    kill -TERM "$DNSMASQ_PID" 2>/dev/null || true
-fi
-
-exit "$SQUID_EXIT"
+# --- wait -n: return as soon as ANY supervised process dies ------------------
+# This is the fail-closed guarantee: one crash brings the whole container down
+# rather than silently degrading (e.g., HAProxy crash leaving squid running).
+wait -n "${PIDS[@]}"
+RC=$?
+log "one supervised process exited with code ${RC}; tearing down"
+exit "${RC}"

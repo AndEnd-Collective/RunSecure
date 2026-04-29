@@ -428,6 +428,13 @@ This is useful when:
 
 Configure with `dns:` in `runner.yml`.
 
+### Threat model & explicit trade-offs
+
+- **TCP egress is content-opaque.** haproxy forwards bytes; it does not inspect or terminate TLS, and there is no protocol-aware ACL. The audit story for raw TCP is "who connected to what, when, for how long" — not "what was sent."
+- **DNS query logs are sensitive.** Hostnames sometimes carry information (`shared-secret-xyz.api.example.com`, signed-URL fragments, telemetry beacons). Treat `_diag-proxy/dnsmasq.log` as confidential.
+- **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
+- **URL-fetched DNS files are SSRF-protected but not signature-verified.** v1 fetches HTTPS URLs after IP-blocklist validation (rejects loopback, RFC1918, link-local, CGNAT, and IPv6 equivalents) and disallows redirects beyond 3 hops. v1 does *not* verify file content via checksum or signature.
+
 ### Installing client tools
 
 Database and cache client libraries (e.g., `pg`, `redis`, `mysql2`) are just npm/pip packages — they install normally via `http_egress`. What `tcp_egress` enables is the actual TCP connection to the server at runtime.
@@ -576,6 +583,18 @@ Each `docker-compose` stack runs one runner. Multiple concurrent jobs require mu
 ### `runner.yml` field names are RunSecure-specific
 
 The `.github/runner.yml` configuration file uses RunSecure-specific field names (`runtime:`, `egress:`, `tools:`, etc.). These fields are not recognized by GitHub-hosted runners. If you switch a job back to `runs-on: ubuntu-latest`, remove or ignore the `runner.yml` file.
+
+---
+
+## Migrating from `egress:` to `http_egress:`
+
+The `egress:` field has been renamed to `http_egress:` to clarify that it controls HTTP/HTTPS allowlisting only.
+
+**In this release**, both names work: `egress:` continues to behave as before but emits a deprecation warning on each `run.sh` invocation. **In the next release**, `egress:` will be removed.
+
+**Migration:** rename `egress:` to `http_egress:` in your `runner.yml`. No other changes required; semantics are identical.
+
+**Version pinning recommendation.** When you adopt new fields (`http_egress:`, `tcp_egress:`, `dns:`), set `version:` in `runner.yml` to a RunSecure version known to support them. The orchestrator now performs strict-schema validation: unknown top-level fields fail with `runner.yml contains unknown field "<name>" — your RunSecure version may be older than this config requires`. This prevents the silent-skip failure mode where an old orchestrator ignores new fields and runs with an empty allowlist.
 
 ---
 

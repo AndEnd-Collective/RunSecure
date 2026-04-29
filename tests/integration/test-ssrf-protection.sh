@@ -103,6 +103,10 @@ check_blocked "IPv6 fe80:: (link-local)"      "https://[fe80::1]/secret"
 # --- http:// scheme blocked (only https:// allowed for remote) ---------------
 check_blocked "http:// scheme remote"         "http://example.com/hosts.txt"
 
+# --- 0.0.0.0/8 blocked -------------------------------------------------------
+check_blocked "0.0.0.0/8 this-network"        "https://0.0.0.0/secret"
+check_blocked "0.0.0.0/8 0.1.2.3"            "https://0.1.2.3/secret"
+
 # --- Valid cases: local file paths -------------------------------------------
 check_allowed_path "local absolute path"      "/nonexistent/path/hosts.txt"
 check_allowed_path "local relative path"      "./infra/dns/hosts.txt"

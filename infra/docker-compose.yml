@@ -33,8 +33,12 @@ services:
       start_period: 10s
 
     # --- Hardening: proxy container ---
+    # NET_BIND_SERVICE is needed for dnsmasq (port 53) and for any tcp_egress
+    # port below 1024 that haproxy may need to bind.
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     deploy:
