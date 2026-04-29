@@ -73,7 +73,18 @@ set -e
 echo "[RunSecure] Runner exited (code: ${RUNNER_EXIT_CODE}). Waiting for log upload (timeout: ${LOG_UPLOAD_TIMEOUT}s)..."
 
 # --- Wait for the upload-complete marker ---
-WORKER_LOG="$(find "${RUNNER_DIR}/_diag" -maxdepth 1 -name 'Worker_*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2- || true)"
+# Portable "newest matching file": uses bash's -nt comparison instead of
+# `find -printf` (GNU-only) or `ls -t` (shellcheck SC2012). Works on
+# Linux containers AND on macOS hosts running the integration tests.
+WORKER_LOG=""
+shopt -s nullglob 2>/dev/null || true
+for _candidate in "${RUNNER_DIR}/_diag/"Worker_*.log; do
+    [[ -f "${_candidate}" ]] || continue
+    if [[ -z "${WORKER_LOG}" ]] || [[ "${_candidate}" -nt "${WORKER_LOG}" ]]; then
+        WORKER_LOG="${_candidate}"
+    fi
+done
+shopt -u nullglob 2>/dev/null || true
 DEADLINE=$(( $(date +%s) + LOG_UPLOAD_TIMEOUT ))
 
 if [[ -z "${WORKER_LOG}" ]]; then
