@@ -11,17 +11,21 @@
 #   6. Runs Rust CI workflow simulation
 #   7. Runs attack simulation tests
 #   8. Runs entrypoint tests
-#   9. Tears down everything, reports results
+#   9. Runs log-loss fix tests (host _diag/ bind mount + gh api)
+#  10. Runs log-loss retention kill switch tests (RUNSECURE_DIAG_RETENTION=0)
+#  11. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
 #   ./tests/integration/run-integration-tests.sh --skip-build
-#   ./tests/integration/run-integration-tests.sh --test egress    # single suite
+#   ./tests/integration/run-integration-tests.sh --test egress              # single suite
 #   ./tests/integration/run-integration-tests.sh --test node
 #   ./tests/integration/run-integration-tests.sh --test python
 #   ./tests/integration/run-integration-tests.sh --test rust
 #   ./tests/integration/run-integration-tests.sh --test attack
 #   ./tests/integration/run-integration-tests.sh --test entrypoint
+#   ./tests/integration/run-integration-tests.sh --test log-loss
+#   ./tests/integration/run-integration-tests.sh --test log-loss-retention
 #
 # Prerequisites:
 #   - Docker running

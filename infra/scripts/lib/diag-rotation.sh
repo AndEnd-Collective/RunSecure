@@ -38,9 +38,8 @@ rotate_one_dir() {
         # hidden names. Each glob may expand to its literal string when there
         # are no matches; the [[ -e ]] guard discards those non-matches safely.
         for f in "$dir"/* "$dir"/.[!.]*; do
-            # skip the lockfile and glob non-matches
+            # skip glob non-matches
             [[ -e "$f" ]] || continue
-            [[ "$f" == "$dir/.rotate.lock" ]] && continue
             has_content=true
             break
         done
@@ -68,9 +67,10 @@ rotate_diag_dirs() {
         return 0
     fi
 
-    local lockdir="$repo_root/_diag"
-    local lockfile="$lockdir/.rotate.lock"
-    mkdir -p "$lockdir"
+    # Lockfile lives OUTSIDE any rotated directory so that renaming _diag/ to
+    # _diag.previous/ does not move the inode and break concurrent serialization.
+    local lockfile="$repo_root/.diag-rotate.lock"
+    mkdir -p "$repo_root"
     touch "$lockfile" 2>/dev/null || true
 
     if command -v flock >/dev/null 2>&1; then
@@ -78,15 +78,12 @@ rotate_diag_dirs() {
             flock -x 9
             rotate_one_dir "$repo_root/_diag"
             rotate_one_dir "$repo_root/_diag-proxy"
-            # Re-create the lockfile in the new (post-rotation) _diag/ so the
-            # next invocation can lock on the same path.
-            touch "$repo_root/_diag/.rotate.lock"
         ) 9>"$lockfile"
     else
-        # flock not available (e.g. macOS without util-linux); proceed without
-        # serialization. Concurrent invocations are rare on macOS dev machines.
+        # macOS / minimal envs: no flock available. Warn and proceed without
+        # serialization — concurrent invocations may interleave rotation.
+        echo "[RunSecure] WARNING: flock not available — concurrent diag rotation is not serialized." >&2
         rotate_one_dir "$repo_root/_diag"
         rotate_one_dir "$repo_root/_diag-proxy"
-        touch "$repo_root/_diag/.rotate.lock" 2>/dev/null || true
     fi
 }
