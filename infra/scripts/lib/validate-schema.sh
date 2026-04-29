@@ -27,25 +27,43 @@ fi
 _err()  { echo "[validate-schema] ERROR: $*" >&2; exit 1; }
 _warn() { echo "[validate-schema] WARNING: $*" >&2; }
 
+# Fail-closed yq wrapper: invokes yq and exits 1 if it fails.
+# Each call passes a yq expression as $1 and the file path as $2.
+# Stderr is captured so we can include yq's actual error in our message.
+_yq() {
+    local expr="$1"
+    local file="$2"
+    local out
+    local err_file
+    err_file=$(mktemp /tmp/runsecure-yq-err-XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '${err_file}'" RETURN
+
+    if ! out=$(yq "$expr" "$file" 2>"$err_file"); then
+        _err "yq failed parsing $file (expression: $expr): $(cat "$err_file")"
+    fi
+    printf '%s\n' "$out"
+}
+
 # ============================================================================
 # 1. Known top-level keys (spec §3)
 # ============================================================================
 while IFS= read -r key; do
     [[ -z "$key" || "$key" == "null" ]] && continue
     case "$key" in
-        version|runtime|tools|apt|http_egress|tcp_egress|dns|labels|resources|jobs)
+        version|runtime|tools|apt|http_egress|tcp_egress|dns|hardening|labels|resources|jobs)
             # Known key — ok
             ;;
         *)
             _err "runner.yml contains unknown field \"${key}\" — your RunSecure version may be older than this config requires"
             ;;
     esac
-done < <(yq 'keys | .[]' "$RUNNER_YML" 2>/dev/null || true)
+done < <(_yq 'keys | .[]' "$RUNNER_YML")
 
 # ============================================================================
 # 2. runtime: required and must match known variants
 # ============================================================================
-runtime=$(yq '.runtime // ""' "$RUNNER_YML" 2>/dev/null || true)
+runtime=$(_yq '.runtime // ""' "$RUNNER_YML")
 
 if [[ -z "$runtime" || "$runtime" == "null" ]]; then
     _err "runtime is required but missing from runner.yml"
@@ -66,7 +84,7 @@ while IFS= read -r domain; do
     if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
         _err "http_egress entry '$domain' is invalid — IP addresses are not allowed; use domain names"
     fi
-done < <(yq '.http_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
+done < <(_yq '.http_egress // [] | .[]' "$RUNNER_YML")
 
 # ============================================================================
 # 4. tcp_egress: must be host:port, port in [1,65535], no duplicate ports
@@ -83,6 +101,14 @@ while IFS= read -r entry; do
 
     port="${entry##*:}"
     host="${entry%:*}"
+
+    # H8: reject IPv4 literals in tcp_egress host. Domain names only — IPs
+    # bypass DNS-based egress filtering and let workloads address arbitrary
+    # network targets directly. (IPv6 is rejected by the host-shape regex
+    # above, which forbids colons in the host portion.)
+    if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        _err "tcp_egress entry '$entry' is invalid — IP literals are not allowed; use a hostname (DNS resolution and SSRF guards apply only to names)"
+    fi
 
     if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
         _err "tcp_egress: port ${port} in \"${entry}\" out of range (1-65535)"
@@ -103,21 +129,20 @@ while IFS= read -r entry; do
     fi
     printf '%s:%s\n' "$port" "$entry" >> "$_seen_ports_file"
 
-done < <(yq '.tcp_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
+done < <(_yq '.tcp_egress // [] | .[]' "$RUNNER_YML")
 
 # ============================================================================
 # 5. dns: optional block validation
 # ============================================================================
-dns_exists=$(yq 'has("dns")' "$RUNNER_YML" 2>/dev/null || echo "false")
+dns_exists=$(_yq 'has("dns")' "$RUNNER_YML")
 
 if [[ "$dns_exists" == "true" ]]; then
-    dns_host_raw=$(yq '.dns.host' "$RUNNER_YML" 2>/dev/null || echo "null")
-    dns_host="${dns_host_raw}"
+    dns_host=$(_yq '.dns.host' "$RUNNER_YML")
 
     if [[ "$dns_host" == "false" ]]; then
         # When host:false, either servers or hosts_file must be present
-        server_count=$(yq '.dns.servers // [] | length' "$RUNNER_YML" 2>/dev/null || echo "0")
-        hosts_file=$(yq '.dns.hosts_file // ""' "$RUNNER_YML" 2>/dev/null || echo "")
+        server_count=$(_yq '.dns.servers // [] | length' "$RUNNER_YML")
+        hosts_file=$(_yq '.dns.hosts_file // ""' "$RUNNER_YML")
 
         if [[ "$server_count" -eq 0 && ( -z "$hosts_file" || "$hosts_file" == "null" ) ]]; then
             _err "dns.host: false requires at least dns.servers or dns.hosts_file"
@@ -139,14 +164,14 @@ if [[ "$dns_exists" == "true" ]]; then
                     _warn "dns.servers: ${srv} is in RFC1918/loopback/link-local/CGNAT range; verify this is intended (paired with hosts_file would suppress this)"
                 fi
             fi
-        done < <(yq '.dns.servers // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
+        done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
 
     elif [[ "$dns_host" == "true" || "$dns_host" == "null" ]]; then
         # dns.host: true (or absent) — extra DNS fields are silently ignored
         # Warn if user specified dns.servers / hosts_file / whitelist_file / log_queries
         _extra_dns_count=0
         for _dns_field in servers hosts_file whitelist_file log_queries; do
-            _val=$(yq ".dns.${_dns_field}" "$RUNNER_YML" 2>/dev/null || echo "null")
+            _val=$(_yq ".dns.${_dns_field}" "$RUNNER_YML")
             if [[ "$_val" != "null" && -n "$_val" ]]; then
                 _extra_dns_count=$(( _extra_dns_count + 1 ))
             fi
@@ -159,7 +184,7 @@ if [[ "$dns_exists" == "true" ]]; then
     fi
 
     # Validate log_queries is boolean if present
-    log_q=$(yq '.dns.log_queries' "$RUNNER_YML" 2>/dev/null || echo "null")
+    log_q=$(_yq '.dns.log_queries' "$RUNNER_YML")
     if [[ "$log_q" != "null" && "$log_q" != "true" && "$log_q" != "false" ]]; then
         _err "dns.log_queries must be true or false, got: '$log_q'"
     fi

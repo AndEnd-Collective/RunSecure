@@ -235,6 +235,46 @@ http_egress:
 EOF
 )"
 
+# --- H8: tcp_egress IP literal rejected --------------------------------------
+check "tcp_egress with IPv4 literal rejected (H8)" 1 \
+    "IP literals are not allowed" \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - 10.0.0.5:5432
+EOF
+)"
+
+check "tcp_egress with public IPv4 literal rejected (H8)" 1 \
+    "IP literals are not allowed" \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - 8.8.8.8:5432
+EOF
+)"
+
+check "tcp_egress with IPv6 literal rejected (H8 — caught by host-shape regex)" 1 \
+    'expected host:port' \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - "[::1]:5432"
+EOF
+)"
+
+# --- H11: malformed YAML must fail-closed (not silently pass) ----------------
+check "malformed YAML fails-closed (H11)" 1 \
+    "yq failed parsing" \
+    "$(cat <<'EOF'
+runtime: node:24
+http_egress:
+  - .npmjs.org
+  -- broken-syntax
+   bad: indent
+EOF
+)"
+
 # --- unknown top-level key rejected — exact message per spec §3.3 ------------
 check "unknown top-level key rejected" 1 \
     'runner.yml contains unknown field "banana" — your RunSecure version may be older than this config requires' \
