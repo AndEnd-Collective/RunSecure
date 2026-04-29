@@ -110,6 +110,10 @@ The Docker network architecture prevents the container from reaching the interne
 
 13. **`_diag/` and `_diag-proxy/` host-mounted volumes.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 
+14. **JIT config exposure via env var (deprecated path).** The orchestrator currently passes the GitHub JIT runner token to the container via `RUNNER_JIT_CONFIG`. While the entrypoint reads it once and `unset`s it, the value is briefly visible to `docker inspect`, container audit logs, and any process inside the container that reads `/proc/1/environ` before the entrypoint clears it. The entrypoint also accepts a file-based path (`RUNNER_JIT_CONFIG_FILE`) which removes those exposure surfaces entirely; the orchestrator switchover to file-mode is a tracked follow-up. Until then, keep gh CLI scopes minimal (see `[RunSecure] WARNING` lines on `run.sh` startup) and do not run RunSecure on shared hosts where unprivileged users can inspect container config.
+
+15. **`gh` CLI scope breadth (M15).** The orchestrator on the host uses `gh auth` to request JIT tokens. If the authenticated user has scopes beyond `repo` + `workflow` (or `admin:org` + `workflow` for org runners), a compromised orchestrator can do more than launch ephemeral runners. `run.sh` now warns at startup when it detects scopes like `delete_repo`, `admin:public_key`, `admin:gpg_key`, `admin:org_hook`, `gist`, or `user`. Re-authenticate with the minimum scope set when this warning appears.
+
 ### Accepted Risks
 
 - **apt binary exists in intermediate images** (language layers). It is removed in final composed images via `finalize-hardening.sh`. In intermediate images, the runner user (UID 1001) cannot install system packages without root/capabilities.
