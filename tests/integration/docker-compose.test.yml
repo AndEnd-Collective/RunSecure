@@ -57,6 +57,8 @@ services:
   runner:
     image: ${RUNNER_IMAGE:-runner-node:24}
     container_name: runsecure-test-runner
+    # H3: matches prod compose — see infra/docker-compose.yml for rationale.
+    init: true
     depends_on:
       proxy:
         condition: service_healthy

@@ -83,6 +83,11 @@ assert_in_service "$PROD_COMPOSE" "runner"  'no-new-privileges:true' "no-new-pri
 assert_in_service "$PROD_COMPOSE" "proxy"   '^[[:space:]]*-[[:space:]]*ALL' "cap_drop: ALL on proxy (prod)"
 assert_in_service "$PROD_COMPOSE" "runner"  '^[[:space:]]*-[[:space:]]*ALL' "cap_drop: ALL on runner (prod)"
 
+# --- H3: init: true on runner (PID 1 reaping) -------------------------------
+assert_in_service "$PROD_COMPOSE" "runner"  '^[[:space:]]*init:[[:space:]]+true' "H3: init: true on runner (prod)"
+assert_in_service "$PROD_COMPOSE" "proxy"   '^[[:space:]]*init:[[:space:]]+true' "H3: init: true on proxy (prod, was already set)"
+assert_in_service "$TEST_COMPOSE" "runner"  '^[[:space:]]*init:[[:space:]]+true' "H3: init: true on runner (test)"
+
 # --- Print results -----------------------------------------------------------
 echo ""
 echo "=== Compose Hardening Assertions ==="

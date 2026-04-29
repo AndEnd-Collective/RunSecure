@@ -55,6 +55,14 @@ services:
   runner:
     image: ${RUNNER_IMAGE:-runner-base:latest}
     container_name: ${RUNNER_NAME:-runsecure-runner}
+    # H3: init: true gives the container a tini PID 1 so the entrypoint
+    # shell doesn't have to reap children. The actions-runner forks
+    # Worker.exe processes and short-lived shell helpers; without an
+    # init those can become zombies that pile up against the pids limit
+    # for long jobs. tini also forwards SIGTERM cleanly so the
+    # entrypoint's log-upload wait actually runs to completion when the
+    # orchestrator stops the container.
+    init: true
     restart: "no"
     depends_on:
       proxy:
