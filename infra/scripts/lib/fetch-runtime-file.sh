@@ -86,6 +86,11 @@ _is_private_ip() {
         return 0
     fi
 
+    # IPv4-mapped IPv6: ::ffff:N.N.N.N — recurse on the embedded IPv4 part
+    if [[ "$ip" =~ ^::ffff:([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        _is_private_ip "${BASH_REMATCH[1]}" && return 0
+    fi
+
     # IPv6 loopback: ::1
     if [[ "$ip" == "::1" ]]; then
         return 0
@@ -144,8 +149,11 @@ _check_host() {
             _blocked "hostname '$hostname' is a cloud metadata endpoint — SSRF denied" ;;
     esac
 
-    # If the hostname IS an IP literal, check it directly
-    if echo "$hostname" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^\[?[0-9a-fA-F:]+\]?$'; then
+    # If the hostname IS an IP literal, check it directly.
+    # The alternation covers: pure IPv4, pure IPv6 (hex+colons), and the
+    # mixed IPv4-mapped IPv6 form (::ffff:N.N.N.N) which contains both
+    # colons and dots.
+    if echo "$hostname" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^\[?[0-9a-fA-F:]+\]?$|^\[?[0-9a-fA-F:]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\]?$'; then
         if _is_private_ip "$hostname"; then
             _blocked "URL '$url_for_msg' contains private/reserved IP '$hostname' — SSRF denied"
         fi

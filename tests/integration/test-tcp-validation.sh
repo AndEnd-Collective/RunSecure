@@ -116,6 +116,14 @@ tcp_egress:
 EOF
 )"
 
+# --- Invalid: hostname contains spaces (RFC1123 non-conformant) --------------
+check "tcp_egress host with spaces rejected" 1 "host:port" "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - "host with spaces:5432"
+EOF
+)"
+
 # --- Valid with both http_egress and tcp_egress ------------------------------
 check "valid http_egress + tcp_egress combined" 0 "" "$(cat <<'EOF'
 runtime: node:24

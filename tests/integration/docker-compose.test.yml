@@ -100,10 +100,12 @@ services:
 
   # --- Mock TCP service: lightweight TCP echo fixture -------------------------
   # Used by test-tcp-egress.sh to verify basic TCP passthrough via HAProxy.
+  # socat is used instead of "nc -e" because alpine's OpenBSD netcat does not
+  # support -e; socat is portable and available via apk.
   mock-tcp:
-    image: alpine:3.19
+    image: alpine:3.20
     container_name: runsecure-test-mock-tcp
-    command: ["sh", "-c", "while true; do nc -l -p 9999 -e echo 'PONG'; done"]
+    command: ["sh", "-c", "apk add --no-cache socat && socat -v TCP-LISTEN:9999,fork,reuseaddr SYSTEM:'echo PONG'"]
     networks:
       proxy-external:
         aliases:

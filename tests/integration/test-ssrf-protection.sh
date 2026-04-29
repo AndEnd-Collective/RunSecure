@@ -100,6 +100,11 @@ check_blocked "CGNAT 100.127.255.255"         "https://100.127.255.255/secret"
 check_blocked "IPv6 fc00::/7 (ULA)"           "https://[fc00::1]/secret"
 check_blocked "IPv6 fe80:: (link-local)"      "https://[fe80::1]/secret"
 
+# --- IPv4-mapped IPv6 addresses ----------------------------------------------
+check_blocked "IPv4-mapped IPv6 ::ffff:127.0.0.1" "https://[::ffff:127.0.0.1]/secret"
+check_blocked "IPv4-mapped IPv6 ::ffff:10.0.0.1"  "https://[::ffff:10.0.0.1]/secret"
+check_blocked "IPv4-mapped IPv6 ::ffff:192.168.1.1" "https://[::ffff:192.168.1.1]/secret"
+
 # --- http:// scheme blocked (only https:// allowed for remote) ---------------
 check_blocked "http:// scheme remote"         "http://example.com/hosts.txt"
 
