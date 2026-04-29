@@ -17,10 +17,9 @@
 #  12. Runs SSRF protection tests (host-side, no Docker)
 #  13. Runs TCP validation tests (host-side, no Docker)
 #  14. Runs DNS config validation tests (host-side, no Docker)
-#  15. Runs TCP egress deprecation tests (host-side, no Docker)
-#  16. Runs TCP egress tests (Docker — requires HAProxy configured)
-#  17. Runs DNS validation tests (Docker — requires dnsmasq configured)
-#  18. Tears down everything, reports results
+#  15. Runs TCP egress tests (Docker — requires HAProxy configured)
+#  16. Runs DNS validation tests (Docker — requires dnsmasq configured)
+#  17. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -37,7 +36,6 @@
 #   ./tests/integration/run-integration-tests.sh --test ssrf
 #   ./tests/integration/run-integration-tests.sh --test tcp-validate
 #   ./tests/integration/run-integration-tests.sh --test dns-validate
-#   ./tests/integration/run-integration-tests.sh --test tcp-deprecation
 #   ./tests/integration/run-integration-tests.sh --test tcp-egress
 #   ./tests/integration/run-integration-tests.sh --test dns
 #
@@ -74,7 +72,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-deprecation|tcp-egress|dns)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -344,21 +342,10 @@ else
 fi
 
 # ============================================================================
-# Phase 13: TCP Egress Deprecation Tests (host-side)
-# ============================================================================
-if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "tcp-deprecation" ]]; then
-    echo -e "\n${BOLD}--- Phase 13: TCP Egress Deprecation Tests ---${NC}"
-    step "TCP deprecation: old 'egress:' key still accepted alongside new keys" \
-        run_host_test "test-tcp-egress-deprecation.sh"
-else
-    skip_step "TCP egress deprecation tests" "--test $SINGLE_TEST"
-fi
-
-# ============================================================================
-# Phase 14: TCP Egress Tests (Docker-based)
+# Phase 13: TCP Egress Tests (Docker-based)
 # ============================================================================
 if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "tcp-egress" ]]; then
-    echo -e "\n${BOLD}--- Phase 14: TCP Egress Tests (Docker) ---${NC}"
+    echo -e "\n${BOLD}--- Phase 13: TCP Egress Tests (Docker) ---${NC}"
     step "TCP egress: HAProxy proxies TCP connections from runner" \
         run_compose_test "test-tcp-egress.sh" "runner-node:24" "tcp-egress"
 else
@@ -366,10 +353,10 @@ else
 fi
 
 # ============================================================================
-# Phase 15: DNS Validation Tests (Docker-based)
+# Phase 14: DNS Validation Tests (Docker-based)
 # ============================================================================
 if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "dns" ]]; then
-    echo -e "\n${BOLD}--- Phase 15: DNS Validation Tests (Docker) ---${NC}"
+    echo -e "\n${BOLD}--- Phase 14: DNS Validation Tests (Docker) ---${NC}"
     step "DNS: dnsmasq serves custom records and runner uses proxy DNS" \
         run_compose_test "test-dns-validation.sh" "runner-node:24" "dns"
 else

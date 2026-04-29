@@ -191,25 +191,13 @@ dns:
 EOF
 )"
 
-# --- egress: old key deprecated — emits WARNING, exits 0 --------------------
-check_warn "old egress key emits deprecation warning" \
-    "WARNING: egress: is deprecated; rename to http_egress:" \
+# --- egress: is no longer recognized — must produce unknown-field error ------
+check "egress key rejected as unknown field" 1 \
+    'runner.yml contains unknown field "egress" — your RunSecure version may be older than this config requires' \
     "$(cat <<'EOF'
 runtime: node:24
 egress:
   - .npmjs.org
-EOF
-)"
-
-# --- egress: + http_egress: both set → error with exact message --------------
-check "egress and http_egress both set is an error" 1 \
-    "http_egress and egress (deprecated) both set — pick one" \
-    "$(cat <<'EOF'
-runtime: node:24
-egress:
-  - .npmjs.org
-http_egress:
-  - .neon.tech
 EOF
 )"
 

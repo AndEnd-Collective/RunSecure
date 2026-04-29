@@ -65,8 +65,8 @@ _generate_squid_conf() {
         return
     fi
 
-    # Collect domains from both old 'egress' key (compat) and new 'http_egress'
-    EGRESS_DOMAINS=$(yq '(.http_egress // .egress // []) | .[]' "$RUNNER_YML" 2>/dev/null || true)
+    # Collect domains from http_egress
+    EGRESS_DOMAINS=$(yq '(.http_egress // []) | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
     if [[ -z "$EGRESS_DOMAINS" ]]; then
         _log "No project-specific HTTP egress — using base squid config."
