@@ -130,9 +130,9 @@ An example workflow is provided at `skeleton/workflow-ci.yml`.
 ```
 
 The orchestrator will:
-1. Read your project's `.github/runner.yml`
+1. Read your project's `.github/runner.yml` and validate its schema
 2. Build or reuse a cached image matching your config
-3. Generate the Squid proxy configuration (base allowlist + your project's egress domains)
+3. Generate all proxy configuration (Squid HTTP allowlist, HAProxy TCP config if needed, dnsmasq DNS config if needed)
 4. Request a JIT (Just-In-Time) token from the GitHub API
 5. Launch the runner container with full hardening
 6. Wait for the job to complete, then destroy the container
@@ -184,21 +184,55 @@ apt:
 
 These are installed before tools and before final hardening (which removes apt from the image).
 
-### `egress`
+### `http_egress`
 
-Additional domains to allow through the egress proxy, on top of the base allowlist. Use `.domain.com` syntax to allow all subdomains:
+Additional HTTP/HTTPS domains to allow through the egress proxy, on top of the base allowlist. Use `.domain.com` syntax to allow all subdomains:
 
 ```yaml
-egress:
-  - "*.neon.tech"          # Neon Postgres
+http_egress:
+  - ".neon.tech"           # Neon Postgres (HTTPS API)
   - "api.vercel.com"       # Vercel API (exact domain)
-  - "*.supabase.co"        # Supabase
-  - "*.amazonaws.com"      # AWS services
-  - "*.azure.com"          # Azure services
-  - "*.sentry.io"          # Sentry error reporting
+  - ".supabase.co"         # Supabase
+  - ".amazonaws.com"       # AWS services
+  - ".azure.com"           # Azure services
+  - ".sentry.io"           # Sentry error reporting
 ```
 
-If you're not sure what domains your CI needs, start without an `egress` list. When a step fails due to a blocked connection, check the Squid proxy log for the denied domain and add it.
+The old key `egress:` still works and is treated identically — use `http_egress:` for new configs.
+
+If you're not sure what domains your CI needs, start without an `http_egress` list. When a step fails due to a blocked connection, check the Squid proxy log for the denied domain and add it.
+
+### `tcp_egress`
+
+Raw TCP connections for database clients, cache servers, or any protocol that does not use HTTP. Each entry is `host:port`. Each port must be unique across all entries.
+
+```yaml
+tcp_egress:
+  - ep-foo.neon.tech:5432      # Neon Postgres (direct TCP)
+  - redis.example.com:6379     # Redis
+```
+
+How it works: the orchestrator configures an HAProxy instance inside the proxy container. Each `host:port` entry creates an HAProxy frontend that listens on that port and forwards TCP connections to the target. The runner reaches the target via `proxy:<port>`.
+
+Ports 80 and 443 are reserved for HTTP/HTTPS — use `http_egress` instead.
+
+### `dns`
+
+Controls DNS resolution inside the runner. By default (absent or `host: true`), the runner uses the Docker host's resolver. Setting `host: false` starts an isolated dnsmasq instance inside the proxy container — this prevents DNS-based leakage to the host resolver.
+
+```yaml
+dns:
+  host: false
+  servers:
+    - 10.0.0.53               # Private DNS server IP address
+  hosts_file: ./infra/dns/hosts.txt   # Optional: local path or https:// URL
+  whitelist_file: https://internal.company.com/allowed.txt  # Optional
+  log_queries: true           # Default: true when host:false
+```
+
+When `host: false`, at least one of `servers` or `hosts_file` is required.
+
+The `hosts_file` and `whitelist_file` values accept either a local filesystem path or an `https://` URL. SSRF protection is applied: private/RFC1918/loopback/CGNAT/IPv6-ULA addresses are blocked before any download attempt.
 
 ### `labels`
 
@@ -365,6 +399,59 @@ If your CI job fails because a dependency needs to reach a domain that isn't all
 
 ---
 
+## Egress Model
+
+RunSecure supports three types of outbound network access, each served by a different component inside the proxy container.
+
+### HTTP/HTTPS (Squid)
+
+The default. All HTTP and HTTPS traffic from the runner must pass through Squid on port 3128. Squid enforces a domain allowlist — requests to unlisted domains are blocked. TLS is not intercepted; the proxy sees the target hostname from the CONNECT request but not the encrypted payload.
+
+Configure with `http_egress:` in `runner.yml`.
+
+### Raw TCP (HAProxy)
+
+For database clients, cache servers, and protocols that do not speak HTTP. When `tcp_egress:` entries are present, the orchestrator configures HAProxy inside the proxy container. Each `host:port` entry becomes a HAProxy frontend that the runner can reach via `proxy:<port>`.
+
+Example: with `tcp_egress: [ep-foo.neon.tech:5432]`, the runner connects to `proxy:5432` and HAProxy transparently forwards to `ep-foo.neon.tech:5432`.
+
+Configure with `tcp_egress:` in `runner.yml`.
+
+### DNS (dnsmasq)
+
+By default the runner inherits the Docker host's DNS resolver (`dns.host: true`). When `dns.host: false`, the orchestrator starts a dnsmasq instance inside the proxy container. The runner's `/etc/resolv.conf` is updated to point at the proxy.
+
+This is useful when:
+- Your CI uses private DNS names that are only resolvable via an internal resolver
+- You want to provide a static hosts file for test fixtures
+- You want to restrict which domain names the runner can resolve (via `whitelist_file`)
+
+Configure with `dns:` in `runner.yml`.
+
+### Installing client tools
+
+Database and cache client libraries (e.g., `pg`, `redis`, `mysql2`) are just npm/pip packages — they install normally via `http_egress`. What `tcp_egress` enables is the actual TCP connection to the server at runtime.
+
+You do not need any special tooling inside the image. The runner uses the client library's standard API; the TCP-level path to the server goes through HAProxy transparently.
+
+For the postgres example:
+```yaml
+tcp_egress:
+  - ep-foo.neon.tech:5432
+```
+
+Your Node.js code connects to the server exactly as it would outside RunSecure:
+```js
+import postgres from 'postgres'
+const sql = postgres({ host: 'ep-foo.neon.tech', port: 5432 })
+```
+
+The `DATABASE_URL` environment variable (if used) should point to `ep-foo.neon.tech:5432` — not to `proxy:5432`. HAProxy is transparent; the runner's DNS resolves `ep-foo.neon.tech` to the proxy IP, and HAProxy routes based on the port.
+
+Note: this requires `dns.host: false` with the correct DNS server so that `ep-foo.neon.tech` resolves to the proxy IP inside the container. If you use `dns.host: true` (the default), you need to configure the client to connect to `proxy:5432` explicitly.
+
+---
+
 ## Image Architecture
 
 Images are stackable. You only build what you need.
@@ -466,9 +553,25 @@ For operator-side recovery (network blips during upload, GitHub API hiccups), `_
 
 To disable the host-side bind mount entirely (security-sensitive shared-host scenarios), set `RUNSECURE_DIAG_RETENTION=0` in the orchestrator environment. The synchronous wait still applies; only the host-side fallback is dropped.
 
-### HTTP-only egress, raw-TCP unsupported
+### TCP port collisions
 
-Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+Each `tcp_egress` port must be unique across all entries (one HAProxy frontend per port). If two services use the same port number, you cannot add both to `tcp_egress` without a port remapping workaround.
+
+### No UDP egress
+
+UDP traffic (DNS, QUIC, DTLS) is not proxied. When `dns.host: false`, DNS resolution goes through dnsmasq inside the proxy container — queries beyond the configured servers are blocked. Other UDP-based protocols are unsupported.
+
+### CONNECT method only for HTTP/HTTPS
+
+Squid uses the HTTP CONNECT method for HTTPS filtering. It does not perform SSL interception. This means the proxy can see the destination hostname but not the request path or payload. Some HTTP/1.0 clients that do not support CONNECT may fail.
+
+### DNS log sensitivity
+
+When `dns.host: false` and `dns.log_queries: true` (the default), dnsmasq logs all DNS queries to `_diag-proxy/`. On shared CI hosts, DNS queries may reveal internal service names. Set `dns.log_queries: false` or `RUNSECURE_DIAG_RETENTION=0` if this is a concern.
+
+### Single runner per stack
+
+Each `docker-compose` stack runs one runner. Multiple concurrent jobs require multiple orchestrator invocations. The `--max-jobs` flag controls how many jobs a single orchestrator processes sequentially.
 
 ### `runner.yml` field names are RunSecure-specific
 
@@ -732,17 +835,25 @@ RunSecure/
 │   └── cypress.sh                 #   Cypress E2E
 ├── infra/                         # Runtime infrastructure
 │   ├── docker-compose.yml         #   Production compose (runner + proxy)
-│   ├── squid/                     #   Egress proxy
-│   │   ├── base.conf              #     Domain allowlist
-│   │   └── Dockerfile             #     Proxy image
+│   ├── squid/                     #   Egress proxy (Squid + HAProxy + dnsmasq)
+│   │   ├── base.conf              #     Squid domain allowlist
+│   │   ├── Dockerfile             #     Proxy image
+│   │   ├── proxy-entrypoint.sh   #     Process supervisor
+│   │   ├── haproxy.cfg.tmpl      #     HAProxy TCP config template
+│   │   └── dnsmasq.conf.tmpl     #     dnsmasq DNS config template
 │   ├── seccomp/
 │   │   └── node-runner.json       #   Syscall filter profile
 │   └── scripts/
 │       ├── run.sh                 #   Main orchestrator
 │       ├── compose-image.sh       #   Image builder (reads runner.yml)
-│       ├── generate-squid-conf.sh #   Merges base + project egress
+│       ├── generate-egress-conf.sh #  Generates all proxy + compose config
 │       ├── entrypoint.sh          #   Container startup (JIT config)
-│       └── finalize-hardening.sh  #   Final image hardening
+│       ├── finalize-hardening.sh  #   Final image hardening
+│       └── lib/
+│           ├── validate-schema.sh #   runner.yml schema validator
+│           ├── fetch-runtime-file.sh # SSRF-protected file fetcher
+│           ├── yaml-emit.sh       #   YAML fragment helpers
+│           └── diag-rotation.sh  #   Diag directory rotation
 ├── skeleton/                      # Templates for new projects
 │   ├── runner.yml                 #   Configuration template
 │   ├── workflow-ci.yml            #   Example GitHub Actions workflow

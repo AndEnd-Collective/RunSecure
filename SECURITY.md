@@ -73,6 +73,10 @@ The Docker network architecture prevents the container from reaching the interne
 | Non-standard port blocking | Connections on ports other than 443 | `test-egress-proxy.sh` |
 | Cloud metadata endpoint blocking | SSRF to 169.254.169.254 / metadata.google.internal | `test-egress-proxy.sh` |
 | Proxy access log | Post-incident forensics | `squid/base.conf` |
+| HAProxy TCP egress allowlist | Raw TCP connections to non-approved host:port | `test-tcp-egress.sh` |
+| SSRF protection in config fetcher | Private/RFC1918/loopback IPs in dns.hosts_file/whitelist_file URLs | `test-ssrf-protection.sh` (22 checks) |
+| dnsmasq DNS isolation | Leaking internal queries to host resolver when dns.host:false | `test-dns-validation.sh` |
+| Schema validation | Malformed runner.yml reaching the proxy generator | `test-strict-schema-rejection.sh` |
 
 ---
 
@@ -90,9 +94,15 @@ The Docker network architecture prevents the container from reaching the interne
 
 5. **Docker daemon compromise.** The runner does NOT mount the Docker socket. But if the Docker daemon itself is compromised on the host, all containers are at risk.
 
-6. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+6. **TCP port collisions.** Each `tcp_egress` port must be unique. If two services use the same port number, only one can be added.
 
-7. **`_diag/` host-mounted volume.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
+7. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
+
+8. **CONNECT method only.** HTTP/HTTPS goes through Squid CONNECT — no TLS interception. Some HTTP/1.0 clients without CONNECT support may fail.
+
+9. **DNS log sensitivity.** When `dns.host: false` and `dns.log_queries: true`, query names appear in `_diag-proxy/`. Set `dns.log_queries: false` on sensitive CI hosts.
+
+10. **`_diag/` and `_diag-proxy/` host-mounted volumes.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 
 ### Accepted Risks
 
