@@ -198,7 +198,7 @@ http_egress:
   - ".sentry.io"           # Sentry error reporting
 ```
 
-The old key `egress:` still works and is treated identically — use `http_egress:` for new configs.
+The old key `egress:` is no longer accepted — use `http_egress:` in your `runner.yml`.
 
 If you're not sure what domains your CI needs, start without an `http_egress` list. When a step fails due to a blocked connection, check the Squid proxy log for the denied domain and add it.
 
@@ -282,7 +282,7 @@ runtime: node:24
 ```yaml
 runtime: node:24
 
-egress:
+http_egress:
   - "*.neon.tech"
   - "api.vercel.com"
 ```
@@ -295,7 +295,7 @@ runtime: node:24
 tools:
   - playwright
 
-egress:
+http_egress:
   - "*.neon.tech"
 ```
 
@@ -311,7 +311,7 @@ tools:
 apt:
   - libvips-dev
 
-egress:
+http_egress:
   - "*.neon.tech"
   - "api.vercel.com"
 
@@ -375,7 +375,7 @@ The base allowlist is defined in `infra/squid/base.conf`. To modify it, edit tha
 
 ### Adding Project-Specific Domains
 
-Add domains to the `egress` list in your `.github/runner.yml`. When the orchestrator starts, it merges the base allowlist with your project-specific domains to produce the runtime proxy configuration.
+Add domains to the `http_egress` list in your `.github/runner.yml`. When the orchestrator starts, it merges the base allowlist with your project-specific domains to produce the runtime proxy configuration.
 
 ### What Gets Blocked
 
@@ -394,7 +394,7 @@ If your CI job fails because a dependency needs to reach a domain that isn't all
 
 1. Check the proxy log for denied requests
 2. Identify the domain
-3. Add it to the `egress` list in your `runner.yml`
+3. Add it to the `http_egress` list in your `runner.yml`
 4. Restart the orchestrator
 
 ---
@@ -582,19 +582,23 @@ Each `docker-compose` stack runs one runner. Multiple concurrent jobs require mu
 
 ### `runner.yml` field names are RunSecure-specific
 
-The `.github/runner.yml` configuration file uses RunSecure-specific field names (`runtime:`, `egress:`, `tools:`, etc.). These fields are not recognized by GitHub-hosted runners. If you switch a job back to `runs-on: ubuntu-latest`, remove or ignore the `runner.yml` file.
+The `.github/runner.yml` configuration file uses RunSecure-specific field names (`runtime:`, `http_egress:`, `tools:`, etc.). These fields are not recognized by GitHub-hosted runners. If you switch a job back to `runs-on: ubuntu-latest`, remove or ignore the `runner.yml` file.
 
 ---
 
 ## Migrating from `egress:` to `http_egress:`
 
-The `egress:` field has been renamed to `http_egress:` to clarify that it controls HTTP/HTTPS allowlisting only.
+The `egress:` field has been replaced by `http_egress:`, which controls HTTP/HTTPS allowlisting only. (For raw TCP, see `tcp_egress:`; for DNS, see `dns:`.)
 
-**In this release**, both names work: `egress:` continues to behave as before but emits a deprecation warning on each `run.sh` invocation. **In the next release**, `egress:` will be removed.
+`egress:` is **no longer accepted**. Configs that still use it produce:
+
+```
+ERROR: runner.yml contains unknown field "egress" — your RunSecure version may be older than this config requires
+```
 
 **Migration:** rename `egress:` to `http_egress:` in your `runner.yml`. No other changes required; semantics are identical.
 
-**Version pinning recommendation.** When you adopt new fields (`http_egress:`, `tcp_egress:`, `dns:`), set `version:` in `runner.yml` to a RunSecure version known to support them. The orchestrator now performs strict-schema validation: unknown top-level fields fail with `runner.yml contains unknown field "<name>" — your RunSecure version may be older than this config requires`. This prevents the silent-skip failure mode where an old orchestrator ignores new fields and runs with an empty allowlist.
+**Version pinning recommendation.** When you adopt new fields (`http_egress:`, `tcp_egress:`, `dns:`), set `version:` in `runner.yml` to a RunSecure version known to support them. The orchestrator now performs strict-schema validation: unknown top-level fields fail with a clear error. This prevents the silent-skip failure mode where an old orchestrator ignores new fields and runs with an empty allowlist.
 
 ---
 
@@ -737,7 +741,7 @@ Add a `version:` field to your project's `.github/runner.yml`:
 ```yaml
 version: "1.2.0"
 runtime: node:24
-egress:
+http_egress:
   - "*.neon.tech"
 ```
 
@@ -750,7 +754,7 @@ If the pull fails (offline, version doesn't exist), the orchestrator falls back 
 | RunSecure (shipped via release) | Your project (in your repo) |
 |---|---|
 | Base image hardening | `runtime:` choice |
-| Proxy base allowlist | `egress:` domains |
+| Proxy base allowlist | `http_egress:` domains |
 | Seccomp profile | `tools:` selection |
 | Container runtime flags | `resources:` limits |
 | Tool recipes | `labels:` |
@@ -775,7 +779,7 @@ The proxy is likely blocking a domain that npm or one of your dependencies needs
 ./tests/integration/run-integration-tests.sh --test egress
 ```
 
-Add the missing domain to the `egress` list in your `runner.yml`.
+Add the missing domain to the `http_egress` list in your `runner.yml`.
 
 ### Permission denied errors
 

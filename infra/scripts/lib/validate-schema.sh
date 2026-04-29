@@ -33,7 +33,7 @@ _warn() { echo "[validate-schema] WARNING: $*" >&2; }
 while IFS= read -r key; do
     [[ -z "$key" || "$key" == "null" ]] && continue
     case "$key" in
-        version|runtime|tools|apt|egress|http_egress|tcp_egress|dns|labels|resources|jobs)
+        version|runtime|tools|apt|http_egress|tcp_egress|dns|labels|resources|jobs)
             # Known key — ok
             ;;
         *)
@@ -43,21 +43,7 @@ while IFS= read -r key; do
 done < <(yq 'keys | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
 # ============================================================================
-# 2. egress: / http_egress: mutual-exclusion and deprecation
-# ============================================================================
-has_egress=$(yq 'has("egress")' "$RUNNER_YML" 2>/dev/null || echo "false")
-has_http_egress=$(yq 'has("http_egress")' "$RUNNER_YML" 2>/dev/null || echo "false")
-
-if [[ "$has_egress" == "true" && "$has_http_egress" == "true" ]]; then
-    _err "http_egress and egress (deprecated) both set — pick one"
-fi
-
-if [[ "$has_egress" == "true" && "$has_http_egress" != "true" ]]; then
-    _warn "egress: is deprecated; rename to http_egress:"
-fi
-
-# ============================================================================
-# 3. runtime: required and must match known variants
+# 2. runtime: required and must match known variants
 # ============================================================================
 runtime=$(yq '.runtime // ""' "$RUNNER_YML" 2>/dev/null || true)
 
@@ -70,22 +56,20 @@ if ! echo "$runtime" | grep -qE '^(node:[0-9]+|python:[0-9]+\.[0-9]+|rust:(stabl
 fi
 
 # ============================================================================
-# 4. http_egress / egress: valid domain patterns only
+# 3. http_egress: valid domain patterns only
 # ============================================================================
-for field in http_egress egress; do
-    while IFS= read -r domain; do
-        [[ "$domain" == "null" || -z "$domain" ]] && continue
-        if ! echo "$domain" | grep -qE '^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$'; then
-            _err "http_egress entry '$domain' is invalid — must be a domain like '.npmjs.org' or 'api.example.com'"
-        fi
-        if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-            _err "http_egress entry '$domain' is invalid — IP addresses are not allowed; use domain names"
-        fi
-    done < <(yq ".${field} // [] | .[]" "$RUNNER_YML" 2>/dev/null || true)
-done
+while IFS= read -r domain; do
+    [[ "$domain" == "null" || -z "$domain" ]] && continue
+    if ! echo "$domain" | grep -qE '^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$'; then
+        _err "http_egress entry '$domain' is invalid — must be a domain like '.npmjs.org' or 'api.example.com'"
+    fi
+    if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        _err "http_egress entry '$domain' is invalid — IP addresses are not allowed; use domain names"
+    fi
+done < <(yq '.http_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
 # ============================================================================
-# 5. tcp_egress: must be host:port, port in [1,65535], no duplicate ports
+# 4. tcp_egress: must be host:port, port in [1,65535], no duplicate ports
 # ============================================================================
 _seen_ports_file=$(mktemp /tmp/runsecure-ports-XXXXXX)
 trap 'rm -f "$_seen_ports_file"' EXIT
@@ -122,7 +106,7 @@ while IFS= read -r entry; do
 done < <(yq '.tcp_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
 
 # ============================================================================
-# 6. dns: optional block validation
+# 5. dns: optional block validation
 # ============================================================================
 dns_exists=$(yq 'has("dns")' "$RUNNER_YML" 2>/dev/null || echo "false")
 

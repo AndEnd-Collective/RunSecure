@@ -100,7 +100,7 @@ The Docker network architecture prevents the container from reaching the interne
 
 8. **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
 
-9. **`egress:` field is deprecated.** Renamed to `http_egress:`. Continues to work in this release with a warning; removed in the release after.
+9. **`egress:` field removed.** Replaced by `http_egress:`. Configs still using `egress:` are rejected at orchestrator startup with an "unknown field" error from the strict-schema validator.
 
 10. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
 
