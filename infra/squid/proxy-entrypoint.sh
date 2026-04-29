@@ -32,8 +32,9 @@ if [[ "${ENABLE_DNSMASQ}" == "true" ]]; then
         exit 1
     fi
     log "starting dnsmasq..."
-    # Rewrite resolv.conf so squid + haproxy resolve through dnsmasq
-    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    # HAProxy resolves through dnsmasq via an explicit resolvers section in
+    # haproxy.cfg (127.0.0.1:53), so no /etc/resolv.conf rewrite is needed.
+    # Squid resolves through its own dns_nameservers directive in squid.conf.
     dnsmasq -k --conf-file="${DNSMASQ_CFG}" &
     PIDS+=($!)
     log "dnsmasq started (PID ${PIDS[-1]})"

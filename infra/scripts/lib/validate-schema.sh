@@ -15,6 +15,8 @@
 
 set -euo pipefail
 
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq not found in PATH; install yq v4+ (https://github.com/mikefarah/yq)" >&2; exit 1; }
+
 RUNNER_YML="${1:?Usage: validate-schema.sh /path/to/runner.yml}"
 
 if [[ ! -f "$RUNNER_YML" ]]; then
@@ -91,8 +93,8 @@ trap 'rm -f "$_seen_ports_file"' EXIT
 while IFS= read -r entry; do
     [[ "$entry" == "null" || -z "$entry" ]] && continue
 
-    if ! echo "$entry" | grep -qE '^[^:]+:[0-9]+$'; then
-        _err "tcp_egress: invalid entry \"${entry}\" — expected host:port"
+    if ! echo "$entry" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?:[0-9]+$'; then
+        _err "tcp_egress: invalid entry \"${entry}\" — expected host:port where host contains only alphanumeric, dot, and hyphen characters"
     fi
 
     port="${entry##*:}"

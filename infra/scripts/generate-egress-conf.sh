@@ -45,7 +45,7 @@ PROXY_IP="10.11.12.13"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/yaml-emit.sh"
 
-_log() { echo "[generate-egress-conf] $*"; }
+_log() { echo "[generate-egress-conf] $*" >&2; }
 _err() { echo "[generate-egress-conf] ERROR: $*" >&2; exit 1; }
 
 # ============================================================================
@@ -156,9 +156,26 @@ backend backend_${port}
         return
     fi
 
-    # Build config from template using awk
-    awk -v entries="$ENTRIES_BLOCK" '
-        /# HAPROXY_ENTRIES_START/ { print; print entries; found=1; next }
+    # Determine whether dnsmasq will be active (so we can add a resolvers
+    # section pointing haproxy at 127.0.0.1:53, avoiding any need to write
+    # /etc/resolv.conf from a non-root container process).
+    local dns_host_raw
+    dns_host_raw=$(yq '.dns.host' "$RUNNER_YML" 2>/dev/null || echo "null")
+    local resolvers_block=""
+    if [[ "$dns_host_raw" == "false" ]]; then
+        resolvers_block="resolvers dnsmasq_local\n    nameserver local 127.0.0.1:53\n    resolve_retries 3\n    timeout retry 1s\n    hold valid 10s\n    accepted_payload_size 8192"
+    fi
+
+    # Build config from template using awk.
+    # Pass multi-line content via ENVIRON to avoid awk -v newline limitations.
+    RS_HAPROXY_ENTRIES=$(printf '%b' "$ENTRIES_BLOCK") \
+    RS_HAPROXY_RESOLVERS=$(printf '%b' "$resolvers_block") \
+    awk '
+        /# HAPROXY_RESOLVERS_PLACEHOLDER/ {
+            if (ENVIRON["RS_HAPROXY_RESOLVERS"] != "") print ENVIRON["RS_HAPROXY_RESOLVERS"]
+            next
+        }
+        /# HAPROXY_ENTRIES_START/ { print; print ENVIRON["RS_HAPROXY_ENTRIES"]; found=1; next }
         found && /# HAPROXY_ENTRIES_END/ { found=0 }
         !found { print }
     ' "$HAPROXY_TMPL" > "$HAPROXY_CFG"
@@ -275,27 +292,42 @@ _generate_runtime_compose() {
             _log "RUNSECURE_DIAG_RETENTION=0 — skipping diag bind mounts."
             yaml_emit_empty_services
         else
-            echo "services:"
-            echo "  runner:"
-            echo "    volumes:"
-            echo "      - ${RUNSECURE_ROOT}/_diag:/home/runner/actions-runner/_diag"
+            # Build runner block content — collect volumes and dns together
+            # to avoid duplicate runner: keys (YAML last-key-wins silently
+            # drops the first block).
+            local runner_volumes=""
+            local runner_dns=""
 
+            runner_volumes="      - ${RUNSECURE_ROOT}/_diag:/home/runner/actions-runner/_diag\n"
+
+            if [[ "$enable_dnsmasq" == "true" ]]; then
+                # When dnsmasq is active, runner should use proxy as DNS
+                runner_dns="    dns:\n      - ${PROXY_IP}"
+            fi
+
+            echo "services:"
+
+            # Emit single runner: block with all content
+            echo "  runner:"
+            printf "    volumes:\n"
+            printf '%b' "$runner_volumes"
+            if [[ -n "$runner_dns" ]]; then
+                printf '%b\n' "$runner_dns"
+            fi
+
+            # Proxy block: diag volume + env flags + config volume mounts
             echo "  proxy:"
             echo "    volumes:"
             echo "      - ${RUNSECURE_ROOT}/_diag-proxy:/var/log/squid"
+            if [[ "$enable_haproxy" == "true" ]]; then
+                echo "      - ${HAPROXY_CFG}:/etc/haproxy/haproxy.cfg:ro"
+            fi
+            if [[ "$enable_dnsmasq" == "true" ]]; then
+                echo "      - ${DNSMASQ_CONF}:/etc/dnsmasq.conf:ro"
+            fi
             echo "    environment:"
             echo "      - ENABLE_HAPROXY=${enable_haproxy}"
             echo "      - ENABLE_DNSMASQ=${enable_dnsmasq}"
-            if [[ "$enable_haproxy" == "true" ]]; then
-                echo "      - HAPROXY_CFG=${HAPROXY_CFG}"
-            fi
-            if [[ "$enable_dnsmasq" == "true" ]]; then
-                echo "      - DNSMASQ_CFG=${DNSMASQ_CONF}"
-                # When dnsmasq is active, runner should use proxy as DNS
-                echo "  runner:"
-                echo "    dns:"
-                echo "      - ${PROXY_IP}"
-            fi
         fi
     } > "$RUNTIME_COMPOSE"
 
