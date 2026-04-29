@@ -1,0 +1,14 @@
+name: discovery-multistep
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: [self-hosted, runsecure-discovery]
+    steps:
+      - run: echo "step 1 ok"
+      - run: echo "step 2 ok"
+      - name: step 3 fails
+        run: |
+          echo "MID-STEP-MARKER" >&2
+          exit 1
+      - run: echo "step 4 should be skipped"
+      - run: echo "step 5 should be skipped"
