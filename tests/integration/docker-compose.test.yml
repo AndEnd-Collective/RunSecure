@@ -3,6 +3,12 @@
 # ============================================================================
 # Launches Squid proxy + runner container on an isolated network for testing.
 # No JIT token required — the runner container just runs test scripts.
+#
+# Additional fixture services for TCP egress + DNS tests:
+#   postgres-test   — PostgreSQL server for TCP egress tests
+#   mock-tcp        — Simple TCP echo service for HAProxy tests
+#   mock-dns        — dnsmasq-based mock DNS server for DNS tests
+#   url-server      — Static HTTP server for hosts_file/whitelist_file fetch tests
 # ============================================================================
 
 services:
@@ -16,6 +22,7 @@ services:
       - ${SQUID_CONF:-../../infra/squid/base.conf}:/etc/squid/squid.conf:ro
     networks:
       test-net:
+        ipv4_address: 10.11.12.13
         aliases:
           - proxy
       proxy-external: {}
@@ -68,8 +75,85 @@ services:
     networks:
       - test-net
 
+  # --- PostgreSQL: TCP egress target fixture ----------------------------------
+  # Used by test-tcp-egress.sh to verify HAProxy can proxy TCP to a real server.
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: runsecure-test-postgres
+    environment:
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+      - POSTGRES_DB=testdb
+    networks:
+      proxy-external: {}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          pids: 32
+
+  # --- Mock TCP service: lightweight TCP echo fixture -------------------------
+  # Used by test-tcp-egress.sh to verify basic TCP passthrough via HAProxy.
+  mock-tcp:
+    image: alpine:3.19
+    container_name: runsecure-test-mock-tcp
+    command: ["sh", "-c", "while true; do nc -l -p 9999 -e echo 'PONG'; done"]
+    networks:
+      proxy-external:
+        aliases:
+          - mock-tcp
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+          pids: 8
+
+  # --- Mock DNS server: dnsmasq-based DNS fixture ----------------------------
+  # Used by test-dns-validation.sh to verify dnsmasq responds to queries.
+  mock-dns:
+    build:
+      context: ../../tests/fixtures/mock-dns
+      dockerfile: Dockerfile
+    container_name: runsecure-test-mock-dns
+    networks:
+      proxy-external:
+        aliases:
+          - mock-dns
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+          pids: 8
+
+  # --- URL server: static file server for hosts_file/whitelist_file ----------
+  # Serves test fixtures over HTTP for fetch-runtime-file.sh tests.
+  url-server:
+    image: nginx:alpine
+    container_name: runsecure-test-url-server
+    volumes:
+      - ../../tests/fixtures/url-server:/usr/share/nginx/html:ro
+    networks:
+      proxy-external:
+        aliases:
+          - url-server
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+          pids: 8
+
 networks:
   test-net:
     internal: true
+    ipam:
+      config:
+        - subnet: 10.11.12.0/24
+          ip_range: 10.11.12.96/28
   proxy-external:
     driver: bridge
