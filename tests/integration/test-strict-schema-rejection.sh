@@ -301,6 +301,51 @@ apt:
 EOF
 )"
 
+# --- H2: hardening: block validation ----------------------------------------
+check "valid hardening.remove accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [curl, jq, unzip]
+EOF
+)"
+
+check "valid hardening.stub accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  stub: [curl, jq]
+EOF
+)"
+
+check "valid mixed remove + stub accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [unzip]
+  stub: [curl, jq]
+EOF
+)"
+
+check "hardening with shell metachar rejected (H2)" 1 "invalid tool name" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: ["jq; rm -rf /"]
+EOF
+)"
+
+check "hardening with overlapping remove+stub rejected (H2)" 1 "appears in both 'remove' and 'stub'" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [curl]
+  stub: [curl]
+EOF
+)"
+
+check "hardening with unknown sub-key rejected (H2)" 1 "unknown sub-key" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  forbid_everything: true
+EOF
+)"
+
 # --- H11: malformed YAML must fail-closed (not silently pass) ----------------
 check "malformed YAML fails-closed (H11)" 1 \
     "yq failed parsing" \
