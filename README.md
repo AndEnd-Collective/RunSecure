@@ -49,7 +49,130 @@ gh auth status                      # Must be authenticated
 
 ---
 
-## Getting Started
+## Quick Start (Published Images)
+
+This is the path for **consumers** who want to use RunSecure containers directly without cloning the source repository. Most teams should use this path. (Contributors and image authors: see "Building from Source (Contributors)" below for the build-from-source flow.)
+
+### What you need on your host
+
+- Docker Engine 20.10+ (or Docker Desktop / Colima with the Docker socket)
+- `docker compose` (v2)
+- `gh` CLI authenticated against the GitHub repo where your workflows run
+- `yq` (v4+) for parsing `runner.yml` — `brew install yq` or your distro's package manager
+- A small handful of helper scripts from this repo. Either:
+  - Clone the repo (read-only): `git clone https://github.com/AndEnd-Collective/RunSecure.git` and use `RunSecure/infra/scripts/run.sh`
+  - Or download just the orchestrator: `curl -fsSL https://raw.githubusercontent.com/AndEnd-Collective/RunSecure/main/infra/scripts/run.sh -o /usr/local/bin/runsecure && chmod +x /usr/local/bin/runsecure` (do the same for the helpers under `infra/scripts/lib/`)
+
+### Step 1 — Pull the images you need
+
+Pick a release version (semver, no `v` prefix). Replace `<VERSION>` below.
+
+```bash
+docker pull ghcr.io/andend-collective/runsecure/proxy:<VERSION>
+docker pull ghcr.io/andend-collective/runsecure/base:<VERSION>
+# Then ONE language image:
+docker pull ghcr.io/andend-collective/runsecure/node:<VERSION>-24
+# or:
+docker pull ghcr.io/andend-collective/runsecure/python:<VERSION>-3.12
+# or:
+docker pull ghcr.io/andend-collective/runsecure/rust:<VERSION>-stable
+```
+
+The `proxy` image contains squid + haproxy + dnsmasq and is required for any RunSecure runner. The language images extend `runner-base` with a specific language toolchain.
+
+### Step 2 — Create your project's `runner.yml`
+
+Inside your project (the repo whose CI you're hardening), create `.github/runner.yml`:
+
+```yaml
+version: "<VERSION>"          # MUST match the pulled images' version
+runtime: node:24              # node:22, node:24, python:3.11, python:3.12, rust:stable
+
+http_egress:
+  - .npmjs.org
+  - .github.com
+
+# Optional: TCP egress for database clients
+# tcp_egress:
+#   - ep-foo.neon.tech:5432
+
+# Optional: DNS configuration
+# dns:
+#   host: false
+#   servers:
+#     - 1.1.1.1
+
+apt:
+  - postgresql-client          # Install client tools the workflow needs
+```
+
+When `version:` is set, the orchestrator pulls images from GHCR rather than building locally. **Always pin `version:`** when consuming published images — the schema validator's strict-field check will catch version-skew bugs (an old orchestrator with a new config produces a clear error rather than silently dropping unknown fields).
+
+See [Configuration Reference](#configuration-reference) below for the full schema.
+
+### Step 3 — Update your GitHub workflow
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, Linux, ARM64, container]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm test
+```
+
+The `runs-on` labels must match the `labels:` field in `runner.yml` (default: `[self-hosted, Linux, ARM64, container]`).
+
+### Step 4 — Start the runner
+
+From your project directory:
+
+```bash
+runsecure --project /path/to/your/project --repo <owner>/<repo>
+```
+
+(Substitute the actual orchestrator path if you haven't installed it as `/usr/local/bin/runsecure`.)
+
+The orchestrator:
+1. Reads your `.github/runner.yml`
+2. Validates the schema (rejects unknown fields, malformed `tcp_egress:`, etc.)
+3. Pulls the pinned images from GHCR if not present locally
+4. Generates the squid / haproxy / dnsmasq configs from your `runner.yml`
+5. Generates a Docker Compose overlay (`infra/runtime-compose.yml`)
+6. Requests a JIT runner token from the GitHub API via `gh`
+7. Launches the proxy container, then the runner container, on an isolated Docker network
+8. Streams runner logs to your terminal
+9. Waits for the runner to pick up and complete one job, then tears down
+
+**Hard requirements satisfied:** the runner has no direct network access (only via the proxy), runs as a non-root user with `cap_drop: ALL`, and is destroyed after one job (`--rm`). The proxy is fail-closed — if any of squid/haproxy/dnsmasq die, the runner's connections start failing.
+
+### What gets persisted on your host
+
+- `_diag/Worker_*.log` — the actions-runner's per-job diagnostic logs (one rotation kept in `_diag.previous/`). Set `RUNSECURE_DIAG_RETENTION=0` to disable host persistence; the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
+- `_diag-proxy/dnsmasq.log` (only when `dns.host: false` and `dns.log_queries: true`) — DNS query log. Treat as confidential; hostnames sometimes carry secrets.
+
+### Updating to a new release
+
+```bash
+# 1. Read the release notes:
+gh release view <NEW_VERSION> --repo AndEnd-Collective/RunSecure
+
+# 2. Pull the new images:
+docker pull ghcr.io/andend-collective/runsecure/proxy:<NEW_VERSION>
+docker pull ghcr.io/andend-collective/runsecure/<lang>:<NEW_VERSION>-<ver>
+
+# 3. Update version: in your runner.yml.
+
+# 4. Run as before. If you're behind on schema (e.g. still using egress:), the
+# validator will fail loudly — see "Migrating from egress: to http_egress:" below.
+```
+
+---
+
+## Building from Source (Contributors)
+
+This path is for contributors and image authors who modify the RunSecure containers themselves. **Most users should use the [Quick Start (Published Images)](#quick-start-published-images) above instead.**
 
 ### Step 1 — Build the Base Image
 
@@ -143,6 +266,31 @@ The orchestrator will:
 ## Configuration Reference
 
 All configuration lives in your project's `.github/runner.yml`. Only `runtime` is required — everything else has defaults.
+
+### Schema cheat-sheet
+
+A single-glance reference for every top-level field:
+
+```yaml
+# Complete runner.yml reference
+version: "1.2.0"              # Pin RunSecure release; required when consuming published images
+runtime: node:24              # Required: language and version
+tools: [playwright, semgrep]  # Optional: bake CI tools into the project image
+apt: [postgresql-client]      # Optional: extra apt packages for the project image
+http_egress:                  # Optional: HTTP/HTTPS allowlist (squid)
+  - .npmjs.org
+tcp_egress:                   # Optional: raw TCP allowlist (haproxy); host:port; ports unique
+  - ep-foo.neon.tech:5432
+dns:                          # Optional: DNS resolver config (default: host DNS)
+  host: false                 # false = use in-proxy dnsmasq; true (default) = host DNS
+  servers: [1.1.1.1]          # Required if host:false (unless hosts_file is set)
+  hosts_file: ./hosts.txt     # Optional: path or https:// URL
+  whitelist_file: ./allow.txt # Optional: strict allowlist; path or https:// URL
+  log_queries: true           # Optional: log to _diag-proxy/dnsmasq.log
+labels: [self-hosted, Linux, ARM64, container]   # GH runner labels (must match runs-on)
+resources: { memory: 8g, cpus: 4, pids: 2048 }  # Container limits
+jobs: { lint: base, e2e: full }                  # Optional: per-job image override
+```
 
 ### `runtime` (required)
 
@@ -489,6 +637,19 @@ The simplest setup is two layers: base + language. That's a fully functional, ha
 
 If your `runner.yml` only specifies `runtime` (no tools, no extra apt packages), the language image is used as-is — no project image is generated, no extra build step.
 
+### What's in each container
+
+| Image | Purpose | Contains |
+|---|---|---|
+| `proxy` | Egress chokepoint for the runner — enforces HTTP/HTTPS allowlist, optional raw TCP forwarding, optional in-proxy DNS | `squid`, `haproxy` (only when `tcp_egress:` is set), `dnsmasq` (only when `dns.host: false`) |
+| `base` (`runner-base`) | Hardened Debian + the GitHub Actions runner binary, non-root user UID 1001, no setuid binaries, no apt at runtime in project images | actions-runner, hardening (cap_drop, seccomp, setuid-stripped, root locked) |
+| `node:<v>` | `runner-base` + Node.js | nvm / nodejs at the pinned major version, npm |
+| `python:<v>` | `runner-base` + Python | python3 + pip at the pinned minor version |
+| `rust:<v>` | `runner-base` + Rust | rustup + cargo at the pinned channel |
+| (project image, content-hash tag) | Built locally if no `version:` is pinned, or when `tools:` / `apt:` are set: language image + your tool recipes + your apt packages + final hardening | runtime-specific; apt removed, setuid re-stripped, `/etc` locked |
+
+The `proxy` image is always required — it is the only path to the internet for the runner container. The language images are the images your CI code actually runs in. The project image (content-hash tagged) is generated on demand and cached; if two projects have identical configs, they share the same image.
+
 ### Approximate Image Sizes
 
 Most projects use just the language image:
@@ -736,7 +897,9 @@ ghcr.io/andend-collective/runsecure/proxy:1.2.0
 
 ### Consuming a published release
 
-Add a `version:` field to your project's `.github/runner.yml`:
+See the [Quick Start (Published Images)](#quick-start-published-images) section above for the consumer-focused flow, including how to pull images, write your `runner.yml`, and run the orchestrator.
+
+To summarize: add a `version:` field to your project's `.github/runner.yml`:
 
 ```yaml
 version: "1.2.0"
