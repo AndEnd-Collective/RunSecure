@@ -1,0 +1,9 @@
+name: discovery-success
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: [self-hosted, runsecure-discovery]
+    steps:
+      - run: echo "step 1 ok"
+      - run: echo "step 2 ok"
+      - run: echo "MARKER-SUCCESS-TAIL"
