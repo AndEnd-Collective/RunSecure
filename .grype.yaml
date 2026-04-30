@@ -1,0 +1,26 @@
+# ============================================================================
+# RunSecure — Grype Configuration
+# ============================================================================
+# Allowlist for vulnerabilities that have no upstream fix and that we've
+# determined do not apply to our usage. Every entry MUST include a
+# justification — Grype's CVE allowlist is a sharp tool that hides real
+# risk if used carelessly.
+#
+# Add entries here only after:
+#   1. Confirming there's no upstream fix in a more recent version of the
+#      affected component (or that we already pin past it).
+#   2. Tracing whether the vulnerable code path is actually reachable from
+#      the runner. Most CVEs in actions-runner's Go module deps are in
+#      code paths the runner doesn't exercise (e.g. server-only paths in
+#      grpc, sigstore signing flows we don't trigger).
+#   3. Recording WHO checked, WHEN, and the link to upstream issue/CVE.
+# ============================================================================
+
+ignore: []
+# Example entry shape (for future use):
+# ignore:
+#   - vulnerability: CVE-2025-XXXXX
+#     reason: |
+#       Affects only the gRPC server path. The actions-runner is a gRPC
+#       client only — server code is not loaded. No upstream fix as of
+#       2026-04-30. Re-evaluate when runner v2.336+ ships.

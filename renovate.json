@@ -27,14 +27,24 @@
     },
     {
       "customType": "regex",
-      "description": "Pin GH Actions runner version + GH CLI version in base.Dockerfile",
+      "description": "Pin GH Actions runner version in base.Dockerfile",
       "fileMatch": ["^images/base\\.Dockerfile$"],
       "matchStrings": [
-        "ARG RUNNER_VERSION=(?<currentValue>[^\\s]+)",
-        "ARG GH_CLI_VERSION=(?<currentValue>[^\\s]+)"
+        "ARG RUNNER_VERSION=(?<currentValue>[^\\s]+)"
       ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "actions/runner",
+      "extractVersionTemplate": "^v?(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Pin gh CLI version in base.Dockerfile",
+      "fileMatch": ["^images/base\\.Dockerfile$"],
+      "matchStrings": [
+        "ARG GH_CLI_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "cli/cli",
       "extractVersionTemplate": "^v?(?<version>.+)$"
     }
   ],

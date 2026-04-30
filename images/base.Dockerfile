@@ -24,12 +24,16 @@
 FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a AS base
 
 # ---- Build arguments --------------------------------------------------------
-ARG RUNNER_VERSION=2.333.1
-ARG RUNNER_SHA256_ARM64=69ac7e5692f877189e7dddf4a1bb16cbbd6425568cd69a0359895fac48b9ad3b
-ARG RUNNER_SHA256_AMD64=18f8f68ed1892854ff2ab1bab4fcaa2f5abeedc98093b6cb13638991725cab74
-ARG GH_CLI_VERSION=2.74.1
-ARG GH_CLI_SHA256_AMD64=c3d909c338589589b32ee2357a76cea3b2c7bdfe1754ab8a62316fa846692935
-ARG GH_CLI_SHA256_ARM64=33fa56cf99c94327fac125a8c503e65b0c1ce330e3f9868c316172eb9c5b364a
+# Bumped from 2.333.1 → 2.334.0 to absorb upstream Go-stdlib + grpc +
+# docker/cli + sigstore CVEs flagged by the post-publish Grype scan.
+# Renovate's customManager keeps these tracked going forward.
+ARG RUNNER_VERSION=2.334.0
+ARG RUNNER_SHA256_ARM64=f44255bd3e80160eb25f71bc83d06ea025f6908748807a584687b3184759f7e4
+ARG RUNNER_SHA256_AMD64=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
+# Bumped from 2.74.1 → 2.92.0 to absorb intermediate releases.
+ARG GH_CLI_VERSION=2.92.0
+ARG GH_CLI_SHA256_AMD64=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
+ARG GH_CLI_SHA256_ARM64=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
 
 ARG TARGETARCH
 
