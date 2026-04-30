@@ -20,6 +20,7 @@ services:
       - squid-ssl:/etc/squid/ssl:ro
     networks:
       runner-net:
+        ipv4_address: 10.11.12.13
         aliases:
           - proxy
       proxy-external: {}
@@ -32,10 +33,18 @@ services:
       start_period: 10s
 
     # --- Hardening: proxy container ---
+    # NET_BIND_SERVICE is needed for dnsmasq (port 53) and for any tcp_egress
+    # port below 1024 that haproxy may need to bind.
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
+      # M5: apply the same syscall allowlist as the runner. The profile
+      # is permissive enough to support squid/dnsmasq/haproxy and tightens
+      # the proxy's syscall surface from the unrestricted Docker default.
+      - seccomp:../infra/seccomp/node-runner.json
     deploy:
       resources:
         limits:
@@ -46,17 +55,34 @@ services:
   runner:
     image: ${RUNNER_IMAGE:-runner-base:latest}
     container_name: ${RUNNER_NAME:-runsecure-runner}
+    # H3: init: true gives the container a tini PID 1 so the entrypoint
+    # shell doesn't have to reap children. The actions-runner forks
+    # Worker.exe processes and short-lived shell helpers; without an
+    # init those can become zombies that pile up against the pids limit
+    # for long jobs. tini also forwards SIGTERM cleanly so the
+    # entrypoint's log-upload wait actually runs to completion when the
+    # orchestrator stops the container.
+    init: true
     restart: "no"
     depends_on:
       proxy:
         condition: service_healthy
 
     # --- JIT config and proxy routing ---
+    # M13: emit BOTH upper- and lower-case proxy env vars. Most CLI
+    # tools honour both forms, but a stubborn minority (curl when used
+    # without --proxy, some Python libs that consult lowercase only,
+    # apt under specific configurations) only read one. Setting both
+    # avoids a subset of jobs silently bypassing the proxy because of
+    # case-sensitivity quirks.
     environment:
       - RUNNER_JIT_CONFIG=${RUNNER_JIT_CONFIG}
       - HTTP_PROXY=http://proxy:3128
       - HTTPS_PROXY=http://proxy:3128
       - NO_PROXY=localhost,127.0.0.1
+      - http_proxy=http://proxy:3128
+      - https_proxy=http://proxy:3128
+      - no_proxy=localhost,127.0.0.1
       - RUNNER_NAME=${RUNNER_NAME:-runsecure-ephemeral}
       - SEMGREP_SETTINGS_FILE=/home/runner/.semgrep/settings.yml
       - SEMGREP_VERSION_CACHE_PATH=/home/runner/.semgrep/versions
@@ -108,9 +134,16 @@ services:
 # runner-net is internal: true — the runner has NO direct internet route.
 # Only the proxy has dual-network membership (runner-net + proxy-external),
 # making Squid a mandatory network gateway, not an optional application proxy.
+#
+# IPAM subnet 10.11.12.0/24: proxy always at 10.11.12.13 (static IP).
+# ip_range 10.11.12.96/28 reserves .96-.111 for dynamic runner containers.
 networks:
   runner-net:
     internal: true
+    ipam:
+      config:
+        - subnet: 10.11.12.0/24
+          ip_range: 10.11.12.96/28
   proxy-external:
     driver: bridge
 

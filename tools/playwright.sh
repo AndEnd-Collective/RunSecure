@@ -34,10 +34,19 @@ apt-get install -y --no-install-recommends \
     xdg-utils
 rm -rf /var/lib/apt/lists/*
 
-# Install Playwright CLI and download Chromium only (not Firefox/WebKit)
-# Note: su is removed by base hardening, so use HOME override to install
-# as root but to the runner user's cache location.
-HOME=/home/runner npx --yes playwright install chromium
+# H9: pin Playwright version. `npx --yes playwright` would resolve to
+# whatever the latest version is at image-build time. Renovate updates
+# the constant.
+# renovate: datasource=npm depName=playwright
+# 1.59.1 (2026-04-01) — latest stable, comfortably past the 48h gate.
+PLAYWRIGHT_VERSION="1.59.1"
+
+# Install Playwright globally with pinned version, then use the pinned
+# binary to download Chromium. We install via npm rather than running
+# `npx --yes playwright@VERSION` so the resolved package is on PATH for
+# downstream workflows that call `playwright` directly.
+npm install -g "playwright@${PLAYWRIGHT_VERSION}"
+HOME=/home/runner playwright install chromium
 
 # Fix ownership: npx ran as root, so .cache and .npm are root-owned.
 # The runner user (1001) needs to write to these at runtime.

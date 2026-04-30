@@ -1,0 +1,4 @@
+# RunSecure test fixture — served by url-server
+# Used to test dns.hosts_file with an https:// URL.
+
+192.0.2.10  remote-hosts-test.internal.example.com

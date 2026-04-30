@@ -1,0 +1,108 @@
+# ============================================================================
+# RunSecure — Grype CVE Scan (PR-level)
+# ============================================================================
+# Builds runner-base, runner-node:24, and runner-python:3.12 from the PR's
+# code and scans each with Grype. Runs on every PR that touches images/
+# or tools/.
+#
+# Failure threshold: HIGH+CRITICAL with a fix available. Issues without
+# upstream fixes are uploaded to the Security tab as SARIF but don't block
+# (chasing unfixable issues creates noise).
+#
+# Implementation note: grype is installed directly via Anchore's official
+# install script rather than via anchore/scan-action. The action wrapper
+# bundles a pinned grype binary that has periodically failed with a
+# "vulnerability database was built N weeks ago (max allowed age is 5
+# days)" error when Anchore's DB CDN drifts past the pinned grype's
+# tolerance. Direct install pulls the latest grype, which always uses
+# the current DB schema.
+#
+# A separate post-publish Grype scan runs in publish-images.yml against
+# the images that actually got pushed to GHCR.
+# ============================================================================
+
+name: grype-scan
+
+on:
+  pull_request:
+    paths:
+      - 'images/**'
+      - 'tools/**'
+      - '.github/workflows/grype-scan.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: runner-base
+            dockerfile: images/base.Dockerfile
+            build_arg: ''
+          - image_name: runner-node-24
+            dockerfile: images/node.Dockerfile
+            build_arg: 'NODE_VERSION=24'
+          - image_name: runner-python-3.12
+            dockerfile: images/python.Dockerfile
+            build_arg: 'PYTHON_VERSION=3.12'
+    env:
+      IMAGE_NAME: ${{ matrix.image_name }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      BUILD_ARG: ${{ matrix.build_arg }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build base image (when target is not base)
+        if: matrix.image_name != 'runner-base'
+        run: docker build -f images/base.Dockerfile -t runner-base:latest .
+
+      - name: Build target image
+        run: |
+          if [ -n "$BUILD_ARG" ]; then
+            docker build -f "$DOCKERFILE" --build-arg "$BUILD_ARG" -t "${IMAGE_NAME}:scan" .
+          else
+            docker build -f "$DOCKERFILE" -t "${IMAGE_NAME}:scan" .
+          fi
+
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Grype scan — fail on HIGH/CRITICAL with fix
+        id: grype
+        run: |
+          set -euo pipefail
+          # Run scan twice: once for the human-readable table (logged),
+          # once for the SARIF upload. We can't pipe a single run to two
+          # outputs without losing the exit code on the SARIF leg.
+          grype "${IMAGE_NAME}:scan" \
+            --output table \
+            --fail-on high \
+            --only-fixed \
+            || GRYPE_FAILED=1
+          # Always emit SARIF (even on fail) so the Security tab is
+          # populated. The fail-build decision is made on the table run.
+          grype "${IMAGE_NAME}:scan" \
+            --output sarif \
+            --file grype-results.sarif \
+            --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes."
+            exit 1
+          fi
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always() && hashFiles('grype-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
+        with:
+          sarif_file: grype-results.sarif
+          category: 'grype-${{ matrix.image_name }}'

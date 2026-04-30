@@ -202,9 +202,6 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- Phase 4: Unit Tests (Script Validation) ---${NC}\n"
 
-step "Unit: generate-squid-conf.sh" \
-    bash "${TESTS_DIR}/unit/test-generate-squid-conf.sh"
-
 step "Unit: compose-image.sh" \
     bash "${TESTS_DIR}/unit/test-compose-image.sh"
 

@@ -52,7 +52,7 @@ fi
 # ============================================================================
 echo -e "${BOLD}--- 1. Double execution ---${NC}"
 
-OUTPUT=$(docker run --rm \
+OUTPUT=$(docker run --rm --user 0 \
     -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
     runner-base:latest bash -c "
         # First run
@@ -87,7 +87,7 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- 2. Setuid bits after double run ---${NC}"
 
-SETUID_COUNT=$(docker run --rm \
+SETUID_COUNT=$(docker run --rm --user 0 \
     -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
     runner-base:latest bash -c "
         bash /tmp/finalize.sh &>/dev/null
@@ -106,7 +106,7 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- 3. /etc permissions after double run ---${NC}"
 
-ETC_PERMS=$(docker run --rm \
+ETC_PERMS=$(docker run --rm --user 0 \
     -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
     runner-base:latest bash -c "
         bash /tmp/finalize.sh &>/dev/null
@@ -125,7 +125,7 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- 4. /etc/passwd and /etc/group permissions ---${NC}"
 
-PERMS=$(docker run --rm \
+PERMS=$(docker run --rm --user 0 \
     -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
     runner-base:latest bash -c "
         bash /tmp/finalize.sh &>/dev/null
@@ -154,7 +154,7 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- 5. apt removal persists ---${NC}"
 
-APT_EXISTS=$(docker run --rm \
+APT_EXISTS=$(docker run --rm --user 0 \
     -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
     runner-base:latest bash -c "
         bash /tmp/finalize.sh &>/dev/null

@@ -7,6 +7,8 @@ Thumbs.db
 
 # Generated at runtime
 infra/squid/runtime.conf
+infra/squid/haproxy.cfg
+infra/squid/dnsmasq.conf
 infra/runtime-compose.yml
 _diag/
 _diag.previous/

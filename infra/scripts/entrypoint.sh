@@ -28,8 +28,30 @@ set -euo pipefail
 RUNNER_DIR="/home/runner/actions-runner"
 
 # --- Validate environment ---
-if [[ -z "${RUNNER_JIT_CONFIG:-}" ]]; then
-    echo "[RunSecure] ERROR: RUNNER_JIT_CONFIG is not set."
+# H5/H6/H7: prefer a file-mounted JIT config over an env-var-passed one.
+# A JIT config in the env is visible to:
+#   - any process inside the container that can read /proc/1/environ
+#   - `docker inspect` on the host
+#   - container runtime audit logs
+#
+# A JIT config in a tmpfs-mounted file is visible only to processes
+# that can read the file. The entrypoint reads it once and removes
+# it, so runaway tools spawned by a job can never recover the value.
+#
+# When both forms are set, the file wins. Existing orchestrator
+# invocations that only set RUNNER_JIT_CONFIG continue to work
+# unchanged — this is purely additive until the orchestrator switches.
+if [[ -n "${RUNNER_JIT_CONFIG_FILE:-}" && -f "$RUNNER_JIT_CONFIG_FILE" ]]; then
+    JIT_CONFIG=$(<"$RUNNER_JIT_CONFIG_FILE")
+    # Sweep the file on disk after read. The mount is read-only so this
+    # may fail; that's fine — the orchestrator unlinks the host-side
+    # tmpfs file after the container exits regardless.
+    rm -f "$RUNNER_JIT_CONFIG_FILE" 2>/dev/null || true
+    unset RUNNER_JIT_CONFIG_FILE
+elif [[ -n "${RUNNER_JIT_CONFIG:-}" ]]; then
+    JIT_CONFIG="${RUNNER_JIT_CONFIG}"
+else
+    echo "[RunSecure] ERROR: neither RUNNER_JIT_CONFIG_FILE nor RUNNER_JIT_CONFIG is set."
     echo "[RunSecure] The orchestrator must pass a JIT config from the GitHub API."
     exit 1
 fi
@@ -43,7 +65,8 @@ if [[ -n "${HTTP_PROXY:-}" ]]; then
 fi
 
 # --- Clear sensitive env vars after reading them ---
-JIT_CONFIG="${RUNNER_JIT_CONFIG}"
+# JIT_CONFIG was set above (either from file or env). Either way, the
+# env var must not survive into anything we exec.
 unset RUNNER_JIT_CONFIG
 
 # --- Default values for log-upload wait ---
@@ -73,7 +96,18 @@ set -e
 echo "[RunSecure] Runner exited (code: ${RUNNER_EXIT_CODE}). Waiting for log upload (timeout: ${LOG_UPLOAD_TIMEOUT}s)..."
 
 # --- Wait for the upload-complete marker ---
-WORKER_LOG="$(find "${RUNNER_DIR}/_diag" -maxdepth 1 -name 'Worker_*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2- || true)"
+# Portable "newest matching file": uses bash's -nt comparison instead of
+# `find -printf` (GNU-only) or `ls -t` (shellcheck SC2012). Works on
+# Linux containers AND on macOS hosts running the integration tests.
+WORKER_LOG=""
+shopt -s nullglob 2>/dev/null || true
+for _candidate in "${RUNNER_DIR}/_diag/"Worker_*.log; do
+    [[ -f "${_candidate}" ]] || continue
+    if [[ -z "${WORKER_LOG}" ]] || [[ "${_candidate}" -nt "${WORKER_LOG}" ]]; then
+        WORKER_LOG="${_candidate}"
+    fi
+done
+shopt -u nullglob 2>/dev/null || true
 DEADLINE=$(( $(date +%s) + LOG_UPLOAD_TIMEOUT ))
 
 if [[ -z "${WORKER_LOG}" ]]; then

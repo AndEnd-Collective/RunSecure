@@ -6,7 +6,7 @@
 # gracefully with clear error messages rather than cryptic yq failures.
 #
 # Runs on the host (no Docker required). Tests parsing behavior of
-# compose-image.sh and generate-squid-conf.sh against various invalid configs.
+# compose-image.sh and generate-egress-conf.sh against various invalid configs.
 #
 # Prerequisites: yq installed
 # ============================================================================
@@ -16,7 +16,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/compose-image.sh"
-GENERATE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/generate-squid-conf.sh"
+GENERATE_SCRIPT="${RUNSECURE_ROOT}/infra/scripts/generate-egress-conf.sh"
 
 PASS=0
 FAIL=0
@@ -70,7 +70,7 @@ mkdir -p "$PROJECT_NO_RUNTIME/.github"
 cat > "$PROJECT_NO_RUNTIME/.github/runner.yml" <<'YAML'
 tools:
   - cypress
-egress:
+http_egress:
   - .example.com
 YAML
 
@@ -95,7 +95,7 @@ mkdir -p "$PROJECT_BAD_YAML/.github"
 cat > "$PROJECT_BAD_YAML/.github/runner.yml" <<'YAML'
 runtime: node:24
   tools: [cypress   # invalid — missing bracket, bad indent
-  egress:
+  http_egress:
     - broken
 YAML
 
@@ -108,19 +108,19 @@ else
     fail "compose-image.sh silently accepts invalid YAML (exit 0)"
 fi
 
-# generate-squid-conf.sh should fail or produce a valid fallback config
+# generate-egress-conf.sh should fail or produce a valid fallback config
 EXIT_CODE=0
 OUTPUT=$("$GENERATE_SCRIPT" "$PROJECT_BAD_YAML" 2>&1) || EXIT_CODE=$?
 
 if [[ $EXIT_CODE -eq 0 ]]; then
     # If it succeeded, it should have fallen back to base config
     if diff -q "${RUNSECURE_ROOT}/infra/squid/base.conf" "${RUNSECURE_ROOT}/infra/squid/runtime.conf" &>/dev/null; then
-        pass "generate-squid-conf.sh falls back to base config on invalid YAML"
+        pass "generate-egress-conf.sh falls back to base config on invalid YAML"
     else
-        fail "generate-squid-conf.sh produced non-base config from invalid YAML"
+        fail "generate-egress-conf.sh produced non-base config from invalid YAML"
     fi
 else
-    pass "generate-squid-conf.sh fails explicitly on invalid YAML (exit $EXIT_CODE)"
+    pass "generate-egress-conf.sh fails explicitly on invalid YAML (exit $EXIT_CODE)"
 fi
 rm -f "${RUNSECURE_ROOT}/infra/squid/runtime.conf"
 
@@ -156,25 +156,25 @@ PROJECT_STR_EGRESS="${TMPDIR}/project-str-egress"
 mkdir -p "$PROJECT_STR_EGRESS/.github"
 cat > "$PROJECT_STR_EGRESS/.github/runner.yml" <<'YAML'
 runtime: node:24
-egress: ".example.com"
+http_egress: ".example.com"
 YAML
 
 EXIT_CODE=0
 OUTPUT=$("$GENERATE_SCRIPT" "$PROJECT_STR_EGRESS" 2>&1) || EXIT_CODE=$?
 
 # yq '.egress // [] | .[]' on a scalar string should still produce a domain
-# generate-squid-conf.sh uses `|| true` on the yq call, so it may fall back
+# generate-egress-conf.sh uses `|| true` on the yq call, so it may fall back
 if [[ $EXIT_CODE -eq 0 ]]; then
     # Check that it either injected the domain or fell back to base
     if grep -q ".example.com" "${RUNSECURE_ROOT}/infra/squid/runtime.conf" 2>/dev/null; then
-        pass "generate-squid-conf.sh injected egress string as domain"
+        pass "generate-egress-conf.sh injected egress string as domain"
     elif diff -q "${RUNSECURE_ROOT}/infra/squid/base.conf" "${RUNSECURE_ROOT}/infra/squid/runtime.conf" &>/dev/null; then
-        pass "generate-squid-conf.sh fell back to base config for string egress"
+        pass "generate-egress-conf.sh fell back to base config for string egress"
     else
-        fail "generate-squid-conf.sh produced unexpected config for string egress"
+        fail "generate-egress-conf.sh produced unexpected config for string egress"
     fi
 else
-    fail "generate-squid-conf.sh crashed on egress as string (exit $EXIT_CODE)"
+    fail "generate-egress-conf.sh crashed on egress as string (exit $EXIT_CODE)"
 fi
 rm -f "${RUNSECURE_ROOT}/infra/squid/runtime.conf"
 
@@ -212,7 +212,7 @@ mkdir -p "$PROJECT_EXTRA/.github"
 cat > "$PROJECT_EXTRA/.github/runner.yml" <<'YAML'
 runtime: node:24
 tools: []
-egress: []
+http_egress: []
 unknown_field: "should be ignored"
 extra:
   nested: true
