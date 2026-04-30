@@ -486,6 +486,26 @@ The runner container has no direct internet access. All traffic is routed throug
 
 ---
 
+## Known Limitations
+
+### Per-step logs (resolved)
+
+Earlier RunSecure releases destroyed the ephemeral runner container before per-step logs flushed to GitHub, causing `gh api .../jobs/<id>/logs` to return `BlobNotFound` on failed runs. This release adds a synchronous wait in the container entrypoint for the actions-runner's log-upload-complete marker before exit (default 30s timeout, configurable via `RUNSECURE_LOG_UPLOAD_TIMEOUT`). Logs are reliably retrievable from the GitHub UI for both successful and failed runs.
+
+For operator-side recovery (network blips during upload, GitHub API hiccups), `_diag/` is host-mounted at the orchestrator's working directory. The latest run lives in `_diag/`; the previous run lives in `_diag.previous/`.
+
+To disable the host-side bind mount entirely (security-sensitive shared-host scenarios), set `RUNSECURE_DIAG_RETENTION=0` in the orchestrator environment. The synchronous wait still applies; only the host-side fallback is dropped.
+
+### HTTP-only egress, raw-TCP unsupported
+
+Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+
+### `runner.yml` field names are RunSecure-specific
+
+The `.github/runner.yml` configuration file uses RunSecure-specific field names (`runtime:`, `egress:`, `tools:`, etc.). These fields are not recognized by GitHub-hosted runners. If you switch a job back to `runs-on: ubuntu-latest`, remove or ignore the `runner.yml` file.
+
+---
+
 ## Orchestrator Options
 
 ```
