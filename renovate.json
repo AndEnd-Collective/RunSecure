@@ -45,6 +45,11 @@
       "groupName": "tool recipes"
     },
     {
+      "description": "Group GitHub Action SHA pin updates (incl. anchore/scan-action) into one weekly PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
       "description": "Auto-merge minor/patch updates of base image digests after CI passes",
       "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["digest", "patch"],
