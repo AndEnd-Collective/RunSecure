@@ -38,7 +38,8 @@ rm -rf /var/lib/apt/lists/*
 # whatever the latest version is at image-build time. Renovate updates
 # the constant.
 # renovate: datasource=npm depName=playwright
-PLAYWRIGHT_VERSION="1.52.0"
+# 1.59.1 (2026-04-01) — latest stable, comfortably past the 48h gate.
+PLAYWRIGHT_VERSION="1.59.1"
 
 # Install Playwright globally with pinned version, then use the pinned
 # binary to download Chromium. We install via npm rather than running

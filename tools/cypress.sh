@@ -68,7 +68,7 @@ rm -rf /var/lib/apt/lists/*
 # every user. Renovate updates this constant as a tracked PR so the
 # upgrade is visible.
 # renovate: datasource=npm depName=cypress
-CYPRESS_VERSION="14.3.0"
+CYPRESS_VERSION="15.14.2"
 npm install -g "cypress@${CYPRESS_VERSION}"
 HOME=/home/runner cypress install
 # Note: `cypress verify` is intentionally NOT run during image build.

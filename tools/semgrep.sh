@@ -27,7 +27,8 @@ fi
 
 # H9: pin Semgrep version. Renovate updates the constant.
 # renovate: datasource=pypi depName=semgrep
-SEMGREP_VERSION="1.115.0"
+# 1.161.0 (2026-04-22) — 7d old, past the 48h gate.
+SEMGREP_VERSION="1.161.0"
 python3 -m pip install --no-cache-dir --break-system-packages "semgrep==${SEMGREP_VERSION}"
 
 # Verify

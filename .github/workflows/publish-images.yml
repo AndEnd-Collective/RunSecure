@@ -44,7 +44,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Extract version (tag → semver; manual dispatch → manual-build)
         id: version
@@ -61,15 +61,15 @@ jobs:
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: images/base.Dockerfile
@@ -114,17 +114,17 @@ jobs:
             build_arg: RUST_VERSION=stable
             lang_version: "stable"
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: ${{ matrix.file }}
@@ -150,17 +150,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: infra/squid
           file: infra/squid/Dockerfile
@@ -176,9 +176,12 @@ jobs:
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
   # are found WITH a fix available (unfixed CVEs upload to the Security tab
-  # but don't block — chasing unfixable issues creates noise). Both image-
-  # and Dockerfile-level scans are produced; SARIF lands in the GitHub
-  # Security tab under the matching category.
+  # but don't block — chasing unfixable issues creates noise).
+  #
+  # Grype is installed directly (not via anchore/scan-action) because the
+  # action wrapper bundles a pinned grype binary that periodically fails
+  # with "vulnerability database was built N weeks ago" when the upstream
+  # CDN drifts past the pinned grype's tolerance.
   grype-scan:
     needs: base
     runs-on: ubuntu-latest
@@ -186,29 +189,43 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
-        id: grype_base
-        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
-        with:
-          image: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: sarif
+        # IMAGE_REF is computed in step `env:` rather than job `env:` because
+        # job-level env evaluates BEFORE workflow-level env is in scope, so
+        # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
+        # evaluated when the step runs and resolves correctly.
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-base.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
 
       - name: Upload Grype scan results (base) to GitHub Security
-        if: always() && steps.grype_base.outputs.sarif != ''
-        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
+        if: always() && hashFiles('grype-base.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
         with:
-          sarif_file: ${{ steps.grype_base.outputs.sarif }}
+          sarif_file: grype-base.sarif
           category: grype-base
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
@@ -219,27 +236,37 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
-        id: grype_proxy
-        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
-        with:
-          image: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: sarif
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-proxy.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
 
       - name: Upload Grype scan results (proxy) to GitHub Security
-        if: always() && steps.grype_proxy.outputs.sarif != ''
-        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
+        if: always() && hashFiles('grype-proxy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
         with:
-          sarif_file: ${{ steps.grype_proxy.outputs.sarif }}
+          sarif_file: grype-proxy.sarif
           category: grype-proxy
