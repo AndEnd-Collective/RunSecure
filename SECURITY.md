@@ -73,6 +73,10 @@ The Docker network architecture prevents the container from reaching the interne
 | Non-standard port blocking | Connections on ports other than 443 | `test-egress-proxy.sh` |
 | Cloud metadata endpoint blocking | SSRF to 169.254.169.254 / metadata.google.internal | `test-egress-proxy.sh` |
 | Proxy access log | Post-incident forensics | `squid/base.conf` |
+| HAProxy TCP egress allowlist | Raw TCP connections to non-approved host:port | `test-tcp-egress.sh` |
+| SSRF protection in config fetcher | Private/RFC1918/loopback IPs in dns.hosts_file/whitelist_file URLs | `test-ssrf-protection.sh` (22 checks) |
+| dnsmasq DNS isolation | Leaking internal queries to host resolver when dns.host:false | `test-dns-validation.sh` |
+| Schema validation | Malformed runner.yml reaching the proxy generator | `test-strict-schema-rejection.sh` |
 
 ---
 
@@ -90,11 +94,25 @@ The Docker network architecture prevents the container from reaching the interne
 
 5. **Docker daemon compromise.** The runner does NOT mount the Docker socket. But if the Docker daemon itself is compromised on the host, all containers are at risk.
 
-6. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+6. **TCP port collisions.** Each `tcp_egress` port must be unique. If two services use the same port number, only one can be added.
 
-7. **`_diag/` host-mounted volume.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
+7. **TCP egress is content-opaque.** haproxy forwards bytes; no TLS termination, no protocol-aware ACL. Audit story is "who connected to what, when, for how long" — not "what was sent."
 
-7. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Failed steps in RunSecure return `BlobNotFound` from `gh api .../jobs/<id>/logs` because the ephemeral container is destroyed before logs upload. Both gaps are tracked; see README "Limitations" section. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+8. **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
+
+9. **`egress:` field removed.** Replaced by `http_egress:`. Configs still using `egress:` are rejected at orchestrator startup with an "unknown field" error from the strict-schema validator.
+
+10. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
+
+11. **CONNECT method only.** HTTP/HTTPS goes through Squid CONNECT — no TLS interception. Some HTTP/1.0 clients without CONNECT support may fail.
+
+12. **DNS log sensitivity.** When `dns.host: false` and `dns.log_queries: true`, query names appear in `_diag-proxy/`. Set `dns.log_queries: false` on sensitive CI hosts.
+
+13. **`_diag/` and `_diag-proxy/` host-mounted volumes.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
+
+14. **JIT config exposure via env var (deprecated path).** The orchestrator currently passes the GitHub JIT runner token to the container via `RUNNER_JIT_CONFIG`. While the entrypoint reads it once and `unset`s it, the value is briefly visible to `docker inspect`, container audit logs, and any process inside the container that reads `/proc/1/environ` before the entrypoint clears it. The entrypoint also accepts a file-based path (`RUNNER_JIT_CONFIG_FILE`) which removes those exposure surfaces entirely; the orchestrator switchover to file-mode is a tracked follow-up. Until then, keep gh CLI scopes minimal (see `[RunSecure] WARNING` lines on `run.sh` startup) and do not run RunSecure on shared hosts where unprivileged users can inspect container config.
+
+15. **`gh` CLI scope breadth (M15).** The orchestrator on the host uses `gh auth` to request JIT tokens. If the authenticated user has scopes beyond `repo` + `workflow` (or `admin:org` + `workflow` for org runners), a compromised orchestrator can do more than launch ephemeral runners. `run.sh` now warns at startup when it detects scopes like `delete_repo`, `admin:public_key`, `admin:gpg_key`, `admin:org_hook`, `gist`, or `user`. Re-authenticate with the minimum scope set when this warning appears.
 
 ### Accepted Risks
 

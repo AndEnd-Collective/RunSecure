@@ -1,0 +1,73 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "labels": ["dependencies", "renovate"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "Etc/UTC",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 6,
+  "rangeStrategy": "pin",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Pin tool versions inside tools/*.sh recipes via `# renovate:` comments",
+      "fileMatch": ["^tools/.*\\.sh$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^\\s]+)\\s*\\n[A-Z_]+_VERSION=\"(?<currentValue>[^\"]+)\""
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Pin GH Actions runner version in base.Dockerfile",
+      "fileMatch": ["^images/base\\.Dockerfile$"],
+      "matchStrings": [
+        "ARG RUNNER_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "actions/runner",
+      "extractVersionTemplate": "^v?(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Pin gh CLI version in base.Dockerfile",
+      "fileMatch": ["^images/base\\.Dockerfile$"],
+      "matchStrings": [
+        "ARG GH_CLI_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "cli/cli",
+      "extractVersionTemplate": "^v?(?<version>.+)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group all tool version bumps into one PR per week",
+      "matchFileNames": ["tools/*.sh"],
+      "groupName": "tool recipes"
+    },
+    {
+      "description": "Group GitHub Action SHA pin updates into one weekly PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Auto-merge minor/patch updates of base image digests after CI passes",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest", "patch"],
+      "automerge": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  }
+}

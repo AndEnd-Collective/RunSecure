@@ -1,0 +1,6 @@
+# RunSecure mock DNS hosts file (test fixture)
+# Used by test-dns-validation.sh to verify dnsmasq serves custom records.
+
+# Test entries — these names resolve only inside the test network
+192.0.2.10  test-service.internal.example.com
+192.0.2.20  another-service.internal.example.com

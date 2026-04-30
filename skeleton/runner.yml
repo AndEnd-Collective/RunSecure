@@ -31,13 +31,34 @@ runtime: node:24
 #   - libvips-dev
 #   - ffmpeg
 
-# OPTIONAL: Extra domains allowed through the egress proxy
+# OPTIONAL: Extra HTTP/HTTPS domains allowed through the egress proxy.
 # The base allowlist (GitHub, npm, PyPI, crates.io) is always included.
 # Use ".domain.com" to allow all subdomains.
-# egress:
-#   - "*.neon.tech"
+# http_egress:
+#   - ".neon.tech"
 #   - "api.vercel.com"
-#   - "*.amazonaws.com"
+#   - ".amazonaws.com"
+
+# OPTIONAL: Raw TCP egress for database clients and other TCP-only protocols.
+# Each entry is host:port. Each port must be unique (HAProxy frontend per port).
+# Ports 80 and 443 are reserved for HTTP/HTTPS — use http_egress instead.
+# tcp_egress:
+#   - ep-foo.neon.tech:5432       # Neon Postgres
+#   - redis.internal.company.com:6379
+
+# OPTIONAL: DNS configuration.
+# By default (absent or host: true), the runner uses the Docker host DNS.
+# Set host: false to use an isolated dnsmasq instance inside the proxy
+# container. This prevents DNS-based leakage to the host resolver.
+#
+# When host: false, you must provide either 'servers' or 'hosts_file'.
+# dns:
+#   host: false
+#   servers:
+#     - 10.0.0.53            # Private DNS server IP (no hostname — it's DNS!)
+#   hosts_file: ./infra/dns/hosts.txt   # Local path or https:// URL
+#   whitelist_file: https://internal.company.com/allowed.txt  # Optional
+#   log_queries: true        # Default: true when host:false
 
 # OPTIONAL: GitHub runner labels (must match your workflow's runs-on)
 labels: [self-hosted, Linux, ARM64, container]
