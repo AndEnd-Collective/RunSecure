@@ -188,8 +188,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    env:
-      IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -207,6 +205,12 @@ jobs:
           grype version
 
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
+        # IMAGE_REF is computed in step `env:` rather than job `env:` because
+        # job-level env evaluates BEFORE workflow-level env is in scope, so
+        # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
+        # evaluated when the step runs and resolves correctly.
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
@@ -231,8 +235,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    env:
-      IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -250,6 +252,8 @@ jobs:
           grype version
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \

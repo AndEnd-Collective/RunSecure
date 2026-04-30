@@ -108,17 +108,24 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
           if [ "$IS_SCHEDULED" = "true" ]; then
-            REASON="Weekly automated $BUMP_TYPE release"
+            REASON="Weekly automated ${BUMP_TYPE} release"
           else
-            REASON="Manual $BUMP_TYPE release"
+            REASON="Manual ${BUMP_TYPE} release"
           fi
 
-          git tag -a "$NEXT_VERSION" -m "$REASON
+          # Build the tag message in a temp file so the multi-line body
+          # doesn't have to live inside the YAML `run: |` literal block
+          # (where column-0 continuations would terminate the scope).
+          TAGMSG=$(mktemp)
+          {
+            printf '%s\n\n' "$REASON"
+            printf 'This tag was created automatically by the weekly-version-bump workflow.\n'
+            printf 'The publish-images workflow will fire on this tag-push and rebuild +\n'
+            printf 'scan + publish all images at this version to GHCR.\n'
+          } > "$TAGMSG"
 
-This tag was created automatically by the weekly-version-bump workflow.
-The publish-images workflow will fire on this tag-push and rebuild +
-scan + publish all images at this version to GHCR.
-"
+          git tag -a "$NEXT_VERSION" -F "$TAGMSG"
+          rm -f "$TAGMSG"
           git push origin "$NEXT_VERSION"
           echo "Pushed tag: $NEXT_VERSION"
 
