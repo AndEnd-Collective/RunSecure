@@ -69,8 +69,11 @@ fi
 # Set up fake runner directory for remaining tests
 # ============================================================================
 
-# Create a fake runner dir with a run.sh that dumps env and exits
-FAKE_RUNNER_DIR=$(mktemp -d)
+# Create a fake runner dir with a run.sh that dumps env and exits.
+# Use $HOME because /tmp is mounted noexec in the production hardened
+# runner — direct execution of `./run.sh` would fail with Permission
+# denied when RUNNER_DIR is under /tmp. /home/runner is writable + exec.
+FAKE_RUNNER_DIR=$(mktemp -d -p "${HOME:-/home/runner}")
 trap 'rm -rf "$FAKE_RUNNER_DIR"' EXIT
 
 # Create a fake run.sh that dumps its environment and arguments

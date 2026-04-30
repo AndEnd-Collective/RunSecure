@@ -1,0 +1,138 @@
+# ============================================================================
+# RunSecure — Weekly Patch-Version Bump
+# ============================================================================
+# Every Monday 02:30 UTC, computes the next patch version (latest tag +1
+# on the patch component), creates an annotated tag, and pushes it. The
+# tag push fires publish-images.yml in publish mode, which rebuilds every
+# image (no-cache so Debian package updates land), runs the post-publish
+# Grype scan, and pushes the new tag to GHCR.
+#
+# Why nominal weekly bumps:
+#   - Consumers can pin `version: 1.4.7` in runner.yml against a specific
+#     week's image set with known hardening + dependency state.
+#   - The base image picks up Debian package security updates implicitly
+#     because the rebuild uses `no-cache: true`. The scanner gates the
+#     publish — if a HIGH/CRITICAL CVE with a fix slips in, the workflow
+#     fails and the tag stays around but the GHCR images aren't updated
+#     to that tag.
+#
+# Manual override:
+#   - workflow_dispatch with `bump_type: minor|major` for non-patch bumps.
+#   - workflow_dispatch with `dry_run: true` to compute the next version
+#     without creating a tag (for sanity-checking).
+#
+# Initial state:
+#   - If no v*.*.* tag exists yet, starts from v0.0.0 and produces v0.0.1.
+# ============================================================================
+
+name: weekly-version-bump
+
+on:
+  schedule:
+    # Monday 02:30 UTC — 30 min before the previous publish-images schedule
+    # so the resulting tag-push fires before any external consumers expect
+    # the new images to be available.
+    - cron: '30 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: 'Compute next version without tagging'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to push the new tag back to the repo. No write access
+      # to any other ref — branch protection on main is unaffected.
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need full history + tags to find the latest semver tag.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute next version
+        id: next_version
+        env:
+          BUMP_TYPE: ${{ github.event.inputs.bump_type || 'patch' }}
+        run: |
+          set -euo pipefail
+          # Find latest v<MAJ>.<MIN>.<PATCH> tag. Sort by version, descending.
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            LATEST="v0.0.0"
+            echo "No prior semver tag found — starting from v0.0.0"
+          else
+            echo "Latest tag: $LATEST"
+          fi
+
+          MAJOR=$(echo "$LATEST" | sed -E 's/^v([0-9]+)\.[0-9]+\.[0-9]+$/\1/')
+          MINOR=$(echo "$LATEST" | sed -E 's/^v[0-9]+\.([0-9]+)\.[0-9]+$/\1/')
+          PATCH=$(echo "$LATEST" | sed -E 's/^v[0-9]+\.[0-9]+\.([0-9]+)$/\1/')
+
+          case "$BUMP_TYPE" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "Invalid bump type: $BUMP_TYPE" >&2; exit 1 ;;
+          esac
+
+          NEXT="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "Computed next version: $NEXT (bump: $BUMP_TYPE)"
+
+      - name: Create and push tag
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+          BUMP_TYPE: ${{ github.event.inputs.bump_type || 'patch' }}
+          IS_SCHEDULED: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          if [ "$IS_SCHEDULED" = "true" ]; then
+            REASON="Weekly automated ${BUMP_TYPE} release"
+          else
+            REASON="Manual ${BUMP_TYPE} release"
+          fi
+
+          # Build the tag message in a temp file so the multi-line body
+          # doesn't have to live inside the YAML `run: |` literal block
+          # (where column-0 continuations would terminate the scope).
+          TAGMSG=$(mktemp)
+          {
+            printf '%s\n\n' "$REASON"
+            printf 'This tag was created automatically by the weekly-version-bump workflow.\n'
+            printf 'The publish-images workflow will fire on this tag-push and rebuild +\n'
+            printf 'scan + publish all images at this version to GHCR.\n'
+          } > "$TAGMSG"
+
+          git tag -a "$NEXT_VERSION" -F "$TAGMSG"
+          rm -f "$TAGMSG"
+          git push origin "$NEXT_VERSION"
+          echo "Pushed tag: $NEXT_VERSION"
+
+      - name: Dry run summary
+        if: github.event.inputs.dry_run == 'true'
+        env:
+          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+        run: |
+          echo "DRY RUN — would tag $NEXT_VERSION but did not."
+          echo "$NEXT_VERSION" > "$GITHUB_STEP_SUMMARY"

@@ -3,6 +3,12 @@
 # ============================================================================
 # Launches Squid proxy + runner container on an isolated network for testing.
 # No JIT token required — the runner container just runs test scripts.
+#
+# Additional fixture services for TCP egress + DNS tests:
+#   postgres-test   — PostgreSQL server for TCP egress tests
+#   mock-tcp        — Simple TCP echo service for HAProxy tests
+#   mock-dns        — dnsmasq-based mock DNS server for DNS tests
+#   url-server      — Static HTTP server for hosts_file/whitelist_file fetch tests
 # ============================================================================
 
 services:
@@ -12,10 +18,18 @@ services:
       dockerfile: Dockerfile
     container_name: runsecure-test-proxy
     init: true
+    environment:
+      - ENABLE_HAPROXY=${ENABLE_HAPROXY:-true}
+      - ENABLE_DNSMASQ=${ENABLE_DNSMASQ:-true}
+      - HAPROXY_CFG=/etc/haproxy/haproxy.cfg
+      - DNSMASQ_CFG=/etc/dnsmasq.conf
     volumes:
       - ${SQUID_CONF:-../../infra/squid/base.conf}:/etc/squid/squid.conf:ro
+      - ../../tests/fixtures/test-haproxy.cfg:/etc/haproxy/haproxy.cfg:ro
+      - ../../tests/fixtures/test-dnsmasq.conf:/etc/dnsmasq.conf:ro
     networks:
       test-net:
+        ipv4_address: 10.11.12.13
         aliases:
           - proxy
       proxy-external: {}
@@ -27,17 +41,24 @@ services:
       start_period: 5s
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
+      # M5: same seccomp profile as the runner — tests that the profile
+      # actually permits squid/dnsmasq/haproxy to start.
+      - seccomp:../../infra/seccomp/node-runner.json
     deploy:
       resources:
         limits:
           memory: 256m
-          pids: 32
+          pids: 64
 
   runner:
     image: ${RUNNER_IMAGE:-runner-node:24}
     container_name: runsecure-test-runner
+    # H3: matches prod compose — see infra/docker-compose.yml for rationale.
+    init: true
     depends_on:
       proxy:
         condition: service_healthy
@@ -48,12 +69,19 @@ services:
       - https_proxy=http://proxy:3128
       - NO_PROXY=localhost,127.0.0.1,proxy
       - no_proxy=localhost,127.0.0.1,proxy
+    dns:
+      - 10.11.12.13
     volumes:
       - ../../tests:/mnt/tests:ro
       - ../../infra:/mnt/infra:ro
     entrypoint: ["bash", "/mnt/tests/integration/${TEST_SCRIPT:-test-egress-proxy.sh}"]
 
     # --- Hardening (matches production) ---
+    # M11/M12: use the SAME deploy.resources + ulimits keys as the prod
+    # compose. Previously this used the legacy `mem_limit/cpus/pids_limit`
+    # top-level keys, which docker-compose v2 still honours but which
+    # don't exercise the same code path as the deploy.resources.limits
+    # block in prod — divergence would only surface at deployment time.
     user: "1001:0"
     security_opt:
       - no-new-privileges:true
@@ -62,14 +90,105 @@ services:
       - ALL
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g,uid=1001,gid=0
-    mem_limit: 4g
-    cpus: 2
-    pids_limit: 512
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
+          pids: 512
+        reservations:
+          memory: 512m
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+      nproc:
+        soft: 2048
+        hard: 2048
     networks:
       - test-net
+
+  # --- PostgreSQL: TCP egress target fixture ----------------------------------
+  # Used by test-tcp-egress.sh to verify HAProxy can proxy TCP to a real server.
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: runsecure-test-postgres
+    environment:
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+      - POSTGRES_DB=testdb
+    networks:
+      proxy-external: {}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          pids: 32
+
+  # --- Mock TCP service: lightweight TCP echo fixture -------------------------
+  # Used by test-tcp-egress.sh to verify basic TCP passthrough via HAProxy.
+  # socat is used instead of "nc -e" because alpine's OpenBSD netcat does not
+  # support -e; socat is portable and available via apk.
+  mock-tcp:
+    image: alpine:3.20
+    container_name: runsecure-test-mock-tcp
+    command: ["sh", "-c", "apk add --no-cache socat && socat -v TCP-LISTEN:9999,fork,reuseaddr SYSTEM:'echo PONG'"]
+    networks:
+      proxy-external:
+        aliases:
+          - mock-tcp
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          pids: 64
+
+  # --- Mock DNS server: dnsmasq-based DNS fixture ----------------------------
+  # Used by test-dns-validation.sh to verify dnsmasq responds to queries.
+  mock-dns:
+    build:
+      context: ../../tests/fixtures/mock-dns
+      dockerfile: Dockerfile
+    container_name: runsecure-test-mock-dns
+    networks:
+      proxy-external:
+        aliases:
+          - mock-dns
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+          pids: 8
+
+  # --- URL server: static file server for hosts_file/whitelist_file ----------
+  # Serves test fixtures over HTTP for fetch-runtime-file.sh tests.
+  url-server:
+    image: nginx:alpine
+    container_name: runsecure-test-url-server
+    volumes:
+      - ../../tests/fixtures/url-server:/usr/share/nginx/html:ro
+    networks:
+      proxy-external:
+        aliases:
+          - url-server
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+          pids: 8
 
 networks:
   test-net:
     internal: true
+    ipam:
+      config:
+        - subnet: 10.11.12.0/24
+          ip_range: 10.11.12.96/28
   proxy-external:
     driver: bridge
