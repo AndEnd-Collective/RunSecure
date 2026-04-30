@@ -21,19 +21,24 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a AS base
+FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS base
 
 # ---- Build arguments --------------------------------------------------------
-# Bumped from 2.333.1 → 2.334.0 to absorb upstream Go-stdlib + grpc +
-# docker/cli + sigstore CVEs flagged by the post-publish Grype scan.
-# Renovate's customManager keeps these tracked going forward.
+# All pins follow a 48-hour freshness rule: the chosen version must be at
+# least 48h old (we don't adopt bleeding-edge releases that could still
+# be yanked for regressions). Renovate's customManager handles ongoing
+# bumps with this same window.
+#
+# RUNNER_VERSION 2.334.0 (2026-04-21): patches Go-stdlib + grpc +
+#   docker/cli + sigstore CVEs from the previous 2.333.1 pin.
 ARG RUNNER_VERSION=2.334.0
 ARG RUNNER_SHA256_ARM64=f44255bd3e80160eb25f71bc83d06ea025f6908748807a584687b3184759f7e4
 ARG RUNNER_SHA256_AMD64=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
-# Bumped from 2.74.1 → 2.92.0 to absorb intermediate releases.
-ARG GH_CLI_VERSION=2.92.0
-ARG GH_CLI_SHA256_AMD64=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
-ARG GH_CLI_SHA256_ARM64=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
+# GH_CLI_VERSION 2.91.0 (2026-04-22): 2.92.0 was released 2026-04-28
+# and is too fresh for the 48h gate. Re-evaluate next week.
+ARG GH_CLI_VERSION=2.91.0
+ARG GH_CLI_SHA256_AMD64=f87e4ea0bd55abad3c9c565f4fdb2eb040adabe5638a5a2e0917253cb58fdc3a
+ARG GH_CLI_SHA256_ARM64=a8f425f583480d10e43a72703fd7cdbe554c7eefba5841f3e68ed653235b7b5e
 
 ARG TARGETARCH
 
