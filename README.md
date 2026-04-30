@@ -152,6 +152,19 @@ The orchestrator:
 - `_diag/Worker_*.log` — the actions-runner's per-job diagnostic logs (one rotation kept in `_diag.previous/`). Set `RUNSECURE_DIAG_RETENTION=0` to disable host persistence; the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 - `_diag-proxy/dnsmasq.log` (only when `dns.host: false` and `dns.log_queries: true`) — DNS query log. Treat as confidential; hostnames sometimes carry secrets.
 
+### Release cadence
+
+A new patch release is cut **every Monday at 02:30 UTC** by an automated
+workflow. The bump is unconditional — even if no source changes landed
+during the week, the rebuild picks up Debian package security updates,
+and consumers can pin a fresh weekly version against a known scanned
+state. A Grype CVE scan gates the publish: if a HIGH/CRITICAL CVE with
+a fix slips into the rebuild, the publish fails and the previous tag
+remains the latest available on GHCR.
+
+Manual releases for `minor`/`major` bumps go through the same workflow
+via `gh workflow run weekly-version-bump.yml -f bump_type=minor`.
+
 ### Updating to a new release
 
 ```bash
