@@ -1,0 +1,11 @@
+name: discovery-failure
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: [self-hosted, runsecure-discovery]
+    steps:
+      - name: deliberately fail with stderr
+        run: |
+          echo "MARKER-STDERR" >&2
+          echo "MARKER-STDOUT"
+          exit 1
