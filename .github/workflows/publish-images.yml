@@ -176,15 +176,20 @@ jobs:
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
   # are found WITH a fix available (unfixed CVEs upload to the Security tab
-  # but don't block — chasing unfixable issues creates noise). Both image-
-  # and Dockerfile-level scans are produced; SARIF lands in the GitHub
-  # Security tab under the matching category.
+  # but don't block — chasing unfixable issues creates noise).
+  #
+  # Grype is installed directly (not via anchore/scan-action) because the
+  # action wrapper bundles a pinned grype binary that periodically fails
+  # with "vulnerability database was built N weeks ago" when the upstream
+  # CDN drifts past the pinned grype's tolerance.
   grype-scan:
     needs: base
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
+    env:
+      IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -194,21 +199,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
-        id: grype_base
-        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
-        with:
-          image: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: sarif
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-base.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
 
       - name: Upload Grype scan results (base) to GitHub Security
-        if: always() && steps.grype_base.outputs.sarif != ''
+        if: always() && hashFiles('grype-base.sarif') != ''
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
         with:
-          sarif_file: ${{ steps.grype_base.outputs.sarif }}
+          sarif_file: grype-base.sarif
           category: grype-base
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
@@ -218,6 +231,8 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -227,19 +242,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
-        id: grype_proxy
-        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
-        with:
-          image: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: sarif
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-proxy.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
 
       - name: Upload Grype scan results (proxy) to GitHub Security
-        if: always() && steps.grype_proxy.outputs.sarif != ''
+        if: always() && hashFiles('grype-proxy.sarif') != ''
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
         with:
-          sarif_file: ${{ steps.grype_proxy.outputs.sarif }}
+          sarif_file: grype-proxy.sarif
           category: grype-proxy

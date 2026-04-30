@@ -45,7 +45,7 @@
       "groupName": "tool recipes"
     },
     {
-      "description": "Group GitHub Action SHA pin updates (incl. anchore/scan-action) into one weekly PR",
+      "description": "Group GitHub Action SHA pin updates into one weekly PR",
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
     },
