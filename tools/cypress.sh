@@ -61,10 +61,15 @@ dpkg --configure -a 2>/dev/null || true
 rm -f /usr/sbin/policy-rc.d
 rm -rf /var/lib/apt/lists/*
 
-# Install Cypress CLI globally and pre-download the Cypress binary into
-# /home/runner/.cache/Cypress so it's baked into the image (avoids
-# every workflow run re-downloading at startup).
-npm install -g cypress
+# H9: pin Cypress version. Floating `npm i -g cypress` builds a
+# different image every time the recipe runs, which (a) defeats image
+# determinism, (b) silently absorbs upstream supply-chain changes, and
+# (c) means a regression in a new Cypress release immediately affects
+# every user. Renovate updates this constant as a tracked PR so the
+# upgrade is visible.
+# renovate: datasource=npm depName=cypress
+CYPRESS_VERSION="14.3.0"
+npm install -g "cypress@${CYPRESS_VERSION}"
 HOME=/home/runner cypress install
 # Note: `cypress verify` is intentionally NOT run during image build.
 #   Cypress 14+ on arm64 hangs in `--smoke-test` even under xvfb-run because

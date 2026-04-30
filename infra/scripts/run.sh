@@ -110,6 +110,44 @@ echo "Version: $RUNSECURE_VERSION"
 echo "Labels:  $LABELS"
 echo ""
 
+# --- M15: warn if gh CLI auth has more scopes than we need ------------------
+# JIT generation needs: repo:admin (or admin:org for org-level runners) +
+# actions:write. If the user is authenticated with `repo` (which includes
+# read+write on every repo they can see), `delete_repo`, `gist`, `workflow`,
+# or anything beyond what's required, a compromised orchestrator could do
+# more damage than launching ephemeral runners. This is a best-effort
+# heuristic — `gh auth status` doesn't always print scopes, and the
+# minimum-permission set depends on whether the runner is repo- or
+# org-scoped. Surface it as a WARNING, not a failure.
+_gh_scope_warning() {
+    if ! command -v gh >/dev/null 2>&1; then
+        return 0
+    fi
+    # `gh auth status` writes to stderr; capture both streams.
+    local out
+    out=$(gh auth status 2>&1 || true)
+    # Token scopes line looks like: "  - Token scopes: 'repo', 'workflow', 'admin:org', …"
+    local scopes_line
+    scopes_line=$(echo "$out" | grep -i 'Token scopes' | head -1)
+    if [[ -z "$scopes_line" ]]; then
+        return 0
+    fi
+    local risky_scopes=""
+    # These scopes grant capabilities orthogonal to JIT-runner provisioning.
+    for risky in delete_repo admin:public_key admin:gpg_key admin:repo_hook admin:org_hook user gist; do
+        if echo "$scopes_line" | grep -qiE "['\"]${risky}['\"]"; then
+            risky_scopes="${risky_scopes}${risky} "
+        fi
+    done
+    if [[ -n "$risky_scopes" ]]; then
+        echo "[RunSecure] WARNING: gh CLI authenticated with broader scopes than RunSecure needs."
+        echo "[RunSecure]          unnecessary scopes detected: ${risky_scopes}"
+        echo "[RunSecure]          consider re-authenticating with only 'repo' (or 'admin:org' for org runners) + 'workflow'."
+        echo ""
+    fi
+}
+_gh_scope_warning
+
 COMPOSE_ARGS=""
 if [[ "$FORCE_REBUILD" == true ]]; then
     COMPOSE_ARGS="--force"

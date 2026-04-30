@@ -1,0 +1,80 @@
+# ============================================================================
+# RunSecure — Grype CVE Scan (PR-level)
+# ============================================================================
+# Builds runner-base, runner-node:24, and runner-python:3.12 from the PR's
+# code and scans each with Grype (Anchore). Runs on every PR that touches
+# images/ or tools/.
+#
+# Failure threshold: HIGH+CRITICAL with a fix available. Issues without
+# upstream fixes are uploaded to the Security tab as SARIF but don't block
+# (chasing unfixable issues creates noise).
+#
+# A separate post-publish Grype scan runs in publish-images.yml against
+# the images that actually got pushed to GHCR.
+# ============================================================================
+
+name: grype-scan
+
+on:
+  pull_request:
+    paths:
+      - 'images/**'
+      - 'tools/**'
+      - '.github/workflows/grype-scan.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: runner-base
+            dockerfile: images/base.Dockerfile
+            build_arg: ''
+          - image_name: runner-node-24
+            dockerfile: images/node.Dockerfile
+            build_arg: 'NODE_VERSION=24'
+          - image_name: runner-python-3.12
+            dockerfile: images/python.Dockerfile
+            build_arg: 'PYTHON_VERSION=3.12'
+    env:
+      IMAGE_NAME: ${{ matrix.image_name }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      BUILD_ARG: ${{ matrix.build_arg }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Build base image (when target is not base)
+        if: matrix.image_name != 'runner-base'
+        run: docker build -f images/base.Dockerfile -t runner-base:latest .
+
+      - name: Build target image
+        run: |
+          if [ -n "$BUILD_ARG" ]; then
+            docker build -f "$DOCKERFILE" --build-arg "$BUILD_ARG" -t "${IMAGE_NAME}:scan" .
+          else
+            docker build -f "$DOCKERFILE" -t "${IMAGE_NAME}:scan" .
+          fi
+
+      - name: Grype scan — fail on HIGH/CRITICAL with fix
+        id: grype
+        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
+        with:
+          image: '${{ matrix.image_name }}:scan'
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always() && steps.grype.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: 'grype-${{ matrix.image_name }}'

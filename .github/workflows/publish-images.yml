@@ -15,14 +15,15 @@
 name: Publish Images
 
 on:
+  # Triggered by the weekly version-bump workflow creating a new
+  # tag (Mondays 02:30 UTC). Manual tag pushes also trigger this.
+  # The schedule trigger that previously ran a no-push rebuild for
+  # scanning was removed: the weekly bump now produces a real
+  # release every Monday, which fires this workflow in publish mode
+  # and gives us rebuild + scan + publish in one path.
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-  schedule:
-    # Weekly base-image rebuild: every Monday at 03:00 UTC.
-    # Rebuilds the base image from scratch (no cache) to pick up Debian package
-    # security updates, then runs Trivy against the freshly-built image.
-    - cron: "0 3 * * 1"
   workflow_dispatch: {}
 
 env:
@@ -45,16 +46,19 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      - name: Extract version (tag → semver; schedule/dispatch → weekly-rebuild)
+      - name: Extract version (tag → semver; manual dispatch → manual-build)
         id: version
         env:
           REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "$EVENT_NAME" == "push" ]]; then
+          # On a tag push, ref_name is "v1.2.3" — strip the v.
+          # On a manual workflow_dispatch (no tag), tag the build
+          # "manual-build" so it doesn't collide with semver tags.
+          if [[ "$EVENT_NAME" == "push" && "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=weekly-rebuild" >> "$GITHUB_OUTPUT"
+            echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
@@ -69,8 +73,9 @@ jobs:
         with:
           context: .
           file: images/base.Dockerfile
-          # Only push to GHCR on real semver tag pushes; scheduled/dispatch runs
-          # build locally for the Trivy scan only (no-cache to get fresh packages).
+          # Push to GHCR on real semver tag pushes only. Manual dispatch
+          # builds locally for the post-build Grype scan (no-cache so
+          # Debian package updates are picked up).
           push: ${{ github.event_name == 'push' }}
           no-cache: ${{ github.event_name != 'push' }}
           platforms: linux/amd64,linux/arm64
@@ -168,10 +173,13 @@ jobs:
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
             org.opencontainers.image.version=${{ needs.base.outputs.version }}
 
-  # --- Weekly Trivy scan: detects known CVEs in the base image ---------------
-  # Runs after base is rebuilt. Fails the workflow if HIGH/CRITICAL CVEs are
-  # found without a fix available (unfixable vulns are reported but not failed).
-  trivy-scan:
+  # --- Post-publish Grype scan: detects known CVEs in the base image ---------
+  # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
+  # are found WITH a fix available (unfixed CVEs upload to the Security tab
+  # but don't block — chasing unfixable issues creates noise). Both image-
+  # and Dockerfile-level scans are produced; SARIF lands in the GitHub
+  # Security tab under the matching category.
+  grype-scan:
     needs: base
     runs-on: ubuntu-latest
     permissions:
@@ -186,24 +194,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Trivy vulnerability scan (base image)
-        uses: aquasecurity/trivy-action@dc5e42498e20ad37d3c21cf17d4bf6b2c5bde3bc # v0.28.0
+      - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
+        id: grype_base
+        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
         with:
-          image-ref: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
-          format: sarif
-          output: trivy-base-results.sarif
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
+          image: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}"
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
 
-      - name: Upload Trivy scan results (base) to GitHub Security
+      - name: Upload Grype scan results (base) to GitHub Security
+        if: always() && steps.grype_base.outputs.sarif != ''
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
-        if: always()
         with:
-          sarif_file: trivy-base-results.sarif
+          sarif_file: ${{ steps.grype_base.outputs.sarif }}
+          category: grype-base
 
-  # --- Weekly Trivy scan: proxy image (dnsmasq + haproxy CVEs per spec §9.4) -
-  trivy-scan-proxy:
+  # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
+  grype-scan-proxy:
     needs: [proxy, base]
     runs-on: ubuntu-latest
     permissions:
@@ -218,18 +227,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Trivy vulnerability scan (proxy image)
-        uses: aquasecurity/trivy-action@dc5e42498e20ad37d3c21cf17d4bf6b2c5bde3bc # v0.28.0
+      - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
+        id: grype_proxy
+        uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v6.6.0
         with:
-          image-ref: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
-          format: sarif
-          output: trivy-proxy-results.sarif
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
+          image: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}"
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
 
-      - name: Upload Trivy scan results (proxy) to GitHub Security
+      - name: Upload Grype scan results (proxy) to GitHub Security
+        if: always() && steps.grype_proxy.outputs.sarif != ''
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
-        if: always()
         with:
-          sarif_file: trivy-proxy-results.sarif
+          sarif_file: ${{ steps.grype_proxy.outputs.sarif }}
+          category: grype-proxy

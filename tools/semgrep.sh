@@ -25,8 +25,10 @@ if ! python3 -m pip --version &>/dev/null; then
     rm -rf /var/lib/apt/lists/*
 fi
 
-# Install semgrep via pip
-python3 -m pip install --no-cache-dir --break-system-packages semgrep
+# H9: pin Semgrep version. Renovate updates the constant.
+# renovate: datasource=pypi depName=semgrep
+SEMGREP_VERSION="1.115.0"
+python3 -m pip install --no-cache-dir --break-system-packages "semgrep==${SEMGREP_VERSION}"
 
 # Verify
 semgrep --version

@@ -17,7 +17,14 @@
 global
     log /dev/log local0
     maxconn 1024
-    stats socket /var/lib/haproxy/admin.sock mode 660 level admin
+    # M2: drop the stats socket from `level admin` (full-control over
+    # haproxy state — disable servers, change weights, add/remove
+    # frontends at runtime) to `level user` (read-only stats only). The
+    # socket is unix-only and the proxy container has cap_drop ALL +
+    # no-new-privileges, so the attack surface is small — but there is
+    # no operational reason for runtime admin mutation of haproxy from
+    # inside the container, so removing the capability is free.
+    stats socket /var/lib/haproxy/admin.sock mode 660 level user
     stats timeout 30s
     # Run as the proxy user (already set by container USER directive)
     # but HAProxy needs daemon mode when started via -D flag.

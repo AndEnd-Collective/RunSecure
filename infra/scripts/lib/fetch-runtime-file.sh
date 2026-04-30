@@ -160,23 +160,47 @@ _check_host() {
         return 0
     fi
 
-    # DNS resolution check — verify every returned IP is public
-    if command -v dig >/dev/null 2>&1; then
-        while IFS= read -r ip; do
-            [[ -z "$ip" ]] && continue
-            if _is_private_ip "$ip"; then
-                _blocked "URL '$url_for_msg' resolves to private/reserved IP '$ip' — SSRF denied"
-            fi
-        done < <(dig +short "$hostname" 2>/dev/null || true)
+    # DNS resolution check — verify every returned IP is public.
+    # H10: hard-fail if no DNS resolution tool is available. Previously
+    # the absence of dig/host/getent was treated as "skip the check and
+    # let curl resolve" — that's a silent SSRF bypass. The runner image
+    # ships getent (in libc-bin); the orchestrator on the host typically
+    # has dig (dnsutils) or host (bind9-host). If none is present we
+    # cannot guarantee the SSRF guarantee, so we refuse to fetch.
+    #
+    # Tool preference: getent (most portable), then dig, then host.
+    # Each tool's resolver path differs slightly so we capture results
+    # from whichever is available and check every returned A record.
+    local resolved_ips=""
+    local resolver=""
+    if command -v getent >/dev/null 2>&1; then
+        resolver="getent"
+        resolved_ips=$(getent ahosts "$hostname" 2>/dev/null | awk '{print $1}' | sort -u)
+    elif command -v dig >/dev/null 2>&1; then
+        resolver="dig"
+        resolved_ips=$(dig +short +time=2 +tries=1 "$hostname" 2>/dev/null | grep -E '^[0-9]+\.|:' || true)
     elif command -v host >/dev/null 2>&1; then
-        while IFS= read -r ip; do
-            [[ -z "$ip" ]] && continue
-            if _is_private_ip "$ip"; then
-                _blocked "URL '$url_for_msg' resolves to private/reserved IP '$ip' — SSRF denied"
-            fi
-        done < <(host -t A "$hostname" 2>/dev/null | awk '/has address/{print $NF}' || true)
+        resolver="host"
+        resolved_ips=$(host -W 2 -t A "$hostname" 2>/dev/null | awk '/has address/{print $NF}' || true)
+    else
+        _err "no DNS resolution tool available (need getent, dig, or host) — cannot perform SSRF check on '$url_for_msg'"
     fi
-    # If no DNS tool is available, allow the URL and let curl fail naturally.
+
+    # H10 (continued): fail-closed if the resolver returned no records.
+    # An empty result could mean NXDOMAIN (legitimate failure) OR a
+    # transient resolver hiccup. Either way, allowing curl to proceed
+    # would let it use a different resolution path that bypasses our
+    # check. Refuse instead.
+    if [[ -z "$resolved_ips" ]]; then
+        _blocked "DNS resolution of '$hostname' returned no records via $resolver — refusing to fetch '$url_for_msg' (cannot verify destination is public)"
+    fi
+
+    while IFS= read -r ip; do
+        [[ -z "$ip" ]] && continue
+        if _is_private_ip "$ip"; then
+            _blocked "URL '$url_for_msg' resolves to private/reserved IP '$ip' — SSRF denied"
+        fi
+    done <<< "$resolved_ips"
 }
 
 # ============================================================================

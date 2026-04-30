@@ -152,6 +152,19 @@ The orchestrator:
 - `_diag/Worker_*.log` — the actions-runner's per-job diagnostic logs (one rotation kept in `_diag.previous/`). Set `RUNSECURE_DIAG_RETENTION=0` to disable host persistence; the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 - `_diag-proxy/dnsmasq.log` (only when `dns.host: false` and `dns.log_queries: true`) — DNS query log. Treat as confidential; hostnames sometimes carry secrets.
 
+### Release cadence
+
+A new patch release is cut **every Monday at 02:30 UTC** by an automated
+workflow. The bump is unconditional — even if no source changes landed
+during the week, the rebuild picks up Debian package security updates,
+and consumers can pin a fresh weekly version against a known scanned
+state. A Grype CVE scan gates the publish: if a HIGH/CRITICAL CVE with
+a fix slips into the rebuild, the publish fails and the previous tag
+remains the latest available on GHCR.
+
+Manual releases for `minor`/`major` bumps go through the same workflow
+via `gh workflow run weekly-version-bump.yml -f bump_type=minor`.
+
 ### Updating to a new release
 
 ```bash
@@ -287,6 +300,9 @@ dns:                          # Optional: DNS resolver config (default: host DNS
   hosts_file: ./hosts.txt     # Optional: path or https:// URL
   whitelist_file: ./allow.txt # Optional: strict allowlist; path or https:// URL
   log_queries: true           # Optional: log to _diag-proxy/dnsmasq.log
+hardening:                    # Optional: prune unused tools from the final image
+  remove: [unzip]             # rm the binary outright — `command not found`
+  stub:   [curl, jq]          # replace with a friendly stub explaining the removal
 labels: [self-hosted, Linux, ARM64, container]   # GH runner labels (must match runs-on)
 resources: { memory: 8g, cpus: 4, pids: 2048 }  # Container limits
 jobs: { lint: base, e2e: full }                  # Optional: per-job image override
@@ -381,6 +397,22 @@ dns:
 When `host: false`, at least one of `servers` or `hosts_file` is required.
 
 The `hosts_file` and `whitelist_file` values accept either a local filesystem path or an `https://` URL. SSRF protection is applied: private/RFC1918/loopback/CGNAT/IPv6-ULA addresses are blocked before any download attempt.
+
+### `hardening`
+
+Opt-in pruning of unused tools from the final image. Both lists default empty. Names must be alphanumeric (with `-`/`_`).
+
+```yaml
+hardening:
+  remove: [unzip]            # rm the binary; jobs that call it get
+                              # 'command not found' from the shell.
+  stub: [curl, jq]           # replace with a friendly stub that exits
+                              # 127 and prints '[runsecure] curl was
+                              # intentionally replaced by hardening.stub
+                              # in your runner.yml' on stderr.
+```
+
+Use `remove` when you're certain no job touches the tool — every binary you remove is one less lateral-movement target if a job is exploited. Use `stub` when you'd rather see actionable error messages during rollout. A name cannot appear in both lists; the validator rejects that at orchestrator startup.
 
 ### `labels`
 

