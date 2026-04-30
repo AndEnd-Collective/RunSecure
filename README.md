@@ -365,6 +365,36 @@ If your CI job fails because a dependency needs to reach a domain that isn't all
 
 ---
 
+## Limitations
+
+These are known limitations of the current RunSecure release. Each is being tracked; see the linked design notes for the planned fix.
+
+### Egress is HTTP/HTTPS only
+
+The runner container egresses **only** through the Squid proxy. Squid forwards HTTP and HTTPS (via `CONNECT`) but does not tunnel arbitrary TCP. Workflow steps that open raw TCP connections to external hosts will fail with no working network path:
+
+- `psql`, `pg_dump`, `pg_isready` (PostgreSQL on port 5432)
+- `mysql`, `mariadb` (MySQL/MariaDB on port 3306)
+- `redis-cli` (Redis on port 6379)
+- `mongosh` (MongoDB on port 27017)
+- Any custom TCP/gRPC client that does not honor `HTTP_PROXY`
+
+The `egress:` field in `runner.yml` controls **HTTP/HTTPS allowlisting only**, despite the field name. Allowlisting `*.neon.tech` does not make port 5432 reachable.
+
+**Workaround for jobs that need raw TCP:** declare the affected job as `runs-on: ubuntu-latest` (the GitHub-hosted runner with full network access). Keep the rest of the matrix on RunSecure. This is a known trade-off: the most security-sensitive CI steps (those with database credentials) end up on the unhardened runner. A fix that adds opt-in TCP egress to RunSecure is in design — see `docs/superpowers/specs/` if you have access.
+
+### Per-step logs are unavailable for failed runs
+
+When a workflow step fails inside RunSecure, the GitHub Actions UI shows the failure but `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs` returns `BlobNotFound`. The ephemeral container is destroyed (`--rm`) before the actions-runner has finished uploading per-step logs to GitHub. Consumers cannot see *why* a step failed without re-running with extra instrumentation.
+
+**Workaround:** add `set -x` (bash trace mode) to failing steps and rely on the in-step echo to surface the command + arguments. Or temporarily run the workflow on `ubuntu-latest` to capture the actual error. A fix that synchronously waits for log upload before container teardown is in design.
+
+### `runner.yml` field name is misleading
+
+`egress:` is the canonical name today. It controls only HTTP/HTTPS via Squid. A future release will introduce `http_egress:` (the renamed equivalent), `tcp_egress:` (raw TCP), and `dns:` (DNS resolver controls). The current `egress:` field will continue to work with a deprecation warning during the transition.
+
+---
+
 ## Image Architecture
 
 Images are stackable. You only build what you need.

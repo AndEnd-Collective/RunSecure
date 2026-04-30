@@ -92,6 +92,8 @@ The Docker network architecture prevents the container from reaching the interne
 
 6. **Raw IP HTTP access.** Domain-based proxy filtering cannot block HTTP requests to raw IP addresses for non-CONNECT requests. The internal Docker network mitigates this by preventing direct internet access.
 
+7. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Failed steps in RunSecure return `BlobNotFound` from `gh api .../jobs/<id>/logs` because the ephemeral container is destroyed before logs upload. Both gaps are tracked; see README "Limitations" section. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+
 ### Accepted Risks
 
 - **apt binary exists in intermediate images** (language layers). It is removed in final composed images via `finalize-hardening.sh`. In intermediate images, the runner user (UID 1001) cannot install system packages without root/capabilities.
