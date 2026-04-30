@@ -7,6 +7,12 @@ Thumbs.db
 
 # Generated at runtime
 infra/squid/runtime.conf
+infra/runtime-compose.yml
+_diag/
+_diag.previous/
+_diag-proxy/
+_diag-proxy.previous/
+.diag-rotate.lock
 
 # Test artifacts
 tests/node-project/node_modules/

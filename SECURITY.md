@@ -90,7 +90,9 @@ The Docker network architecture prevents the container from reaching the interne
 
 5. **Docker daemon compromise.** The runner does NOT mount the Docker socket. But if the Docker daemon itself is compromised on the host, all containers are at risk.
 
-6. **Raw IP HTTP access.** Domain-based proxy filtering cannot block HTTP requests to raw IP addresses for non-CONNECT requests. The internal Docker network mitigates this by preventing direct internet access.
+6. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
+
+7. **`_diag/` host-mounted volume.** As of this release, the runner's `_diag/` directory is host-mounted at the orchestrator's working directory for operator-side log recovery. Workflows that echo secrets to stdout/stderr (`set -x`, debug-print of `$DATABASE_URL`) leave those secrets in `_diag/Worker_*.log` until rotation (one previous run is kept). On shared CI hosts, set `RUNSECURE_DIAG_RETENTION=0` to disable the bind mount — the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
 
 7. **HTTP-only egress, raw-TCP unsupported (current release).** Workflow steps that open raw TCP connections (database clients, raw protocols) cannot reach external hosts. The `egress:` field allowlists HTTP/HTTPS via Squid only. Failed steps in RunSecure return `BlobNotFound` from `gh api .../jobs/<id>/logs` because the ephemeral container is destroyed before logs upload. Both gaps are tracked; see README "Limitations" section. Workaround: `runs-on: ubuntu-latest` for jobs needing TCP egress.
 

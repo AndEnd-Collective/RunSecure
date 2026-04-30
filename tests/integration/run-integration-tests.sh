@@ -11,23 +11,31 @@
 #   6. Runs Rust CI workflow simulation
 #   7. Runs attack simulation tests
 #   8. Runs entrypoint tests
-#   9. Tears down everything, reports results
+#   9. Runs log-loss fix tests (host _diag/ bind mount + gh api)
+#  10. Runs log-loss retention kill switch tests (RUNSECURE_DIAG_RETENTION=0)
+#  11. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
 #   ./tests/integration/run-integration-tests.sh --skip-build
-#   ./tests/integration/run-integration-tests.sh --test egress    # single suite
+#   ./tests/integration/run-integration-tests.sh --test egress              # single suite
 #   ./tests/integration/run-integration-tests.sh --test node
 #   ./tests/integration/run-integration-tests.sh --test python
 #   ./tests/integration/run-integration-tests.sh --test rust
 #   ./tests/integration/run-integration-tests.sh --test attack
 #   ./tests/integration/run-integration-tests.sh --test entrypoint
+#   ./tests/integration/run-integration-tests.sh --test log-loss
+#   ./tests/integration/run-integration-tests.sh --test log-loss-retention
 #
 # Prerequisites:
 #   - Docker running
 #   - runner-base, runner-node:24, runner-python:3.12, runner-rust:stable images built
 # ============================================================================
 
+# SC2329: helper functions (cleanup, run_compose_test, run_host_test, step,
+# skip_step) are invoked indirectly via "$@" or trap — shellcheck cannot
+# statically trace those call sites.
+# shellcheck disable=SC2329
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +60,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -158,11 +166,18 @@ if [[ "$SKIP_BUILD" == false ]]; then
         -t runsecure-proxy:latest "${RUNSECURE_ROOT}/infra/squid"
 fi
 
+# Helper: run a host-side test script directly (no docker-compose)
+run_host_test() {
+    local test_script="$1"
+    bash "${SCRIPT_DIR}/${test_script}"
+}
+
 # Helper: run a test script via docker-compose
 run_compose_test() {
     local test_script="$1"
     local runner_image="$2"
-    local test_name="$3"
+    # $3 is test_name, kept for callers but unused internally
+    shift 2
 
     # Tear down any previous run
     $DC -f "$COMPOSE_FILE" down --remove-orphans 2>/dev/null || true
@@ -179,7 +194,7 @@ run_compose_test() {
     # Always tear down
     $DC -f "$COMPOSE_FILE" down --remove-orphans 2>/dev/null || true
 
-    return $exit_code
+    return "$exit_code"
 }
 
 # ============================================================================
@@ -246,6 +261,28 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "entrypoint" ]]; then
         run_compose_test "test-entrypoint.sh" "runner-node:24" "entrypoint"
 else
     skip_step "Entrypoint tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 7: Log-Loss Fix Tests
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "log-loss" ]]; then
+    echo -e "\n${BOLD}--- Phase 7: Log-Loss Fix Tests ---${NC}"
+    step "Log-loss: host _diag/ populated + gh api returns 200" \
+        run_host_test "test-log-loss.sh"
+else
+    skip_step "Log-loss fix tests" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 8: Log-Loss Retention Kill Switch Tests
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "log-loss-retention" ]]; then
+    echo -e "\n${BOLD}--- Phase 8: Log-Loss Retention Kill Switch Tests ---${NC}"
+    step "Log-loss retention: RUNSECURE_DIAG_RETENTION=0 skips bind mount" \
+        run_host_test "test-log-loss-retention-disabled.sh"
+else
+    skip_step "Log-loss retention kill switch" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================

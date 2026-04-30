@@ -152,7 +152,12 @@ echo ""
 cleanup() {
     echo ""
     echo "[RunSecure] Shutting down..."
-    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+    local _cleanup_compose="${RUNSECURE_ROOT}/infra/runtime-compose.yml"
+    if [[ -f "$_cleanup_compose" ]]; then
+        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$_cleanup_compose" down --remove-orphans 2>/dev/null || true
+    else
+        $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
@@ -195,6 +200,38 @@ EOF
 
     echo "[RunSecure] JIT token acquired. Launching container..."
 
+    # --- Source diag rotation helper ---
+    RUN_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    RUN_SH_REPO_ROOT="$RUNSECURE_ROOT"
+    # SC1091: path is dynamic; pass -x to shellcheck for full analysis.
+    # shellcheck disable=SC1091
+    source "$RUN_SH_DIR/lib/diag-rotation.sh"
+
+    # --- Rotate diag directories ---
+    rotate_diag_dirs "$RUN_SH_REPO_ROOT"
+
+    # --- Generate runtime-compose.yml overlay ---
+    RUNTIME_COMPOSE="$RUN_SH_REPO_ROOT/infra/runtime-compose.yml"
+
+    if [[ "${RUNSECURE_DIAG_RETENTION:-1}" == "0" ]]; then
+        cat > "$RUNTIME_COMPOSE" <<'EOF'
+# Generated at runtime by infra/scripts/run.sh.
+# RUNSECURE_DIAG_RETENTION=0 — bind mounts skipped.
+services: {}
+EOF
+    else
+        cat > "$RUNTIME_COMPOSE" <<EOF
+# Generated at runtime by infra/scripts/run.sh.
+# DO NOT edit by hand — rewritten on every run.
+services:
+  runner:
+    volumes:
+      - ${RUN_SH_REPO_ROOT}/_diag:/home/runner/actions-runner/_diag
+EOF
+    fi
+
+    echo "[RunSecure] Generated $RUNTIME_COMPOSE"
+
     # Launch runner + proxy via docker compose
     RUNNER_IMAGE="$IMAGE_NAME" \
     RUNNER_JIT_CONFIG="$JIT_CONFIG" \
@@ -202,11 +239,11 @@ EOF
     RUNNER_MEMORY="$MEMORY" \
     RUNNER_CPUS="$CPUS" \
     RUNNER_PIDS="$PIDS" \
-    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" \
+    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$RUNTIME_COMPOSE" \
         up --abort-on-container-exit --exit-code-from runner
 
     # Clean up for next iteration
-    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+    $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$RUNTIME_COMPOSE" down --remove-orphans 2>/dev/null || true
 
     echo ""
     echo "--- Job $i/$MAX_JOBS: Complete ---"
