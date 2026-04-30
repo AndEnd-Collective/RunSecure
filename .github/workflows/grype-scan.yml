@@ -56,7 +56,7 @@ jobs:
       DOCKERFILE: ${{ matrix.dockerfile }}
       BUILD_ARG: ${{ matrix.build_arg }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Build base image (when target is not base)
         if: matrix.image_name != 'runner-base'
@@ -102,7 +102,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         if: always() && hashFiles('grype-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
         with:
           sarif_file: grype-results.sarif
           category: 'grype-${{ matrix.image_name }}'
