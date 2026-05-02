@@ -61,13 +61,10 @@ dpkg --configure -a 2>/dev/null || true
 rm -f /usr/sbin/policy-rc.d
 rm -rf /var/lib/apt/lists/*
 
-# H9: pin Cypress version. Floating `npm i -g cypress` builds a
-# different image every time the recipe runs, which (a) defeats image
-# determinism, (b) silently absorbs upstream supply-chain changes, and
-# (c) means a regression in a new Cypress release immediately affects
-# every user. Renovate updates this constant as a tracked PR so the
-# upgrade is visible.
-# renovate: datasource=npm depName=cypress
+# Pin Cypress to a specific version so every image build is reproducible.
+# A floating `npm i -g cypress` builds a different image each run and
+# silently absorbs upstream supply-chain changes. Bump this manually
+# when you intend to upgrade.
 CYPRESS_VERSION="15.14.2"
 npm install -g "cypress@${CYPRESS_VERSION}"
 HOME=/home/runner cypress install
