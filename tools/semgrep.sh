@@ -25,9 +25,8 @@ if ! python3 -m pip --version &>/dev/null; then
     rm -rf /var/lib/apt/lists/*
 fi
 
-# H9: pin Semgrep version. Renovate updates the constant.
-# renovate: datasource=pypi depName=semgrep
-# 1.161.0 (2026-04-22) — 7d old, past the 48h gate.
+# Pin Semgrep to a specific version so every image build is reproducible.
+# Bump this manually when you intend to upgrade.
 SEMGREP_VERSION="1.161.0"
 python3 -m pip install --no-cache-dir --break-system-packages "semgrep==${SEMGREP_VERSION}"
 

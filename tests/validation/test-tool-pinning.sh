@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================================================
-# RunSecure — Tool Recipe Pinning Lint (H9)
+# RunSecure — Tool Recipe Pinning Lint
 # ============================================================================
-# Asserts that every tool recipe in tools/*.sh:
-#   1. Pins its primary tool to an explicit version (no floating tag).
-#   2. Tags that pin with a Renovate marker so the version constant
-#      is updated automatically on a tracked PR.
+# Asserts that every tool recipe in tools/*.sh pins its primary tool to an
+# explicit version (no floating tag) and threads that pin into the install
+# command. Image determinism depends on this — without pinning, every
+# rebuild can pull a different upstream version.
 #
 # Pure file-content checks; no Docker required.
 # ============================================================================
@@ -22,18 +22,9 @@ RESULTS=()
 pass() { RESULTS+=("PASS: $1"); PASS=$((PASS + 1)); }
 fail() { RESULTS+=("FAIL: $1"); FAIL=$((FAIL + 1)); }
 
-# Each recipe must contain a "# renovate:" marker AND a versioned install
-# command. The version constant must be assigned literally (not derived
-# at runtime).
 for recipe in "${TOOLS_DIR}"/*.sh; do
     name=$(basename "$recipe" .sh)
     upper=$(echo "$name" | tr '[:lower:]-' '[:upper:]_')
-
-    if ! grep -qE '^# renovate: datasource=' "$recipe"; then
-        fail "$name: missing '# renovate: datasource=' marker"
-        continue
-    fi
-    pass "$name: has renovate marker"
 
     if ! grep -qE "^${upper}_VERSION=\"[0-9]" "$recipe"; then
         fail "$name: no ${upper}_VERSION literal pin"
@@ -41,26 +32,13 @@ for recipe in "${TOOLS_DIR}"/*.sh; do
     fi
     pass "$name: pins ${upper}_VERSION"
 
-    # The version constant must be referenced at install time. We accept
-    # any of these threading patterns: @"${VAR}", @${VAR}, =="${VAR}", ==${VAR}.
+    # The version constant must be referenced at install time.
     if ! grep -F -q "\${${upper}_VERSION}" "$recipe"; then
         fail "$name: \${${upper}_VERSION} not threaded into the install command"
         continue
     fi
     pass "$name: install command references \${${upper}_VERSION}"
 done
-
-# --- Renovate config sanity --------------------------------------------------
-RENOVATE_JSON="${RUNSECURE_ROOT}/renovate.json"
-if [[ -f "$RENOVATE_JSON" ]]; then
-    if grep -q 'renovate: datasource=' "${TOOLS_DIR}"/*.sh && grep -q 'tools/.*\\\\.sh' "$RENOVATE_JSON"; then
-        pass "renovate.json: customManager regex matches tool recipes"
-    else
-        fail "renovate.json: customManager regex doesn't reference tools/*.sh"
-    fi
-else
-    fail "renovate.json: missing"
-fi
 
 # --- Print results -----------------------------------------------------------
 echo ""
