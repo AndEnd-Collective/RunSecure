@@ -1,0 +1,92 @@
+# ============================================================================
+# RunSecure — Lint & Unit Validation
+# ============================================================================
+# Runs every host-only test in tests/validation/ and tests/unit/ on every
+# PR. These tests don't need Docker and finish in well under a minute —
+# they're cheap to run on every push and they catch:
+#
+#   - Workflow YAML errors (the gotcha that broke main once)
+#   - Renovate config drift
+#   - .grype.yaml allowlist hygiene (every entry must have justification)
+#   - Tool-recipe pin format
+#   - Compose-file hardening regressions (seccomp, init:true, env scope)
+#   - Schema validator behavior (strict-key rejection, IP literal blocks)
+#   - Version-bump arithmetic (the weekly auto-release math)
+#   - finalize-hardening fail-closed properties
+#   - H2 stub/remove behavior
+#
+# The Docker-required tests (test-tool-recipes.sh, test-hardening-
+# idempotency.sh) are run by smoke-test.yml's image-build path instead;
+# they would double-run here without adding signal.
+# ============================================================================
+
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lints-and-units:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install yq + PyYAML
+        run: |
+          set -euo pipefail
+          # yq v4 (the validator's hard requirement)
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+          # PyYAML for test-workflow-yaml-valid.sh
+          python3 -m pip install --quiet pyyaml
+
+      - name: Run validation lints
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/validation/test-*.sh; do
+            [ -f "$t" ] || continue
+            # Skip Docker-required tests — those run in smoke-test.yml
+            case "$(basename "$t")" in
+              test-tool-recipes.sh|test-hardening-idempotency.sh)
+                echo "::group::SKIP $t (Docker-only, runs in smoke-test)"
+                echo "::endgroup::"
+                continue ;;
+            esac
+            echo "::group::$t"
+            if bash "$t"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$t failed"
+              FAIL=$((FAIL + 1))
+            fi
+          done
+          exit "$FAIL"
+
+      - name: Run unit tests
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/unit/test-*.sh; do
+            [ -f "$t" ] || continue
+            echo "::group::$t"
+            if bash "$t"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$t failed"
+              FAIL=$((FAIL + 1))
+            fi
+          done
+          exit "$FAIL"

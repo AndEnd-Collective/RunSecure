@@ -1,0 +1,97 @@
+# ============================================================================
+# RunSecure — Dogfood Workflow
+# ============================================================================
+# Runs the validation + unit lint suite ON A RUNSECURE-HOSTED RUNNER.
+# This proves the project's own runner image works for typical CI
+# workloads (lint, schema-check, file-content scans).
+#
+# Integration tests are NOT run here — they spawn nested Docker
+# (proxy + runner via docker-compose), which is intentionally blocked
+# inside a hardened RunSecure container (cap_drop:ALL + seccomp).
+# That's the security property the project is designed around. The
+# integration suite continues to run on ubuntu-latest in
+# smoke-test.yml.
+#
+# Bootstrap (run on a host with Docker):
+#
+#   ./infra/scripts/run.sh \
+#     --project . \
+#     --repo AndEnd-Collective/RunSecure \
+#     --max-jobs 100
+#
+# When no orchestrator is running, this workflow's jobs queue but
+# don't block other CI.
+# ============================================================================
+
+name: dogfood
+
+on:
+  pull_request:
+    paths:
+      - 'tests/validation/**'
+      - 'tests/unit/**'
+      - 'infra/scripts/**'
+      - '.github/workflows/dogfood.yml'
+      - '.github/runner.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lints-on-self:
+    # If you change these labels, also change them in .github/runner.yml.
+    runs-on: [self-hosted, Linux, ARM64, container]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The base RunSecure image has yq, python3, and pip pre-installed
+      # via the apt: list in .github/runner.yml. PyYAML still needs to
+      # be installed in the running container.
+      - name: Verify host environment
+        run: |
+          echo "User: $(id -u):$(id -g) ($(whoami))"
+          echo "yq:   $(yq --version)"
+          echo "py:   $(python3 --version)"
+          echo "host: $(uname -a)"
+          # Container hardening sanity — these MUST be true on the runner
+          [ "$(id -u)" = "1001" ] || { echo "FAIL: not running as UID 1001"; exit 1; }
+          ! command -v sudo >/dev/null 2>&1 || { echo "FAIL: sudo present"; exit 1; }
+          ! command -v apt >/dev/null 2>&1 || { echo "FAIL: apt present"; exit 1; }
+          echo "Container hardening confirmed."
+
+      - name: Install PyYAML (in-container)
+        run: |
+          # --break-system-packages because Debian bookworm marks the
+          # system Python as PEP 668 externally-managed.
+          python3 -m pip install --quiet --break-system-packages --user pyyaml
+
+      - name: Run validation lints
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/validation/test-*.sh; do
+            [ -f "$t" ] || continue
+            case "$(basename "$t")" in
+              test-tool-recipes.sh|test-hardening-idempotency.sh)
+                echo "SKIP $t (Docker-only)"
+                continue ;;
+            esac
+            echo "::group::$t"
+            bash "$t" || FAIL=$((FAIL + 1))
+            echo "::endgroup::"
+          done
+          exit "$FAIL"
+
+      - name: Run unit tests
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/unit/test-*.sh; do
+            [ -f "$t" ] || continue
+            echo "::group::$t"
+            bash "$t" || FAIL=$((FAIL + 1))
+            echo "::endgroup::"
+          done
+          exit "$FAIL"

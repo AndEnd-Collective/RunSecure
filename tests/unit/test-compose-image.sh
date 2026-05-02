@@ -76,7 +76,7 @@ mkdir -p "$PROJECT_NODE/.github"
 cat > "$PROJECT_NODE/.github/runner.yml" <<'YAML'
 runtime: node:24
 tools: []
-egress: []
+http_egress: []
 YAML
 
 # The script will try to build — capture its output to verify parsing
@@ -236,10 +236,10 @@ else
     fail "Does not fail for unsupported language (exit 0)"
 fi
 
-if echo "$OUTPUT" | grep -q "ERROR: No Dockerfile for language"; then
-    pass "Reports missing Dockerfile for go"
+if echo "$OUTPUT" | grep -qE "runtime 'go:1.22' is invalid|ERROR: No Dockerfile for language"; then
+    pass "Reports unsupported language (schema validator OR Dockerfile check)"
 else
-    fail "Does not report missing Dockerfile"
+    fail "Does not report unsupported language"
 fi
 
 # ============================================================================
