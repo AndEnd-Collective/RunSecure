@@ -1,1089 +1,393 @@
 # RunSecure
 
-Hardened, ephemeral Docker containers for GitHub Actions self-hosted runners — with network egress control.
+**Disposable, hardened containers for GitHub Actions self-hosted runners.**
+One container per job. No persistent state. All outbound traffic filtered
+through an egress proxy you control.
 
-Each CI job runs in its own disposable container. When the job finishes, the container is destroyed. Nothing persists between jobs. All outbound network traffic is filtered through a proxy that only allows domains you explicitly approve.
+If you run self-hosted GH Actions runners on your own hardware, RunSecure
+is the layer between "I need a runner" and "the runner can read my SSH
+keys, push to my AWS, and stay alive between jobs."
 
 ---
 
-## The Problem
+## Why you might want this
 
-Bare-metal self-hosted runners are a shared, persistent environment. A compromised GitHub Action or malicious npm package can:
+Self-hosted runners on bare metal are a shared, persistent environment.
+A compromised GitHub Action or a malicious npm dependency can:
 
-- Read SSH keys, cloud credentials, and browser cookies from the host filesystem
-- Send stolen secrets to an attacker-controlled server
-- Spawn background processes that survive after the job ends
-- Reach internal services and cloud metadata endpoints over the host network
+- Read SSH keys, cloud credentials, and browser cookies from the host
+- Send stolen secrets to an attacker-controlled domain
+- Spawn background processes that survive the job finishing
+- Reach your internal services and the cloud-provider metadata endpoint
+  (`169.254.169.254`)
 
-These are not theoretical risks. The [tj-actions/changed-files supply chain attack](https://github.com/advisories/GHSA-mrrh-fhqg-pjh4) (March 2025) demonstrated exactly this — a popular Action was compromised to exfiltrate secrets from every repository that used it.
+This isn't theoretical. The
+[tj-actions/changed-files supply-chain attack](https://github.com/advisories/GHSA-mrrh-fhqg-pjh4)
+in March 2025 did all of those things to every repo that used it.
 
-## How RunSecure Fixes This
+GitHub-hosted runners avoid this with disposable VMs you don't pay for.
+If you've moved to self-hosted runners (cost, GPU access, large memory,
+private-network builds, ARM64), you've inherited the security model and
+don't have an obvious replacement for the disposability.
 
-**Ephemeral containers** — every job gets a fresh container, destroyed on completion. No persistent state, no leftover processes.
+RunSecure is that replacement.
 
-**Network egress proxy** — outbound connections are routed through a Squid proxy with a domain allowlist. Your CI can reach GitHub and your package registry. Everything else is blocked — including attacker-controlled servers, cloud metadata endpoints, and tunneling services.
+---
 
-**Image hardening** — containers run as a non-root user with all Linux capabilities dropped, setuid binaries stripped, dangerous utilities removed, and a custom seccomp profile blocking syscalls like `ptrace`, `mount`, and `bpf`.
+## What it actually does
 
-**Stackable by design** — you choose a language runtime and that's it. Tools like Playwright, Semgrep, or Cypress can be layered on top if you need them, but nothing beyond the runtime is required. A simple `runtime: node:24` gives you a fully hardened runner ready to go.
+Each CI job runs in a fresh container that:
+
+| Hardening | How |
+|---|---|
+| **Ephemeral** | `--rm`, destroyed the moment the job ends. No state survives. |
+| **Non-root** | UID 1001, root account locked, shell set to nologin |
+| **No capabilities** | `cap_drop: ALL` (only `NET_BIND_SERVICE` on the proxy) |
+| **No privilege escalation** | `no-new-privileges:true`, all setuid bits stripped |
+| **Restricted syscalls** | Custom seccomp profile blocks `ptrace`, `mount`, `bpf`, `keyctl`, `swapon`, etc. |
+| **Read-only system paths** | `/etc` is `chmod 555`; `/etc/passwd` and `/etc/group` are `444` |
+| **No package manager** | `apt`/`dpkg` removed in finalize-hardening; nothing can be installed at runtime |
+| **No network recon tools** | `ping`, `nc`, `ssh`, `wget` removed |
+| **Egress allowlist** | Network goes through Squid (HTTP/HTTPS) + HAProxy (raw TCP) + dnsmasq (DNS). Anything not on your allowlist is blocked. |
+| **Cloud-metadata blocked** | `169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254` all refused |
+| **PID-1 reaping** | `init: true` ensures zombie processes don't accumulate |
+
+The egress allowlist is the load-bearing piece. Even if a malicious
+package executes inside the runner, it can't talk to anything you didn't
+already approve. That's the property tj-actions/changed-files needed
+the most and didn't have.
+
+---
+
+## What it explicitly does NOT do
+
+- **Block exfiltration over allowed domains.** If you allow `github.com`,
+  an attacker can still create issues, push to repos they control, or
+  encode data in commit messages. The mitigation is workflow-level
+  (`GITHUB_TOKEN` permissions, branch protection), not network-level.
+- **Replace your need to vet third-party Actions.** RunSecure makes
+  compromise less catastrophic, not impossible.
+- **Solve secrets management.** Workflows that `set -x` or `echo $TOKEN`
+  still leak secrets to the per-job log. RunSecure ships logs to GitHub
+  via the runner's normal upload — encrypted at rest, but visible to
+  anyone with the right repo permissions.
+- **Provide multi-job isolation.** One runner = one container = one job.
+  Run multiple instances of `run.sh` for parallel jobs.
+
+For the full threat model, see [SECURITY.md](./SECURITY.md).
 
 ---
 
 ## Prerequisites
 
-You need Docker, the GitHub CLI, and yq (a YAML processor):
+- **Docker Engine 20.10+** (or Docker Desktop / Colima — anything with
+  `docker compose v2`)
+- **`gh` CLI** authenticated against the GitHub repo whose CI you're
+  hardening (used to request JIT runner tokens)
+- **`yq` v4+** for parsing `runner.yml`
+- **Linux or macOS host** with at least 8 GB RAM available (Node CI
+  builds eat 4 GB on a busy day; 16 GB recommended on macOS where
+  the VM steals memory)
 
 ```bash
 # macOS
-brew install docker colima yq
-
-# Start Colima with enough resources
-# 16 GB RAM minimum — large Node projects (npm ci + vitest + next build) need it
+brew install docker colima yq gh
 colima start --cpu 4 --memory 16 --vm-type vz --mount-type virtiofs
+gh auth login
 
-# Verify
-docker info | grep "Total Memory"   # Should show 15+ GiB
-yq --version                        # Needs yq v4+
-gh auth status                      # Must be authenticated
+# Debian/Ubuntu
+apt install docker.io gh
+# yq: download from https://github.com/mikefarah/yq/releases (apt's yq is the wrong tool)
 ```
 
 ---
 
-## Quick Start (Published Images)
+## Quick Start
 
-This is the path for **consumers** who want to use RunSecure containers directly without cloning the source repository. Most teams should use this path. (Contributors and image authors: see "Building from Source (Contributors)" below for the build-from-source flow.)
+> **Heads-up on versioning.** The latest published release on GHCR is
+> `v1.1.1` (April 2026). It pre-dates the TCP-egress, DNS, and Grype-scan
+> work merged in PR #24. If you want those, either pin to a newer version
+> once it's published (the weekly auto-bump cuts a fresh release every
+> Monday 02:30 UTC) **or** clone the repo and run from source as shown
+> below.
 
-### What you need on your host
+### Clone-and-run (recommended)
 
-- Docker Engine 20.10+ (or Docker Desktop / Colima with the Docker socket)
-- `docker compose` (v2)
-- `gh` CLI authenticated against the GitHub repo where your workflows run
-- `yq` (v4+) for parsing `runner.yml` — `brew install yq` or your distro's package manager
-- A small handful of helper scripts from this repo. Either:
-  - Clone the repo (read-only): `git clone https://github.com/AndEnd-Collective/RunSecure.git` and use `RunSecure/infra/scripts/run.sh`
-  - Or download just the orchestrator: `curl -fsSL https://raw.githubusercontent.com/AndEnd-Collective/RunSecure/main/infra/scripts/run.sh -o /usr/local/bin/runsecure && chmod +x /usr/local/bin/runsecure` (do the same for the helpers under `infra/scripts/lib/`)
-
-### Step 1 — Pull the images you need
-
-Pick a release version (semver, no `v` prefix). Replace `<VERSION>` below.
+The orchestrator references files across the repo (`docker-compose.yml`,
+`squid/Dockerfile`, the `lib/` helpers). It needs the repo on disk.
 
 ```bash
-docker pull ghcr.io/andend-collective/runsecure/proxy:<VERSION>
-docker pull ghcr.io/andend-collective/runsecure/base:<VERSION>
-# Then ONE language image:
-docker pull ghcr.io/andend-collective/runsecure/node:<VERSION>-24
-# or:
-docker pull ghcr.io/andend-collective/runsecure/python:<VERSION>-3.12
-# or:
-docker pull ghcr.io/andend-collective/runsecure/rust:<VERSION>-stable
-```
+git clone https://github.com/AndEnd-Collective/RunSecure.git
+cd RunSecure
 
-The `proxy` image contains squid + haproxy + dnsmasq and is required for any RunSecure runner. The language images extend `runner-base` with a specific language toolchain.
+# Build the base + the language layer you want
+docker build -f images/base.Dockerfile -t runner-base:latest .
+docker build -f images/node.Dockerfile --build-arg NODE_VERSION=24 -t runner-node:24 .
+# (or python.Dockerfile / rust.Dockerfile)
 
-### Step 2 — Create your project's `runner.yml`
-
-Inside your project (the repo whose CI you're hardening), create `.github/runner.yml`:
-
-```yaml
-version: "<VERSION>"          # MUST match the pulled images' version
-runtime: node:24              # node:22, node:24, python:3.11, python:3.12, rust:stable
-
+# Create runner.yml in YOUR project (the repo whose CI you want hardened)
+cat > /path/to/your-project/.github/runner.yml <<'YML'
+runtime: node:24
 http_egress:
   - .npmjs.org
   - .github.com
+YML
 
-# Optional: TCP egress for database clients
-# tcp_egress:
-#   - ep-foo.neon.tech:5432
+# Update YOUR project's workflow to require the matching labels
+# (in your-project/.github/workflows/ci.yml):
+#   runs-on: [self-hosted, Linux, ARM64, container]
 
-# Optional: DNS configuration
-# dns:
-#   host: false
-#   servers:
-#     - 1.1.1.1
-
-apt:
-  - postgresql-client          # Install client tools the workflow needs
+# Start a runner (picks up one job, then exits — re-run for the next)
+./infra/scripts/run.sh --project /path/to/your-project --repo your-org/your-repo
 ```
 
-When `version:` is set, the orchestrator pulls images from GHCR rather than building locally. **Always pin `version:`** when consuming published images — the schema validator's strict-field check will catch version-skew bugs (an old orchestrator with a new config produces a clear error rather than silently dropping unknown fields).
+That's it. The orchestrator will:
 
-See [Configuration Reference](#configuration-reference) below for the full schema.
+1. Read your `runner.yml` and validate it (rejects unknown fields)
+2. Build a project-specific image layering any tools you specified
+3. Start the egress proxy + the runner container on an isolated network
+4. Request a JIT runner token from GitHub
+5. Run one job, tear everything down
 
-### Step 3 — Update your GitHub workflow
+To process more than one job, run with `--max-jobs N` or just call
+`run.sh` again. Each invocation is self-contained.
+
+### Architecture mismatch warning
+
+The default `labels:` is `[self-hosted, Linux, ARM64, container]`. If
+you're on x86_64 (most non-Mac hardware), your workflow's `runs-on:`
+won't match unless you override:
 
 ```yaml
-jobs:
-  build:
-    runs-on: [self-hosted, Linux, ARM64, container]
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm ci
-      - run: npm test
-```
+# in runner.yml
+labels: [self-hosted, Linux, X64, container]
 
-The `runs-on` labels must match the `labels:` field in `runner.yml` (default: `[self-hosted, Linux, ARM64, container]`).
-
-### Step 4 — Start the runner
-
-From your project directory:
-
-```bash
-runsecure --project /path/to/your/project --repo <owner>/<repo>
-```
-
-(Substitute the actual orchestrator path if you haven't installed it as `/usr/local/bin/runsecure`.)
-
-The orchestrator:
-1. Reads your `.github/runner.yml`
-2. Validates the schema (rejects unknown fields, malformed `tcp_egress:`, etc.)
-3. Pulls the pinned images from GHCR if not present locally
-4. Generates the squid / haproxy / dnsmasq configs from your `runner.yml`
-5. Generates a Docker Compose overlay (`infra/runtime-compose.yml`)
-6. Requests a JIT runner token from the GitHub API via `gh`
-7. Launches the proxy container, then the runner container, on an isolated Docker network
-8. Streams runner logs to your terminal
-9. Waits for the runner to pick up and complete one job, then tears down
-
-**Hard requirements satisfied:** the runner has no direct network access (only via the proxy), runs as a non-root user with `cap_drop: ALL`, and is destroyed after one job (`--rm`). The proxy is fail-closed — if any of squid/haproxy/dnsmasq die, the runner's connections start failing.
-
-### What gets persisted on your host
-
-- `_diag/Worker_*.log` — the actions-runner's per-job diagnostic logs (one rotation kept in `_diag.previous/`). Set `RUNSECURE_DIAG_RETENTION=0` to disable host persistence; the synchronous log-upload wait still ensures `gh api .../jobs/<id>/logs` works.
-- `_diag-proxy/dnsmasq.log` (only when `dns.host: false` and `dns.log_queries: true`) — DNS query log. Treat as confidential; hostnames sometimes carry secrets.
-
-### Release cadence
-
-A new patch release is cut **every Monday at 02:30 UTC** by an automated
-workflow. The bump is unconditional — even if no source changes landed
-during the week, the rebuild picks up Debian package security updates,
-and consumers can pin a fresh weekly version against a known scanned
-state. A Grype CVE scan gates the publish: if a HIGH/CRITICAL CVE with
-a fix slips into the rebuild, the publish fails and the previous tag
-remains the latest available on GHCR.
-
-Manual releases for `minor`/`major` bumps go through the same workflow
-via `gh workflow run weekly-version-bump.yml -f bump_type=minor`.
-
-### Updating to a new release
-
-```bash
-# 1. Read the release notes:
-gh release view <NEW_VERSION> --repo AndEnd-Collective/RunSecure
-
-# 2. Pull the new images:
-docker pull ghcr.io/andend-collective/runsecure/proxy:<NEW_VERSION>
-docker pull ghcr.io/andend-collective/runsecure/<lang>:<NEW_VERSION>-<ver>
-
-# 3. Update version: in your runner.yml.
-
-# 4. Run as before. If you're behind on schema (e.g. still using egress:), the
-# validator will fail loudly — see "Migrating from egress: to http_egress:" below.
+# in your workflow
+runs-on: [self-hosted, Linux, X64, container]
 ```
 
 ---
 
-## Building from Source (Contributors)
+## `runner.yml` — the full schema
 
-This path is for contributors and image authors who modify the RunSecure containers themselves. **Most users should use the [Quick Start (Published Images)](#quick-start-published-images) above instead.**
-
-### Step 1 — Build the Base Image
-
-Every language image depends on this. Build it first:
-
-```bash
-cd /path/to/RunSecure
-
-docker build -f images/base.Dockerfile -t runner-base:latest .
-```
-
-This creates a Debian slim image (~320 MB) with the GitHub Actions runner binary, git, curl, jq, and the gh CLI — hardened with a non-root user (UID 1001), all setuid bits stripped, and dangerous utilities removed.
-
-### Step 2 — Build a Language Image
-
-Pick the language your project uses:
-
-```bash
-# Node.js 24
-docker build -f images/node.Dockerfile \
-  --build-arg NODE_VERSION=24 -t runner-node:24 .
-
-# Node.js 22
-docker build -f images/node.Dockerfile \
-  --build-arg NODE_VERSION=22 -t runner-node:22 .
-
-# Python 3.12
-docker build -f images/python.Dockerfile \
-  --build-arg PYTHON_VERSION=3.12 -t runner-python:3.12 .
-
-# Rust stable
-docker build -f images/rust.Dockerfile \
-  --build-arg RUST_VERSION=stable -t runner-rust:stable .
-```
-
-Each language image adds the runtime on top of the base image. You can build multiple languages — they share the same base layer via Docker's layer cache.
-
-### Step 3 — Configure Your Project
-
-Create a `.github/runner.yml` file in your project. The only required field is `runtime`:
+Only `runtime:` is required. Everything else has sensible defaults.
 
 ```yaml
-runtime: node:24
-```
-
-That's it. This gives you a hardened Node.js 24 runner with the default egress allowlist (GitHub + npm), default resource limits (8 GB RAM, 4 CPUs, 2048 PIDs), and default labels.
-
-For a copy-paste starting point with all options commented out, copy the template:
-
-```bash
-cp /path/to/RunSecure/skeleton/runner.yml /path/to/your-project/.github/runner.yml
-```
-
-### Step 4 — Update Your GitHub Workflow
-
-Change `runs-on` to use the RunSecure labels:
-
-```yaml
-# Before
-runs-on: ubuntu-latest
-# or
-runs-on: [self-hosted, macOS, ARM64]
-
-# After
-runs-on: [self-hosted, Linux, ARM64, container]
-```
-
-You can remove `setup-node` / `setup-python` steps — the runtime is already baked into the image. Leaving them in is harmless; they'll detect the pre-installed version and skip the download.
-
-An example workflow is provided at `skeleton/workflow-ci.yml`.
-
-### Step 5 — Start the Runner
-
-```bash
-./infra/scripts/run.sh \
-  --project /path/to/your-project \
-  --repo owner/repo-name
-```
-
-The orchestrator will:
-1. Read your project's `.github/runner.yml` and validate its schema
-2. Build or reuse a cached image matching your config
-3. Generate all proxy configuration (Squid HTTP allowlist, HAProxy TCP config if needed, dnsmasq DNS config if needed)
-4. Request a JIT (Just-In-Time) token from the GitHub API
-5. Launch the runner container with full hardening
-6. Wait for the job to complete, then destroy the container
-7. Repeat for the next queued job
-
----
-
-## Configuration Reference
-
-All configuration lives in your project's `.github/runner.yml`. Only `runtime` is required — everything else has defaults.
-
-### Schema cheat-sheet
-
-A single-glance reference for every top-level field:
-
-```yaml
-# Complete runner.yml reference
-version: "1.2.0"              # Pin RunSecure release; required when consuming published images
-runtime: node:24              # Required: language and version
-tools: [playwright, semgrep]  # Optional: bake CI tools into the project image
-apt: [postgresql-client]      # Optional: extra apt packages for the project image
-http_egress:                  # Optional: HTTP/HTTPS allowlist (squid)
-  - .npmjs.org
-tcp_egress:                   # Optional: raw TCP allowlist (haproxy); host:port; ports unique
-  - ep-foo.neon.tech:5432
-dns:                          # Optional: DNS resolver config (default: host DNS)
-  host: false                 # false = use in-proxy dnsmasq; true (default) = host DNS
-  servers: [1.1.1.1]          # Required if host:false (unless hosts_file is set)
-  hosts_file: ./hosts.txt     # Optional: path or https:// URL
-  whitelist_file: ./allow.txt # Optional: strict allowlist; path or https:// URL
-  log_queries: true           # Optional: log to _diag-proxy/dnsmasq.log
-hardening:                    # Optional: prune unused tools from the final image
-  remove: [unzip]             # rm the binary outright — `command not found`
-  stub:   [curl, jq]          # replace with a friendly stub explaining the removal
-labels: [self-hosted, Linux, ARM64, container]   # GH runner labels (must match runs-on)
-resources: { memory: 8g, cpus: 4, pids: 2048 }  # Container limits
-jobs: { lint: base, e2e: full }                  # Optional: per-job image override
-```
-
-### `runtime` (required)
-
-The language and version for your runner image.
-
-```yaml
-runtime: node:24          # Node.js 24 (via NodeSource)
-runtime: node:22          # Node.js 22
-runtime: python:3.12      # Python 3.12 (Debian packages)
-runtime: rust:stable       # Rust stable (via rustup)
-```
-
-### `tools` (optional)
-
-Most projects don't need this. The language runtime alone is enough for building, testing, and linting. Only add tools if your CI workflow specifically requires them (e.g., you run Playwright browser tests or Semgrep security scans as part of CI).
-
-Available tools:
-
-```yaml
-tools:
-  - playwright     # Playwright + Chromium (~300 MB, requires Node.js)
-  - semgrep        # Semgrep SAST (~276 MB, auto-installs Python if missing)
-  - cypress        # Cypress E2E (~250 MB, requires Node.js)
-```
-
-Pick only what you need — each tool adds to your image size. You can also [create your own tool recipes](#adding-a-new-tool-recipe).
-
-When tools are specified, RunSecure generates a project-specific image with a content-hash tag. If two projects share the same runtime + tools combination, they share the same cached image.
-
-### `apt`
-
-Extra system packages to install via apt:
-
-```yaml
-apt:
-  - libvips-dev
-  - ffmpeg
-```
-
-These are installed before tools and before final hardening (which removes apt from the image).
-
-### `http_egress`
-
-Additional HTTP/HTTPS domains to allow through the egress proxy, on top of the base allowlist. Use `.domain.com` syntax to allow all subdomains:
-
-```yaml
-http_egress:
-  - ".neon.tech"           # Neon Postgres (HTTPS API)
-  - "api.vercel.com"       # Vercel API (exact domain)
-  - ".supabase.co"         # Supabase
-  - ".amazonaws.com"       # AWS services
-  - ".azure.com"           # Azure services
-  - ".sentry.io"           # Sentry error reporting
-```
-
-The old key `egress:` is no longer accepted — use `http_egress:` in your `runner.yml`.
-
-If you're not sure what domains your CI needs, start without an `http_egress` list. When a step fails due to a blocked connection, check the Squid proxy log for the denied domain and add it.
-
-### `tcp_egress`
-
-Raw TCP connections for database clients, cache servers, or any protocol that does not use HTTP. Each entry is `host:port`. Each port must be unique across all entries.
-
-```yaml
-tcp_egress:
-  - ep-foo.neon.tech:5432      # Neon Postgres (direct TCP)
-  - redis.example.com:6379     # Redis
-```
-
-How it works: the orchestrator configures an HAProxy instance inside the proxy container. Each `host:port` entry creates an HAProxy frontend that listens on that port and forwards TCP connections to the target. The runner reaches the target via `proxy:<port>`.
-
-Ports 80 and 443 are reserved for HTTP/HTTPS — use `http_egress` instead.
-
-### `dns`
-
-Controls DNS resolution inside the runner. By default (absent or `host: true`), the runner uses the Docker host's resolver. Setting `host: false` starts an isolated dnsmasq instance inside the proxy container — this prevents DNS-based leakage to the host resolver.
-
-```yaml
-dns:
-  host: false
-  servers:
-    - 10.0.0.53               # Private DNS server IP address
-  hosts_file: ./infra/dns/hosts.txt   # Optional: local path or https:// URL
-  whitelist_file: https://internal.company.com/allowed.txt  # Optional
-  log_queries: true           # Default: true when host:false
-```
-
-When `host: false`, at least one of `servers` or `hosts_file` is required.
-
-The `hosts_file` and `whitelist_file` values accept either a local filesystem path or an `https://` URL. SSRF protection is applied: private/RFC1918/loopback/CGNAT/IPv6-ULA addresses are blocked before any download attempt.
-
-### `hardening`
-
-Opt-in pruning of unused tools from the final image. Both lists default empty. Names must be alphanumeric (with `-`/`_`).
-
-```yaml
-hardening:
-  remove: [unzip]            # rm the binary; jobs that call it get
-                              # 'command not found' from the shell.
-  stub: [curl, jq]           # replace with a friendly stub that exits
-                              # 127 and prints '[runsecure] curl was
-                              # intentionally replaced by hardening.stub
-                              # in your runner.yml' on stderr.
-```
-
-Use `remove` when you're certain no job touches the tool — every binary you remove is one less lateral-movement target if a job is exploited. Use `stub` when you'd rather see actionable error messages during rollout. A name cannot appear in both lists; the validator rejects that at orchestrator startup.
-
-### `labels`
-
-GitHub runner labels. Your workflow's `runs-on` must match these:
-
-```yaml
-labels: [self-hosted, Linux, ARM64, container]   # default
-```
-
-### `resources`
-
-Container resource limits:
-
-```yaml
-resources:
-  memory: 8g        # RAM limit (default: 8g)
-  cpus: 4           # CPU limit (default: 4)
-  pids: 2048        # Max processes (default: 2048)
-```
-
-If your CI hits OOM errors, increase `memory` here and make sure your Colima VM has enough RAM allocated.
-
-### `jobs`
-
-Per-job image overrides. Use `base` for jobs that don't need the tools layer (faster, smaller image) and `full` for jobs that do:
-
-```yaml
-tools: [playwright, semgrep]
-
-jobs:
-  lint: base         # Language image only (~450 MB) — no tools
-  test: base         # Language image only
-  e2e: full          # Language + tools (~1 GB) — has Playwright
-  security: full     # Language + tools — has Semgrep
-```
-
-### Examples
-
-**Minimal** — just a runtime, nothing else. This is all most projects need:
-
-```yaml
-runtime: node:24
-```
-
-**With external service access** — your tests hit a database or deploy to a platform:
-
-```yaml
-runtime: node:24
-
-http_egress:
-  - "*.neon.tech"
-  - "api.vercel.com"
-```
-
-**With a tool** — you run E2E browser tests in CI:
-
-```yaml
-runtime: node:24
-
-tools:
-  - playwright
-
-http_egress:
-  - "*.neon.tech"
-```
-
-**Kitchen sink** — multiple tools, per-job image overrides, custom resources:
-
-```yaml
-runtime: node:24
-
-tools:
-  - playwright
-  - semgrep
-
-apt:
-  - libvips-dev
-
-http_egress:
-  - "*.neon.tech"
-  - "api.vercel.com"
-
-resources:
-  memory: 12g
+runtime: node:24                       # Required. node:24, node:22,
+                                       # python:3.12, python:3.11,
+                                       # rust:stable | beta | nightly | 1.X.Y
+
+http_egress:                           # HTTP/HTTPS allowlist (Squid)
+  - .npmjs.org                         # Domain prefix matches all subdomains
+  - api.example.com                    # Bare domain matches exact host
+  - .pypi.org
+
+tcp_egress:                            # Raw-TCP allowlist (HAProxy)
+  - postgres.example.com:5432          # host:port, ports must be unique
+
+dns:                                   # DNS resolver (default: host DNS)
+  host: false                          # false = run dnsmasq inside the proxy
+  servers: [1.1.1.1]                   # required when host:false
+  hosts_file: ./infra/dns/hosts.txt    # optional static map (path or https://)
+  whitelist_file: ./allow.txt          # optional strict allowlist (path or https://)
+  log_queries: true                    # log to _diag-proxy/dnsmasq.log
+
+apt:                                   # Extra system packages on top of base
+  - postgresql-client                  # (lowercase Debian package names only)
+
+tools:                                 # Optional CI-tool layers
+  - playwright                         # ~300 MB; needs Node
+  - semgrep                            # ~276 MB; auto-installs Python
+  - cypress                            # ~250 MB; needs Node
+
+hardening:                             # Optional: prune tools you don't use
+  remove: [unzip]                      # rm the binary; calls get "command not found"
+  stub: [curl, jq]                     # replace with a friendly stub:
+                                       #   $ curl https://example.com
+                                       #   [runsecure] 'curl' was intentionally
+                                       #   replaced by hardening.stub in your
+                                       #   runner.yml. Exits 127.
+
+resources:                             # Container limits
+  memory: 8g
   cpus: 4
   pids: 2048
 
-jobs:
-  lint: base
-  test: base
-  e2e: full
-  security: full
+labels: [self-hosted, Linux, ARM64, container]   # Must match runs-on:
+
+version: "1.1.1"                       # Pin a published release (skip for
+                                       # local-build mode)
 ```
 
-The progression is intentional — start minimal and add only what your CI actually requires.
+Validate any `runner.yml` against the schema:
+
+```bash
+./infra/scripts/lib/validate-schema.sh path/to/runner.yml
+```
 
 ---
 
-## Network Egress Control
+## How the egress proxy works
 
-This is the core security feature. All outbound connections from the runner container are routed through a Squid proxy. The proxy evaluates each connection against a domain allowlist and blocks everything else.
-
-### How It Works
-
-The runner container sits on an internal Docker network with no direct internet access. The HTTP_PROXY and HTTPS_PROXY environment variables are set to point at the Squid proxy, which is the only path to the outside world.
-
-For HTTPS connections, the proxy inspects the domain from the `CONNECT` request and allows or denies it. It does **not** perform TLS interception — the encrypted tunnel passes through opaquely. This means the proxy sees the destination domain but cannot read the traffic content.
+The runner container has **no direct internet route**. Its only network
+peer is the proxy container, which sits on two networks: the
+runner-only internal network and the host-reachable external bridge.
 
 ```
-┌──────────────────────────────────────────────────┐
-│  Internal Docker Network (no direct internet)     │
-│                                                    │
-│  ┌─────────────┐        ┌──────────────────────┐ │
-│  │ Runner      │───────>│ Squid Proxy          │ │
-│  │ Container   │ HTTP_  │                      │ │
-│  │             │ PROXY  │ Checks domain against│ │
-│  └─────────────┘        │ allowlist:           │ │
-│                          │  ✓ github.com       │─┼──> Internet
-│                          │  ✓ registry.npmjs   │ │    (allowed only)
-│                          │  ✓ pypi.org         │ │
-│                          │  ✗ evil.com         │ │
-│                          │  ✗ 169.254.169.254  │ │
-│                          └──────────────────────┘ │
-└──────────────────────────────────────────────────┘
+   YOUR JOB                  PROXY CONTAINER             INTERNET
+   ┌────────────┐            ┌───────────────────┐       ┌──────────┐
+   │  runner    │  HTTP/S    │  Squid :3128      │  ───▶ │ allowed  │
+   │  container │ ─────────▶ │   (allowlist)     │       │ domains  │
+   │            │            │                   │       └──────────┘
+   │  HTTP_PROXY│  raw TCP   │  HAProxy :PORTS   │  ───▶ ┌──────────┐
+   │  ─ ─ ─ ─ ─ │ ─────────▶ │   (per-port)      │       │ approved │
+   │            │            │                   │       │ host:port│
+   │            │  DNS       │  dnsmasq :53      │  ───▶ └──────────┘
+   │            │ ─────────▶ │   (optional)      │
+   └────────────┘            └───────────────────┘
+   internal: true             dual-homed
 ```
 
-### Base Allowlist (Always Included)
-
-These domains are allowed for every project, regardless of configuration:
-
-| Category | Domains |
-|----------|---------|
-| **GitHub** | `.github.com`, `api.github.com`, `.githubusercontent.com`, `.actions.githubusercontent.com`, `.objects.githubusercontent.com`, `.ghcr.io`, `.pkg.github.com`, `.pipelines.actions.githubusercontent.com` |
-| **npm** | `.npmjs.org` |
-| **PyPI** | `.pypi.org`, `.files.pythonhosted.org` |
-| **Rust/Cargo** | `.crates.io`, `.rustup.rs`, `.rust-lang.org` |
-| **CI Tools** | `.nodejs.org`, `.nodesource.com`, `.semgrep.dev`, `.googleapis.com`, `.playwright.azureedge.net` |
-
-The base allowlist is defined in `infra/squid/base.conf`. To modify it, edit that file directly.
-
-### Adding Project-Specific Domains
-
-Add domains to the `http_egress` list in your `.github/runner.yml`. When the orchestrator starts, it merges the base allowlist with your project-specific domains to produce the runtime proxy configuration.
-
-### What Gets Blocked
-
-Everything not in the base allowlist or your `egress` list. This includes:
-
-- Attacker-controlled servers (the primary exfiltration vector)
-- Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
-- Tunneling services (ngrok, localtunnel)
-- Social platforms used as exfiltration channels (Slack webhooks, Discord webhooks)
-- Non-standard ports (only 80 and 443 are allowed)
-- Raw IP HTTP requests to the internet (internal Docker network blocks direct access)
-
-### Debugging Blocked Connections
-
-If your CI job fails because a dependency needs to reach a domain that isn't allowlisted:
-
-1. Check the proxy log for denied requests
-2. Identify the domain
-3. Add it to the `http_egress` list in your `runner.yml`
-4. Restart the orchestrator
-
----
-
-## Egress Model
-
-RunSecure supports three types of outbound network access, each served by a different component inside the proxy container.
-
-### HTTP/HTTPS (Squid)
-
-The default. All HTTP and HTTPS traffic from the runner must pass through Squid on port 3128. Squid enforces a domain allowlist — requests to unlisted domains are blocked. TLS is not intercepted; the proxy sees the target hostname from the CONNECT request but not the encrypted payload.
-
-Configure with `http_egress:` in `runner.yml`.
-
-### Raw TCP (HAProxy)
-
-For database clients, cache servers, and protocols that do not speak HTTP. When `tcp_egress:` entries are present, the orchestrator configures HAProxy inside the proxy container. Each `host:port` entry becomes a HAProxy frontend that the runner can reach via `proxy:<port>`.
-
-Example: with `tcp_egress: [ep-foo.neon.tech:5432]`, the runner connects to `proxy:5432` and HAProxy transparently forwards to `ep-foo.neon.tech:5432`.
-
-Configure with `tcp_egress:` in `runner.yml`.
-
-### DNS (dnsmasq)
-
-By default the runner inherits the Docker host's DNS resolver (`dns.host: true`). When `dns.host: false`, the orchestrator starts a dnsmasq instance inside the proxy container. The runner's `/etc/resolv.conf` is updated to point at the proxy.
-
-This is useful when:
-- Your CI uses private DNS names that are only resolvable via an internal resolver
-- You want to provide a static hosts file for test fixtures
-- You want to restrict which domain names the runner can resolve (via `whitelist_file`)
-
-Configure with `dns:` in `runner.yml`.
-
-### Threat model & explicit trade-offs
-
-- **TCP egress is content-opaque.** haproxy forwards bytes; it does not inspect or terminate TLS, and there is no protocol-aware ACL. The audit story for raw TCP is "who connected to what, when, for how long" — not "what was sent."
-- **DNS query logs are sensitive.** Hostnames sometimes carry information (`shared-secret-xyz.api.example.com`, signed-URL fragments, telemetry beacons). Treat `_diag-proxy/dnsmasq.log` as confidential.
-- **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
-- **URL-fetched DNS files are SSRF-protected but not signature-verified.** v1 fetches HTTPS URLs after IP-blocklist validation (rejects loopback, RFC1918, link-local, CGNAT, and IPv6 equivalents) and disallows redirects beyond 3 hops. v1 does *not* verify file content via checksum or signature.
-
-### Installing client tools
-
-Database and cache client libraries (e.g., `pg`, `redis`, `mysql2`) are just npm/pip packages — they install normally via `http_egress`. What `tcp_egress` enables is the actual TCP connection to the server at runtime.
-
-You do not need any special tooling inside the image. The runner uses the client library's standard API; the TCP-level path to the server goes through HAProxy transparently.
-
-For the postgres example:
-```yaml
-tcp_egress:
-  - ep-foo.neon.tech:5432
-```
-
-Your Node.js code connects to the server exactly as it would outside RunSecure:
-```js
-import postgres from 'postgres'
-const sql = postgres({ host: 'ep-foo.neon.tech', port: 5432 })
-```
-
-The `DATABASE_URL` environment variable (if used) should point to `ep-foo.neon.tech:5432` — not to `proxy:5432`. HAProxy is transparent; the runner's DNS resolves `ep-foo.neon.tech` to the proxy IP, and HAProxy routes based on the port.
-
-Note: this requires `dns.host: false` with the correct DNS server so that `ep-foo.neon.tech` resolves to the proxy IP inside the container. If you use `dns.host: true` (the default), you need to configure the client to connect to `proxy:5432` explicitly.
-
----
-
-## Image Architecture
-
-Images are stackable. You only build what you need.
-
-The simplest setup is two layers: base + language. That's a fully functional, hardened runner. Tools are a third layer you add only if your CI requires them.
-
-```
-                                        ┌─────────────────────────────┐
-                                        │  finalize-hardening.sh      │
-                     You stop here      ├─────────────────────────────┤
-                     if you don't  ───> │  Tools (if you need them)   │
-                     need tools         │  Playwright / Semgrep / ... │
-┌─────────────────────────────────┐     ├─────────────────────────────┤
-│  Language runtime               │ ──> │  Language runtime            │
-│  Node.js / Python / Rust        │     │  Node.js / Python / Rust     │
-├─────────────────────────────────┤     ├─────────────────────────────┤
-│  runner-base                    │     │  runner-base                 │
-│  Debian slim + GH Actions runner│     │  Debian slim + GH Actions    │
-└─────────────────────────────────┘     └─────────────────────────────┘
-      Most projects                          Only if tools: is set
-```
-
-**Base image** (`runner-base:latest`) — Debian bookworm-slim with the GitHub Actions runner binary, essential tools, a non-root user, and hardening applied. The `apt` package manager is deliberately kept at this stage so downstream layers can install packages.
-
-**Language images** (`runner-node:24`, `runner-python:3.12`, `runner-rust:stable`) — add the language runtime on top of base. Each re-strips setuid bits in case the runtime install added any. **This is the image most projects will use directly.**
-
-**Project images** (`runner-project:<hash>`) — generated only when you specify `tools` or `apt` in your config. Layers tool recipes on top of the language image, then runs `finalize-hardening.sh` which removes apt, re-strips setuid bits, and locks system paths. The image is tagged with a content hash of your configuration so that identical configs across different projects share the same cached image.
-
-If your `runner.yml` only specifies `runtime` (no tools, no extra apt packages), the language image is used as-is — no project image is generated, no extra build step.
-
-### What's in each container
-
-| Image | Purpose | Contains |
-|---|---|---|
-| `proxy` | Egress chokepoint for the runner — enforces HTTP/HTTPS allowlist, optional raw TCP forwarding, optional in-proxy DNS | `squid`, `haproxy` (only when `tcp_egress:` is set), `dnsmasq` (only when `dns.host: false`) |
-| `base` (`runner-base`) | Hardened Debian + the GitHub Actions runner binary, non-root user UID 1001, no setuid binaries, no apt at runtime in project images | actions-runner, hardening (cap_drop, seccomp, setuid-stripped, root locked) |
-| `node:<v>` | `runner-base` + Node.js | nvm / nodejs at the pinned major version, npm |
-| `python:<v>` | `runner-base` + Python | python3 + pip at the pinned minor version |
-| `rust:<v>` | `runner-base` + Rust | rustup + cargo at the pinned channel |
-| (project image, content-hash tag) | Built locally if no `version:` is pinned, or when `tools:` / `apt:` are set: language image + your tool recipes + your apt packages + final hardening | runtime-specific; apt removed, setuid re-stripped, `/etc` locked |
-
-The `proxy` image is always required — it is the only path to the internet for the runner container. The language images are the images your CI code actually runs in. The project image (content-hash tagged) is generated on demand and cached; if two projects have identical configs, they share the same image.
-
-### Approximate Image Sizes
-
-Most projects use just the language image:
-
-| Image | Size | What you get |
-|-------|------|-------------|
-| `runner-node:24` | ~450 MB | Node.js + hardened base — enough for build, test, lint |
-| `runner-python:3.12` | ~370 MB | Python + hardened base — enough for pytest, linting, packaging |
-| `runner-rust:stable` | ~550 MB | Rust + hardened base — enough for cargo build, cargo test |
-
-If you add tools, each one adds to the image:
-
-| Tool | Additional size |
-|------|----------------|
-| Playwright + Chromium | +300 MB |
-| Semgrep | +276 MB |
-| Cypress | +250 MB |
-
----
-
-## Security Hardening
-
-RunSecure applies three independent layers of security. A breach of one layer does not compromise the others.
-
-### Image Hardening (build-time)
-
-Applied when the image is built. Reduces the attack surface available inside the container.
-
-- **Non-root user** — the runner process runs as UID 1001, not root
-- **No su/sudo** — privilege escalation binaries are deleted
-- **Setuid bits stripped** — no binary can gain elevated privileges through setuid
-- **Root account locked** — root shell is set to `/usr/sbin/nologin`
-- **Package manager removed** — apt/dpkg are deleted in final images (attackers can't install tools)
-- **Network recon tools removed** — no ping, nc, ssh, or wget
-- **Persistence tools removed** — no crontab or at
-- **SHA256-verified downloads** — the runner binary is verified by hash before extraction
-- **Pinned package versions** — no version-swap supply chain attacks
-- **Minimal PATH** — only essential directories
-
-### Runtime Containment (launch-time)
-
-Enforced by Docker flags when the container starts. Cannot be bypassed by anything inside the container.
-
-| Flag | Protection |
-|------|-----------|
-| `--rm` | Container is destroyed after the job — no state persists |
-| `--user 1001:0` | Process runs as non-root; system paths are root-owned and unwritable |
-| `--cap-drop=ALL` | All Linux capabilities removed |
-| `--security-opt=no-new-privileges` | Cannot gain new privileges via setuid/setgid at runtime |
-| `--tmpfs /tmp:noexec` | `/tmp` is writable but cannot execute binaries |
-| `--pids-limit` | Prevents fork bombs and unbounded process spawning |
-| `--memory` / `--memory-swap` | Prevents memory exhaustion and OOM attacks |
-| `--cpus` | Prevents CPU exhaustion (cryptomining) |
-| Seccomp profile | Custom profile blocks dangerous syscalls: `ptrace`, `mount`, `bpf`, `keyctl`, kernel module loading, `perf_event_open`, `userfaultfd` |
-
-### Network Isolation (network-level)
-
-The runner container has no direct internet access. All traffic is routed through the Squid proxy on an internal Docker network. See [Network Egress Control](#network-egress-control) above.
-
----
-
-## Known Limitations
-
-### Per-step logs (resolved)
-
-Earlier RunSecure releases destroyed the ephemeral runner container before per-step logs flushed to GitHub, causing `gh api .../jobs/<id>/logs` to return `BlobNotFound` on failed runs. This release adds a synchronous wait in the container entrypoint for the actions-runner's log-upload-complete marker before exit (default 30s timeout, configurable via `RUNSECURE_LOG_UPLOAD_TIMEOUT`). Logs are reliably retrievable from the GitHub UI for both successful and failed runs.
-
-For operator-side recovery (network blips during upload, GitHub API hiccups), `_diag/` is host-mounted at the orchestrator's working directory. The latest run lives in `_diag/`; the previous run lives in `_diag.previous/`.
-
-To disable the host-side bind mount entirely (security-sensitive shared-host scenarios), set `RUNSECURE_DIAG_RETENTION=0` in the orchestrator environment. The synchronous wait still applies; only the host-side fallback is dropped.
-
-### TCP port collisions
-
-Each `tcp_egress` port must be unique across all entries (one HAProxy frontend per port). If two services use the same port number, you cannot add both to `tcp_egress` without a port remapping workaround.
-
-### No UDP egress
-
-UDP traffic (DNS, QUIC, DTLS) is not proxied. When `dns.host: false`, DNS resolution goes through dnsmasq inside the proxy container — queries beyond the configured servers are blocked. Other UDP-based protocols are unsupported.
-
-### CONNECT method only for HTTP/HTTPS
-
-Squid uses the HTTP CONNECT method for HTTPS filtering. It does not perform SSL interception. This means the proxy can see the destination hostname but not the request path or payload. Some HTTP/1.0 clients that do not support CONNECT may fail.
-
-### DNS log sensitivity
-
-When `dns.host: false` and `dns.log_queries: true` (the default), dnsmasq logs all DNS queries to `_diag-proxy/`. On shared CI hosts, DNS queries may reveal internal service names. Set `dns.log_queries: false` or `RUNSECURE_DIAG_RETENTION=0` if this is a concern.
-
-### Single runner per stack
-
-Each `docker-compose` stack runs one runner. Multiple concurrent jobs require multiple orchestrator invocations. The `--max-jobs` flag controls how many jobs a single orchestrator processes sequentially.
-
-### `runner.yml` field names are RunSecure-specific
-
-The `.github/runner.yml` configuration file uses RunSecure-specific field names (`runtime:`, `http_egress:`, `tools:`, etc.). These fields are not recognized by GitHub-hosted runners. If you switch a job back to `runs-on: ubuntu-latest`, remove or ignore the `runner.yml` file.
-
----
-
-## Migrating from `egress:` to `http_egress:`
-
-The `egress:` field has been replaced by `http_egress:`, which controls HTTP/HTTPS allowlisting only. (For raw TCP, see `tcp_egress:`; for DNS, see `dns:`.)
-
-`egress:` is **no longer accepted**. Configs that still use it produce:
-
-```
-ERROR: runner.yml contains unknown field "egress" — your RunSecure version may be older than this config requires
-```
-
-**Migration:** rename `egress:` to `http_egress:` in your `runner.yml`. No other changes required; semantics are identical.
-
-**Version pinning recommendation.** When you adopt new fields (`http_egress:`, `tcp_egress:`, `dns:`), set `version:` in `runner.yml` to a RunSecure version known to support them. The orchestrator now performs strict-schema validation: unknown top-level fields fail with a clear error. This prevents the silent-skip failure mode where an old orchestrator ignores new fields and runs with an empty allowlist.
-
----
-
-## Orchestrator Options
-
-```
-./infra/scripts/run.sh [options]
-
-Required:
-  --project PATH     Path to the project directory (must have .github/runner.yml)
-  --repo OWNER/REPO  GitHub repository (e.g., NaorPenso/my-app)
-
-Optional:
-  --max-jobs N       Maximum jobs to process before exiting (default: 5)
-  --force            Force rebuild of the project image even if cached
-  -h, --help         Show help
-```
-
-The orchestrator loops up to `--max-jobs` times, requesting a fresh JIT token from the GitHub API for each job. Press Ctrl+C to stop it between jobs.
+- **Squid** filters HTTP/HTTPS by domain. CONNECT to anything not on
+  the allowlist is refused. The runner gets `HTTP_PROXY` set
+  automatically.
+- **HAProxy** opens a TCP frontend on each `tcp_egress` port. Connecting
+  to that port from the runner is forwarded to the configured
+  destination only. Other TCP ports have no listener.
+- **dnsmasq** (only when `dns.host: false`) runs DNS inside the proxy
+  with your servers, optional `hosts_file` overrides, and optional
+  `whitelist_file` enforcement.
+
+The proxy is **fail-closed**: if Squid, HAProxy, or dnsmasq dies, the
+proxy container exits and the runner's network calls start failing
+immediately.
+
+The base allowlist (built into `infra/squid/base.conf`) covers
+`github.com`, `*.npmjs.org`, `*.pypi.org`, `crates.io`, `docker.io`,
+GHCR, and a few CI-essential tools. Project-specific entries from
+`http_egress:` are added on top.
 
 ---
 
 ## Testing
 
-### Validation Tests
-
-Per-image tests that verify hardening and functionality without any network (no proxy needed):
-
-```bash
-# Full suite: build all images + 36 security checks per image + functional tests
-./tests/validation/run-all-tests.sh
-
-# Quick mode: skip the Rust image (slow to build)
-./tests/validation/run-all-tests.sh --quick
-
-# Skip image builds: reuse already-built images
-./tests/validation/run-all-tests.sh --skip-build
-```
-
-These tests run inside containers with the same hardening flags used in production. They verify: non-root user, no su/sudo, no setuid binaries, package manager neutered, no network tools, root account locked, system paths protected, /tmp noexec, writable workspace, core tools functional, language runtime present, and resource limits enforced.
-
-### Integration Tests
-
-End-to-end tests with the Squid proxy running. These prove the full system works as a unit:
+The full validation suite builds every language image and runs ~35
+hardening checks against each (non-root, no setuid, no apt, locked
+root, etc.):
 
 ```bash
-# Full suite: egress + Node CI + Python CI + attack simulation (67 checks)
-./tests/integration/run-integration-tests.sh
-
-# Run individual test suites
-./tests/integration/run-integration-tests.sh --test egress    # 25 egress proxy checks
-./tests/integration/run-integration-tests.sh --test node       # Node.js CI lifecycle
-./tests/integration/run-integration-tests.sh --test python     # Python CI lifecycle
-./tests/integration/run-integration-tests.sh --test attack     # 28 attack vector checks
-
-# Skip image builds
-./tests/integration/run-integration-tests.sh --skip-build
+./tests/validation/run-all-tests.sh             # all images
+./tests/validation/run-all-tests.sh --quick     # skip Rust (slow)
+./tests/validation/run-all-tests.sh --skip-build # reuse cached images
 ```
 
-**Egress tests** — verify that allowed domains (GitHub, npm, PyPI, crates.io) succeed and blocked domains (pastebin, webhook.site, ngrok, cloud metadata, Slack, Discord) are denied. Also checks that exfiltration techniques (POST requests, DNS-over-HTTPS, attacker webhooks) are blocked and that direct internet access bypassing the proxy is impossible.
+Integration tests bring up the proxy + runner stack on an isolated
+Docker network and exercise CI workflows end-to-end:
 
-**CI workflow tests** — run a real git clone, npm install, npm test, pip install, and pytest through the proxy to verify that real CI workloads succeed end-to-end.
+```bash
+./tests/integration/run-integration-tests.sh                  # all suites
+./tests/integration/run-integration-tests.sh --test egress    # egress allowlist tests
+./tests/integration/run-integration-tests.sh --test tcp       # HAProxy TCP egress
+./tests/integration/run-integration-tests.sh --test dns       # dnsmasq paths
+./tests/integration/run-integration-tests.sh --test attack    # simulated attacks
+./tests/integration/run-integration-tests.sh --test node      # Node CI lifecycle
+./tests/integration/run-integration-tests.sh --test python    # Python CI lifecycle
+```
 
-**Attack simulation tests** — attempt 28 real attack vectors: Docker socket escape, host filesystem access, privilege escalation (setuid, capabilities), reverse shell tools, persistence mechanisms (cron, systemd, dotfiles), resource abuse (memory bombs, fork bombs), runtime package installation, namespace isolation, kernel attack surface (ptrace, insmod), and credential exposure.
+A separate Grype CVE scan runs in CI on every PR that touches
+`images/` or `tools/`. The post-publish workflow re-scans every image
+that gets pushed to GHCR — a HIGH/CRITICAL CVE with an upstream fix
+blocks the publish.
 
 ---
 
-## Extending RunSecure
+## Operational notes
 
-### Adding a New Language
+### Per-job logs land on the host
 
-Create a new Dockerfile in `images/`. Follow the existing pattern:
+The runner's `_diag/` directory (the actions-runner's per-job worker
+log) is bind-mounted to the orchestrator's working directory. When a
+job crashes before logs upload, you still have `_diag/Worker_*.log`
+locally for triage. One generation of rotation is kept in
+`_diag.previous/`.
 
-1. Start `FROM runner-base:${BASE_TAG}`
-2. Switch to `USER root`
-3. Install the language runtime via apt or official installer
-4. Re-strip setuid bits: `RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true`
-5. Set the `PATH` (must include `/home/runner/actions-runner` and `/home/runner/actions-runner/bin`)
-6. Switch back to `USER runner`
-
-Example for Go:
-
-```dockerfile
-ARG BASE_TAG=latest
-FROM runner-base:${BASE_TAG}
-ARG GO_VERSION=1.22
-USER root
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" | tar -C /usr/local -xzf -
-RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
-ENV PATH="/usr/local/go/bin:/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
-USER runner
-WORKDIR /home/runner
-```
-
-Build it: `docker build -f images/go.Dockerfile --build-arg GO_VERSION=1.22 -t runner-go:1.22 .`
-
-Use it: `runtime: go:1.22`
-
-### Adding a New Tool Recipe
-
-Create a shell script in `tools/`. The script runs as root during image build and must:
-
-1. Install any system dependencies via apt
-2. Install the tool
-3. Clean up apt lists (`rm -rf /var/lib/apt/lists/*`)
-4. Verify the tool works
-
-Example for Trivy:
+To turn this off (e.g. shared CI hosts where multiple users access the
+disk):
 
 ```bash
-#!/bin/bash
-set -euo pipefail
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-trivy --version
-echo "[RunSecure] Trivy installed successfully."
+RUNSECURE_DIAG_RETENTION=0 ./infra/scripts/run.sh ...
 ```
 
-Make it executable: `chmod +x tools/trivy.sh`
+The synchronous log-upload-wait still ensures `gh api .../jobs/<id>/logs`
+returns the actual log instead of `BlobNotFound`.
 
-Use it: `tools: [trivy]`
+### JIT token exposure
 
----
+The orchestrator passes the GitHub JIT runner token to the container
+via the `RUNNER_JIT_CONFIG` environment variable. The entrypoint reads
+it once and `unset`s it, but it's briefly visible to `docker inspect`
+and to processes inside the container that read `/proc/1/environ`.
 
-## Versioning and Updates
+If you're running on a shared host where unprivileged users could
+inspect container state, set `RUNNER_JIT_CONFIG_FILE` instead — the
+entrypoint reads it from a tmpfs file and removes the file after
+reading. The orchestrator-side switch to file-mode is tracked as a
+follow-up; see [SECURITY.md §14](./SECURITY.md#known-limitations).
 
-RunSecure uses container registry publishing for release management. When a new version is tagged (e.g., `v1.2.0`), GitHub Actions builds and pushes multi-arch images to GHCR:
+### Updating
 
-```
-ghcr.io/andend-collective/runsecure/base:1.2.0
-ghcr.io/andend-collective/runsecure/node:1.2.0-24
-ghcr.io/andend-collective/runsecure/python:1.2.0-3.12
-ghcr.io/andend-collective/runsecure/rust:1.2.0-stable
-ghcr.io/andend-collective/runsecure/proxy:1.2.0
-```
+Releases follow weekly cadence. Every Monday at 02:30 UTC, the
+weekly-version-bump workflow tags `vX.Y.(Z+1)` and the publish workflow
+rebuilds every image with `--no-cache: true` (so Debian package security
+updates land), runs Grype, and pushes to GHCR.
 
-### Consuming a published release
-
-See the [Quick Start (Published Images)](#quick-start-published-images) section above for the consumer-focused flow, including how to pull images, write your `runner.yml`, and run the orchestrator.
-
-To summarize: add a `version:` field to your project's `.github/runner.yml`:
+To consume a release as a project:
 
 ```yaml
-version: "1.2.0"
+# in runner.yml
+version: "1.1.2"
 runtime: node:24
-http_egress:
-  - "*.neon.tech"
 ```
 
-The orchestrator will pull pre-built images from GHCR instead of building locally. Your egress domains, tools, resources, and labels remain yours — RunSecure never touches them.
-
-If the pull fails (offline, version doesn't exist), the orchestrator falls back to building from local Dockerfiles automatically.
-
-### What belongs to whom
-
-| RunSecure (shipped via release) | Your project (in your repo) |
-|---|---|
-| Base image hardening | `runtime:` choice |
-| Proxy base allowlist | `http_egress:` domains |
-| Seccomp profile | `tools:` selection |
-| Container runtime flags | `resources:` limits |
-| Tool recipes | `labels:` |
-
-These are merged at runtime — updating RunSecure never overwrites your project config. Updating your project config never changes the hardening.
-
-### How updates flow
-
-The orchestrator automatically pulls the latest project config (`git pull`) before reading `runner.yml`, so egress domain changes take effect on the next job without manual intervention on the runner host.
-
-For RunSecure-side updates (new hardening, proxy changes), bump the `version:` in your project's `runner.yml` to the new release. The next job will pull the new images.
-
----
-
-## Troubleshooting
-
-### npm install hangs or times out
-
-The proxy is likely blocking a domain that npm or one of your dependencies needs. Run the egress test to confirm the proxy is working, then check the proxy log for denied domains:
+To trigger a manual release:
 
 ```bash
-./tests/integration/run-integration-tests.sh --test egress
-```
-
-Add the missing domain to the `http_egress` list in your `runner.yml`.
-
-### Permission denied errors
-
-The container runs as UID 1001. Common fixes:
-- Use `npm ci --cache /home/runner/.npm` if the default npm cache path is inaccessible
-- Write build output to `/home/runner/_work/` (writable and ephemeral)
-- Do not attempt to write to `/usr/local/`, `/etc/`, or other system paths
-
-### Container exits immediately
-
-The JIT token has likely expired (they last 1 hour). The orchestrator requests a fresh token for each job automatically, but if you're running the container manually, make sure the token is current.
-
-### "apt-get: not found" inside the container
-
-This is by design. Final images have the package manager removed. If a CI step needs a system package, add it to the `apt` list in your `runner.yml` so it's installed during image build, or create a tool recipe.
-
-### Out of memory during npm ci or build
-
-Increase the container memory limit:
-
-```yaml
-resources:
-  memory: 12g
-```
-
-Also make sure your Colima VM has enough memory:
-
-```bash
-colima stop
-colima start --cpu 4 --memory 20 --vm-type vz --mount-type virtiofs
-```
-
-### pip install fails with "externally-managed-environment"
-
-RunSecure's Python image uses Debian's system Python, which enforces [PEP 668](https://peps.python.org/pep-0668/). Use a virtual environment in your workflow steps:
-
-```yaml
-- name: Install dependencies
-  run: |
-    python3 -m venv .venv
-    . .venv/bin/activate
-    pip install -r requirements.txt
-
-- name: Run tests
-  run: |
-    . .venv/bin/activate
-    pytest
-```
-
-### Images are too large
-
-Use per-job image overrides so lightweight jobs (lint, typecheck) use the smaller base image:
-
-```yaml
-tools: [playwright]
-jobs:
-  lint: base      # ~450 MB, no Playwright
-  test: base
-  e2e: full       # ~750 MB, with Playwright
+gh workflow run weekly-version-bump.yml -f bump_type=patch  # or minor / major
 ```
 
 ---
 
-## Project Layout
+## Project layout
 
 ```
-RunSecure/
-├── images/                        # Docker images (layered)
-│   ├── base.Dockerfile            #   Base: Debian slim + runner + hardening
-│   ├── node.Dockerfile            #   + Node.js
-│   ├── python.Dockerfile          #   + Python
-│   └── rust.Dockerfile            #   + Rust
-├── tools/                         # Tool install recipes (shell scripts)
-│   ├── playwright.sh              #   Playwright + Chromium
-│   ├── semgrep.sh                 #   Semgrep SAST scanner
-│   └── cypress.sh                 #   Cypress E2E
-├── infra/                         # Runtime infrastructure
-│   ├── docker-compose.yml         #   Production compose (runner + proxy)
-│   ├── squid/                     #   Egress proxy (Squid + HAProxy + dnsmasq)
-│   │   ├── base.conf              #     Squid domain allowlist
-│   │   ├── Dockerfile             #     Proxy image
-│   │   ├── proxy-entrypoint.sh   #     Process supervisor
-│   │   ├── haproxy.cfg.tmpl      #     HAProxy TCP config template
-│   │   └── dnsmasq.conf.tmpl     #     dnsmasq DNS config template
-│   ├── seccomp/
-│   │   └── node-runner.json       #   Syscall filter profile
-│   └── scripts/
-│       ├── run.sh                 #   Main orchestrator
-│       ├── compose-image.sh       #   Image builder (reads runner.yml)
-│       ├── generate-egress-conf.sh #  Generates all proxy + compose config
-│       ├── entrypoint.sh          #   Container startup (JIT config)
-│       ├── finalize-hardening.sh  #   Final image hardening
-│       └── lib/
-│           ├── validate-schema.sh #   runner.yml schema validator
-│           ├── fetch-runtime-file.sh # SSRF-protected file fetcher
-│           ├── yaml-emit.sh       #   YAML fragment helpers
-│           └── diag-rotation.sh  #   Diag directory rotation
-├── skeleton/                      # Templates for new projects
-│   ├── runner.yml                 #   Configuration template
-│   ├── workflow-ci.yml            #   Example GitHub Actions workflow
-│   └── ONBOARDING.md             #   Step-by-step setup guide
-└── tests/
-    ├── validation/                # Per-image hardening + functional tests
-    ├── integration/               # End-to-end with proxy + attack sims
-    └── {node,python,rust}-project/  # Test fixture projects
+images/                  # Dockerfiles for base + language layers
+infra/
+  docker-compose.yml     # Runner + proxy stack
+  scripts/
+    run.sh               # Orchestrator (entry point — call this)
+    compose-image.sh     # Builds the project-specific image
+    generate-egress-conf.sh # Generates squid/haproxy/dnsmasq configs
+    entrypoint.sh        # Runs inside the container; starts the runner
+    finalize-hardening.sh # Strips apt, locks /etc, applies hardening:
+    lib/                 # Shared helpers (schema validator, fetcher, etc.)
+  squid/                 # Proxy image — squid + haproxy + dnsmasq + supervisor
+  seccomp/               # Custom seccomp profile (node-runner.json)
+tools/                   # Optional layers (cypress.sh, playwright.sh, ...)
+tests/
+  validation/            # Per-image hardening tests (no Docker network)
+  integration/           # End-to-end with proxy + runner + simulated attacks
+SECURITY.md              # Threat model + known limitations
+.grype.yaml              # CVE allowlist (vendored-runner GHSAs only)
+.github/workflows/       # CI: build, scan, publish, weekly-bump
 ```
 
 ---
 
-## License
+## Contributing
 
-MIT
+Bug reports and PRs welcome. The integration test suite must pass
+locally before opening a PR (`./tests/integration/run-integration-tests.sh`).
+Adding a new tool? See `tools/cypress.sh` as the canonical template:
+pin the version, install + chown caches, end with cleanup.
+
+License: see [LICENSE](./LICENSE).

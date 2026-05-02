@@ -60,3 +60,6 @@ docker-compose.override.yml
 tmp/
 *.tmp
 *.bak
+
+# AI-tool brainstorm/spec output (local-only, regenerable on demand)
+docs/superpowers/

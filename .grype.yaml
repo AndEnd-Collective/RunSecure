@@ -29,9 +29,10 @@ ignore:
   #   /home/runner/actions-runner/externals/node20/lib/node_modules/
   # GitHub's runner periodically bumps them via "chore: update Node versions"
   # commits — see release notes for actions/runner v2.334.0. Our upstream
-  # pin is RUNNER_VERSION in images/base.Dockerfile (Renovate-tracked).
+  # pin is RUNNER_VERSION in images/base.Dockerfile.
   #
-  # Re-evaluate whenever Renovate opens a RUNNER_VERSION bump PR.
+  # Re-evaluate whenever you bump RUNNER_VERSION — most of these clear
+  # automatically when a new runner ships with bumped externals/.
   #
   # Reachability: these utilities run JS-action workflow code (which is
   # untrusted by design — that's what RunSecure is hardening). The CVEs

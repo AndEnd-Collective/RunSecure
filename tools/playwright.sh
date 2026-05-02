@@ -34,11 +34,9 @@ apt-get install -y --no-install-recommends \
     xdg-utils
 rm -rf /var/lib/apt/lists/*
 
-# H9: pin Playwright version. `npx --yes playwright` would resolve to
-# whatever the latest version is at image-build time. Renovate updates
-# the constant.
-# renovate: datasource=npm depName=playwright
-# 1.59.1 (2026-04-01) — latest stable, comfortably past the 48h gate.
+# Pin Playwright to a specific version. A floating `npx --yes playwright`
+# would resolve to whatever's latest at image-build time. Bump this
+# manually when you intend to upgrade.
 PLAYWRIGHT_VERSION="1.59.1"
 
 # Install Playwright globally with pinned version, then use the pinned
