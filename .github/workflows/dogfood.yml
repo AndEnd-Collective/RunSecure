@@ -90,6 +90,14 @@ jobs:
           FAIL=0
           for t in tests/unit/test-*.sh; do
             [ -f "$t" ] || continue
+            # Same Docker-skip rationale as validate.yml — and additionally,
+            # the hardened RunSecure runner blocks nested Docker by design,
+            # so these tests literally cannot run here.
+            case "$(basename "$t")" in
+              test-compose-image.sh|test-runner-yml-schema.sh)
+                echo "SKIP $t (Docker-only, blocked by hardening)"
+                continue ;;
+            esac
             echo "::group::$t"
             bash "$t" || FAIL=$((FAIL + 1))
             echo "::endgroup::"

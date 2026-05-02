@@ -80,6 +80,16 @@ jobs:
           FAIL=0
           for t in tests/unit/test-*.sh; do
             [ -f "$t" ] || continue
+            # Skip Docker-requiring unit tests — they invoke compose-image.sh
+            # or generate-egress-conf.sh which trigger image builds. Those
+            # belong in smoke-test.yml's image-build path, not in this fast
+            # lint workflow.
+            case "$(basename "$t")" in
+              test-compose-image.sh|test-runner-yml-schema.sh)
+                echo "::group::SKIP $t (Docker-only)"
+                echo "::endgroup::"
+                continue ;;
+            esac
             echo "::group::$t"
             if bash "$t"; then
               echo "::endgroup::"
