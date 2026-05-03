@@ -365,6 +365,17 @@ cd RunSecure
     --max-jobs 100
 ```
 
+For PR-time bootstrapping (drain the queue, exit when done) there's a
+thin convenience wrapper with sanity checks (gh auth, Docker daemon,
+runner.yml present):
+
+```bash
+./infra/scripts/dev/bootstrap-self-runner.sh        # default 5 jobs
+./infra/scripts/dev/bootstrap-self-runner.sh 20     # override count
+# Kill it explicitly when the queue is empty:
+kill "$(cat _orchestrator-logs/orch.pid)"
+```
+
 The repo-root `.github/runner.yml` defines what the self-hosted runner
 should look like (Node 24 base, minimal allowlist for `github.com` + PyPI,
 ARM64 labels). When no orchestrator is running, `dogfood.yml`'s jobs
