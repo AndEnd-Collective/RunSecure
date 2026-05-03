@@ -4,17 +4,17 @@
 # Triggers on semver tags (v1.0.0, v1.2.3, etc.)
 # Builds multi-arch images and pushes to ghcr.io/andend-collective/runsecure/
 #
-# Image naming (beta-first publish):
-#   ghcr.io/andend-collective/runsecure/base:<version>-beta
+# Image naming (canary-first publish):
+#   ghcr.io/andend-collective/runsecure/base:<version>-canary
 #   ghcr.io/andend-collective/runsecure/base:nightly
-#   ghcr.io/andend-collective/runsecure/<lang>:<version>-beta-<lang_version>
+#   ghcr.io/andend-collective/runsecure/<lang>:<version>-canary-<lang_version>
 #   ghcr.io/andend-collective/runsecure/<lang>:nightly-<lang_version>
-#   ghcr.io/andend-collective/runsecure/proxy:<version>-beta
+#   ghcr.io/andend-collective/runsecure/proxy:<version>-canary
 #   ghcr.io/andend-collective/runsecure/proxy:nightly
 #
 # Production tags (`<version>` and `latest`) are NOT created here.
 # They are added by promote-to-stable.yml after post-publish-acceptance.yml
-# validates the beta build against documented security claims. Same
+# validates the canary build against documented security claims. Same
 # digest, server-side retag — no rebuild.
 # ============================================================================
 
@@ -85,11 +85,11 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           no-cache: ${{ github.event_name != 'push' }}
           platforms: linux/amd64,linux/arm64
-          # Beta-first publish. Acceptance suite (post-publish-acceptance.yml)
+          # Canary-first publish. Acceptance suite (post-publish-acceptance.yml)
           # validates these tags; on success, promote-to-stable.yml retags
           # the same digest as `<ver>` + `latest`.
           tags: |
-            ${{ env.IMAGE_PREFIX }}/base:${{ steps.version.outputs.version }}-beta
+            ${{ env.IMAGE_PREFIX }}/base:${{ steps.version.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/base:nightly
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
@@ -141,10 +141,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
-            BASE_TAG=${{ needs.base.outputs.version }}-beta
+            BASE_TAG=${{ needs.base.outputs.version }}-canary
             ${{ matrix.build_arg }}
           tags: |
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.base.outputs.version }}-beta-${{ matrix.lang_version }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.base.outputs.version }}-canary-${{ matrix.lang_version }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:nightly-${{ matrix.lang_version }}
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
@@ -176,7 +176,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-beta
+            ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/proxy:nightly
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
@@ -219,7 +219,7 @@ jobs:
         # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
         # evaluated when the step runs and resolves correctly.
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}-beta"
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}-canary"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
@@ -262,7 +262,7 @@ jobs:
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-beta"
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-canary"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
