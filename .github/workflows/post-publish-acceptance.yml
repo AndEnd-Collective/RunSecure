@@ -84,10 +84,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Every language image that promote-to-stable.yml retags MUST be
+          # acceptance-tested here. If you add a new lang/version to the
+          # publish matrix, add it here too — otherwise a regression would
+          # ship to `:latest` without any check rejecting it.
           - lang: node
             lang_version: "24"
+          - lang: node
+            lang_version: "22"
           - lang: python
             lang_version: "3.12"
+          - lang: rust
+            lang_version: "stable"
     env:
       # Acceptance runs against -canary tags (the just-published, not-yet-validated
       # release). On all-green, promote-to-stable.yml retags the same digest as
