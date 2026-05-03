@@ -96,6 +96,30 @@ RUNSECURE_VERSION=$(yq '.version // "local"' "$RUNNER_YML")
 REPO_SHORT=$(echo "$REPO" | sed 's|.*/||; s/[^a-zA-Z0-9_-]/-/g' | tr '[:upper:]' '[:lower:]')
 CONTAINER_PREFIX="rs-${REPO_SHORT}"
 
+# --- Reject concurrent orchestrators against the same repo ------------------
+# Two orchestrators against the same repo would collide on the per-job
+# RUNNER_NAME (rs-<repo>-job1, ...). Compose treats the second `up` as a
+# recreate of the existing container, killing the first orchestrator's
+# in-flight container — which orphans the GitHub-side runner registration
+# (busy + offline) until the JIT token expires (~1h). Fail fast instead.
+#
+# Lock is per-repo (not global): two orchestrators against DIFFERENT repos
+# can run concurrently — their container names don't collide.
+LOCKDIR="${TMPDIR:-/tmp}/runsecure-${REPO_SHORT}.lock"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    if [[ -f "$LOCKDIR/pid" ]] && kill -0 "$(cat "$LOCKDIR/pid")" 2>/dev/null; then
+        echo "[RunSecure] ERROR: another orchestrator is already running for $REPO" >&2
+        echo "[RunSecure] PID: $(cat "$LOCKDIR/pid"), lock: $LOCKDIR" >&2
+        echo "[RunSecure] Stop it first (or kill the PID) before launching a new one." >&2
+        exit 1
+    fi
+    # Stale lock — old process is gone. Take over.
+    echo "[RunSecure] Stale lock from PID $(cat "$LOCKDIR/pid" 2>/dev/null) — taking over" >&2
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+fi
+echo "$$" > "$LOCKDIR/pid"
+
 # --- Build/cache the project image ------------------------------------------
 echo "=== RunSecure Orchestrator ==="
 echo "Project: $PROJECT_DIR"
@@ -206,6 +230,12 @@ cleanup() {
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$_cleanup_compose" down --remove-orphans 2>/dev/null || true
     else
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+    fi
+    # Release the per-repo lock. Only delete if WE own it (matching PID),
+    # so a "stale lock takeover" by another orchestrator doesn't get its
+    # own lock deleted by our cleanup.
+    if [[ -d "${LOCKDIR:-}" ]] && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
+        rm -rf "$LOCKDIR"
     fi
 }
 trap cleanup EXIT
