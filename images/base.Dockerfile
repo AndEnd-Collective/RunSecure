@@ -156,6 +156,32 @@ RUN passwd -l root 2>/dev/null || true \
 # ---- Security hardening: minimal PATH --------------------------------------
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
 
+# ---- GitHub Actions image-metadata env vars --------------------------------
+# Hosted runners set ImageOS / ImageVersion to populate the "Operating System"
+# and "Runner Image" groups in the workflow log UI. Self-hosted runners
+# don't carry these by default — workflow logs render with empty group
+# headers. We set RunSecure-flavored values so consumers see *something*
+# in the UI that identifies what they're running on.
+#
+# The "Included Software" link the actions-runner constructs from these
+# values will 404 (it points at github.com/actions/runner-images, which
+# only knows about its own image set). That's a known, accepted UI quirk —
+# the values themselves are still informative.
+ENV ImageOS=runsecure-bookworm
+ENV ImageVersion=2.334.0
+
+# ---- Job-started diagnostics hook ------------------------------------------
+# When ACTIONS_RUNNER_HOOK_JOB_STARTED is set, the actions-runner executes
+# the named script at the start of every job and pipes its output into the
+# workflow log as a real "Job started hook" step. We use this to publish
+# RunSecure's hardening posture (capabilities, seccomp state, mounts,
+# proxy config, available toolchains) to GitHub's UI so a user debugging
+# a job doesn't need to clone our repo to understand the runtime.
+COPY infra/runner-hooks /opt/runsecure-hooks
+RUN chmod 755 /opt/runsecure-hooks/job-started.sh /opt/runsecure-hooks/job-completed.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/runsecure-hooks/job-started.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/runsecure-hooks/job-completed.sh
+
 # ---- Final setup ------------------------------------------------------------
 USER runner
 WORKDIR /home/runner
