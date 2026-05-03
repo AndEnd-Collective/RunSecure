@@ -104,17 +104,17 @@ apt install docker.io gh
 
 ## Quick Start
 
-> **Heads-up on versioning.** Releases follow a beta-first promotion
+> **Heads-up on versioning.** Releases follow a canary-first promotion
 > pipeline:
 >
 > | Tag | Meaning | When to use |
 > |---|---|---|
 > | `1.2.3` (or `latest`) | Promoted to stable after acceptance suite passed against the same digest | **Production** — every consumer should pin one of these |
-> | `1.2.3-beta` (or `nightly`) | Built and Grype-scanned, but acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+> | `1.2.3-canary` (or `nightly`) | Built and Grype-scanned, but acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
 >
-> The `:1.2.3-beta` digest is byte-identical to `:1.2.3` after promotion
+> The `:1.2.3-canary` digest is byte-identical to `:1.2.3` after promotion
 > — same artifact, just a server-side retag. If acceptance fails, the
-> beta tag stays and no stable tag is created.
+> canary tag stays and no stable tag is created.
 
 ### Clone-and-run (recommended)
 
@@ -326,7 +326,7 @@ the actual GHCR images against documented security claims. The workflow
 
 Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
 to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
-PROMOTION: the `-beta` tag exists and consumers can opt into it, but
+PROMOTION: the `-canary` tag exists and consumers can opt into it, but
 the stable `<version>` and `latest` tags are not created until the
 acceptance suite is fully green. The promotion (`promote-to-stable.yml`)
 runs server-side via `docker buildx imagetools create` — no rebuild,
@@ -367,10 +367,10 @@ What you see in the Security tab when a claim fails:
 |---|---|
 | **Rule** | `H03` — *"Package manager removed (apt/dpkg/aptitude)"* |
 | **Severity** | error |
-| **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-beta-24: package manager 'apt' still present at /usr/bin/apt" |
+| **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-canary-24: package manager 'apt' still present at /usr/bin/apt" |
 | **Location** | `SECURITY.md` line 1 (anchor: layer-1-image-hardening-build-time) |
 | **Help** | Markdown explaining the claim + link to the SECURITY.md section |
-| **Fingerprint** | `claim/v1=H03 image-ref/v1=ghcr.io/.../node:1.2.3-beta-24` (deduplicates across runs) |
+| **Fingerprint** | `claim/v1=H03 image-ref/v1=ghcr.io/.../node:1.2.3-canary-24` (deduplicates across runs) |
 
 The `partialFingerprints` mean the same finding on the same image-ref
 shows as one persistent issue across re-runs (not a new finding each
