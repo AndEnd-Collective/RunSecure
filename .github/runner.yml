@@ -1,0 +1,50 @@
+# ============================================================================
+# RunSecure — self-CI configuration
+# ============================================================================
+# This file makes RunSecure use itself for CI. The dogfood.yml workflow
+# requires `runs-on: [self-hosted, Linux, ARM64, container]` — pointing
+# at a runner that the orchestrator (./infra/scripts/run.sh) starts.
+#
+# Bootstrap:
+#
+#   ./infra/scripts/run.sh \
+#     --project . \
+#     --repo AndEnd-Collective/RunSecure \
+#     --max-jobs 100
+#
+# The orchestrator will:
+#   1. Build a project-specific image with the tools below baked in
+#   2. Request a JIT runner token from GitHub
+#   3. Launch the proxy + runner stack
+#   4. Run one queued job, tear down, loop (up to --max-jobs)
+#
+# When no orchestrator is running, `dogfood.yml` jobs queue silently —
+# the rest of CI (smoke-test, validate, grype-scan) still runs on
+# ubuntu-latest, so the repo is never blocked on the self-hosted path.
+# ============================================================================
+
+runtime: node:24
+
+# No project-specific http_egress: every domain the dogfood lints need
+# (github.com, githubusercontent.com, pypi.org, files.pythonhosted.org)
+# is already in the base allowlist (infra/squid/base.conf). Adding them
+# here would create duplicate Squid ACLs — Squid refuses overlapping
+# dstdomain entries (e.g. base has `.github.com`; project entry
+# `github.com` is treated as a redundant subset and rejects the config).
+#
+# Add entries here ONLY for domains not already covered by base.conf.
+
+# yq is needed by the schema-validator lint. PyYAML is needed by the
+# workflow-yaml-valid lint. Everything else is plain bash + grep.
+apt:
+  - python3-pip
+  - wget                  # for downloading yq
+
+# Resource limits scaled for the lint workload (which is tiny).
+resources:
+  memory: 1g
+  cpus: 2
+  pids: 256
+
+# These labels must match the `runs-on:` in dogfood.yml.
+labels: [self-hosted, Linux, ARM64, container]
