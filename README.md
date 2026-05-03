@@ -502,6 +502,27 @@ entrypoint reads it from a tmpfs file and removes the file after
 reading. The orchestrator-side switch to file-mode is tracked as a
 follow-up; see [SECURITY.md §14](./SECURITY.md#known-limitations).
 
+### Concurrency: one orchestrator per repo
+
+The orchestrator acquires a per-repo lockfile at `${TMPDIR:-/tmp}/runsecure-<repo-slug>.lock`
+on startup. A second invocation against the same repo fails fast with a
+clear error rather than silently colliding on container names.
+
+Two orchestrators against **different repos** can run concurrently — the
+lock is per-repo, and per-job container names (`rs-<repo>-jobN`) don't
+overlap.
+
+Why the lock matters: without it, a second `docker compose up` against
+the same repo would treat the existing container as a "recreate" target,
+killing the first orchestrator's in-flight container. That orphans the
+GitHub-side runner registration (`busy + offline`) until the JIT token
+expires (~1 hour), during which the assigned job sits `in_progress` and
+blocks PR check rollup. Fail-fast on the host avoids the entire class.
+
+If the lock looks stale (orchestrator was killed without cleanup), the
+next invocation detects the dead PID, logs `Stale lock from PID N — taking
+over`, and proceeds. Manual cleanup: `rm -rf /tmp/runsecure-*.lock`.
+
 ### Updating
 
 Releases follow weekly cadence. Every Monday at 02:30 UTC, the
