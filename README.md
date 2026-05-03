@@ -343,7 +343,44 @@ IMAGE_VERSION=1.1.2 ./tests/acceptance/run-locally.sh python 3.12
 
 A lint (`tests/validation/test-acceptance-claim-coverage.sh`) prevents
 new claim IDs from being added to checks without a corresponding header
-that documents them.
+that documents them — and without a matching entry in
+`tests/acceptance/claims.yml` (the SARIF rule catalog).
+
+### Findings in the Security tab (SARIF)
+
+Every acceptance run uploads results to GitHub Code Scanning in
+SARIF v2.1.0 format, one upload per language matrix leg:
+
+```
+post-publish-acceptance.yml
+  ├── runs the suite (capture PASS:/FAIL:/SKIP: lines)
+  ├── tests/acceptance/sarif-emitter.py
+  │     ├── reads tests/acceptance/claims.yml (rule catalog)
+  │     ├── reads the captured PASS/FAIL/SKIP output
+  │     └── emits acceptance-<lang>-<ver>.sarif
+  └── github/codeql-action/upload-sarif (category: acceptance-<lang>-<ver>)
+```
+
+What you see in the Security tab when a claim fails:
+
+| Column | Value |
+|---|---|
+| **Rule** | `H03` — *"Package manager removed (apt/dpkg/aptitude)"* |
+| **Severity** | error |
+| **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-beta-24: package manager 'apt' still present at /usr/bin/apt" |
+| **Location** | `SECURITY.md` line 1 (anchor: layer-1-image-hardening-build-time) |
+| **Help** | Markdown explaining the claim + link to the SECURITY.md section |
+| **Fingerprint** | `claim/v1=H03 image-ref/v1=ghcr.io/.../node:1.2.3-beta-24` (deduplicates across runs) |
+
+The `partialFingerprints` mean the same finding on the same image-ref
+shows as one persistent issue across re-runs (not a new finding each
+time), and a regression that re-introduces a previously-fixed claim
+shows up as "new" even after dismissal — exactly what you want for a
+security-claim audit trail.
+
+SARIF is uploaded **always** (even when the workflow itself fails),
+so failures land in the Security tab even when the gating step
+re-raises the original exit code.
 
 ## Self-hosting RunSecure for its own CI
 

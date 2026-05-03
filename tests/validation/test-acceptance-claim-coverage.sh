@@ -50,6 +50,37 @@ for claim in $CLAIMS; do
     pass "$claim → $(basename "$check_file") (claim documented in header)"
 done
 
+# --- Catalog coverage: every claim used in a check must be in claims.yml ---
+# claims.yml is the SARIF rule catalog; missing entries mean the SARIF
+# upload won't have a rule definition and the finding will appear as
+# a "rule not found" error in Code Scanning.
+CLAIMS_YML="${RUNSECURE_ROOT}/tests/acceptance/claims.yml"
+if [ ! -f "$CLAIMS_YML" ]; then
+    fail "tests/acceptance/claims.yml is missing — SARIF emitter cannot run"
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+    catalog_ids=$(python3 -c "
+import yaml, sys
+d = yaml.safe_load(open('$CLAIMS_YML'))
+print('\\n'.join(sorted(d.keys())))
+" 2>/dev/null)
+    for claim in $CLAIMS; do
+        if echo "$catalog_ids" | grep -qx "$claim"; then
+            pass "$claim in claims.yml (SARIF rule available)"
+        else
+            fail "$claim used in a check but missing from tests/acceptance/claims.yml — SARIF rule will be undefined"
+        fi
+    done
+    # Reverse direction: every entry in claims.yml must be used by at least
+    # one check (otherwise it's dead documentation).
+    for cid in $catalog_ids; do
+        if ! echo "$CLAIMS" | grep -qx "$cid"; then
+            fail "$cid in claims.yml but no acceptance check uses it (orphaned rule)"
+        fi
+    done
+else
+    fail "PyYAML not available — cannot validate claims.yml coverage"
+fi
+
 echo ""
 echo "=== Acceptance-claim Coverage ==="
 for r in "${RESULTS[@]}"; do
