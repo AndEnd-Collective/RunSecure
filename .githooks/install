@@ -1,0 +1,9 @@
+#!/bin/bash
+# Wires this repo to use .githooks/ instead of .git/hooks/.
+# One-time per clone. Idempotent.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+git config core.hooksPath .githooks
+echo "[install-hooks] core.hooksPath = .githooks"
+echo "[install-hooks] active hooks:"
+ls -1 .githooks/ | grep -v '^install$' | sed 's/^/  - /'

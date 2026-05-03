@@ -63,3 +63,6 @@ tmp/
 
 # AI-tool brainstorm/spec output (local-only, regenerable on demand)
 docs/superpowers/
+
+# Local orchestrator logs (created when running ./infra/scripts/run.sh from this checkout)
+_orchestrator-logs/

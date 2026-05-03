@@ -134,7 +134,15 @@ fi
 
 # Stub mode bits: must be 555 (r-xr-xr-x) — readable+executable by all,
 # not writable. Avoids accidental tampering by the runner user.
-mode=$(stat -f '%Lp' "$FAKE_BIN" 2>/dev/null || stat -c '%a' "$FAKE_BIN" 2>/dev/null)
+# Cross-platform `stat` mode lookup. GNU stat (Linux/CI) uses `-c '%a'`;
+# BSD stat (macOS) uses `-f '%Lp'`. The flag semantics are opposite —
+# `-f` on GNU means "filesystem status" and prints unrelated output —
+# so we have to detect the platform rather than try one then the other.
+if stat --version >/dev/null 2>&1; then
+    mode=$(stat -c '%a' "$FAKE_BIN")     # GNU
+else
+    mode=$(stat -f '%Lp' "$FAKE_BIN")    # BSD
+fi
 if [[ "$mode" == "555" ]]; then
     pass "H2-stub: mode 555 (r-xr-xr-x, immutable)"
 else

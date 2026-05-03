@@ -139,12 +139,12 @@ YAML
 EXIT_CODE=0
 OUTPUT=$("$COMPOSE_SCRIPT" "$PROJECT_NO_VER" 2>&1) || EXIT_CODE=$?
 
-# "node" without ":version" — cut -d: -f1 gives "node", cut -d: -f2 also gives "node"
-# This should be handled but might cause issues
-if echo "$OUTPUT" | grep -q "Runtime: node"; then
-    pass "Parses runtime without version separator"
+# Strict schema validator rejects `runtime: node` (no version) — the regex
+# requires `node:<digits>` etc. Failure here is the desired behavior.
+if [[ "$EXIT_CODE" -ne 0 ]] && echo "$OUTPUT" | grep -q "runtime 'node' is invalid"; then
+    pass "Strict validator rejects runtime without version"
 else
-    fail "Cannot parse runtime without version separator"
+    fail "Should reject runtime without version (got: exit=$EXIT_CODE)"
 fi
 
 # ============================================================================
@@ -226,10 +226,14 @@ YAML
 EXIT_CODE=0
 OUTPUT=$("$COMPOSE_SCRIPT" "$PROJECT_EXTRA" 2>&1) || EXIT_CODE=$?
 
-if echo "$OUTPUT" | grep -q "Runtime: node:24"; then
-    pass "Parses correctly despite extra fields"
+# Strict schema validator rejects unknown top-level keys (PR #20).
+# This is intentional: a strict-schema check catches version-skew bugs
+# (an old orchestrator with a new config produces a clear error rather
+# than silently dropping unknown fields).
+if [[ "$EXIT_CODE" -ne 0 ]] && echo "$OUTPUT" | grep -qE 'unknown field "(unknown_field|extra)"'; then
+    pass "Strict validator rejects unknown top-level fields"
 else
-    fail "Extra fields cause parsing failure"
+    fail "Should reject unknown fields (got: exit=$EXIT_CODE)"
 fi
 
 # ============================================================================
