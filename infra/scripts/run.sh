@@ -120,6 +120,19 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 echo "$$" > "$LOCKDIR/pid"
 
+# Install the lock-release trap RIGHT NOW, before anything else can fail.
+# The full cleanup (defined further down) extends this to also tear down
+# compose; until then, this minimal trap guarantees the lock is released
+# even if we exit early (no Docker, no gh auth, validation error, etc.).
+# Only delete the lock if WE own it (PID match) — protects against stale-
+# takeover races.
+_release_lock() {
+    if [[ -d "${LOCKDIR:-}" ]] && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
+        rm -rf "$LOCKDIR"
+    fi
+}
+trap _release_lock EXIT
+
 # --- Build/cache the project image ------------------------------------------
 echo "=== RunSecure Orchestrator ==="
 echo "Project: $PROJECT_DIR"
@@ -231,13 +244,12 @@ cleanup() {
     else
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
     fi
-    # Release the per-repo lock. Only delete if WE own it (matching PID),
-    # so a "stale lock takeover" by another orchestrator doesn't get its
-    # own lock deleted by our cleanup.
-    if [[ -d "${LOCKDIR:-}" ]] && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
-        rm -rf "$LOCKDIR"
-    fi
+    # Reuse the same lock-release helper installed earlier — keeps the
+    # PID-ownership check in one place.
+    _release_lock
 }
+# Extend the early lock-only trap to also tear down compose. The lock-release
+# is still PID-owned-only via _release_lock, so this is safe.
 trap cleanup EXIT
 
 for i in $(seq 1 "$MAX_JOBS"); do
