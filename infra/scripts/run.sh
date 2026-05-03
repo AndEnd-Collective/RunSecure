@@ -96,6 +96,43 @@ RUNSECURE_VERSION=$(yq '.version // "local"' "$RUNNER_YML")
 REPO_SHORT=$(echo "$REPO" | sed 's|.*/||; s/[^a-zA-Z0-9_-]/-/g' | tr '[:upper:]' '[:lower:]')
 CONTAINER_PREFIX="rs-${REPO_SHORT}"
 
+# --- Reject concurrent orchestrators against the same repo ------------------
+# Two orchestrators against the same repo would collide on the per-job
+# RUNNER_NAME (rs-<repo>-job1, ...). Compose treats the second `up` as a
+# recreate of the existing container, killing the first orchestrator's
+# in-flight container — which orphans the GitHub-side runner registration
+# (busy + offline) until the JIT token expires (~1h). Fail fast instead.
+#
+# Lock is per-repo (not global): two orchestrators against DIFFERENT repos
+# can run concurrently — their container names don't collide.
+LOCKDIR="${TMPDIR:-/tmp}/runsecure-${REPO_SHORT}.lock"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    if [[ -f "$LOCKDIR/pid" ]] && kill -0 "$(cat "$LOCKDIR/pid")" 2>/dev/null; then
+        echo "[RunSecure] ERROR: another orchestrator is already running for $REPO" >&2
+        echo "[RunSecure] PID: $(cat "$LOCKDIR/pid"), lock: $LOCKDIR" >&2
+        echo "[RunSecure] Stop it first (or kill the PID) before launching a new one." >&2
+        exit 1
+    fi
+    # Stale lock — old process is gone. Take over.
+    echo "[RunSecure] Stale lock from PID $(cat "$LOCKDIR/pid" 2>/dev/null) — taking over" >&2
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+fi
+echo "$$" > "$LOCKDIR/pid"
+
+# Install the lock-release trap RIGHT NOW, before anything else can fail.
+# The full cleanup (defined further down) extends this to also tear down
+# compose; until then, this minimal trap guarantees the lock is released
+# even if we exit early (no Docker, no gh auth, validation error, etc.).
+# Only delete the lock if WE own it (PID match) — protects against stale-
+# takeover races.
+_release_lock() {
+    if [[ -d "${LOCKDIR:-}" ]] && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
+        rm -rf "$LOCKDIR"
+    fi
+}
+trap _release_lock EXIT
+
 # --- Build/cache the project image ------------------------------------------
 echo "=== RunSecure Orchestrator ==="
 echo "Project: $PROJECT_DIR"
@@ -207,7 +244,12 @@ cleanup() {
     else
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
     fi
+    # Reuse the same lock-release helper installed earlier — keeps the
+    # PID-ownership check in one place.
+    _release_lock
 }
+# Extend the early lock-only trap to also tear down compose. The lock-release
+# is still PID-owned-only via _release_lock, so this is safe.
 trap cleanup EXIT
 
 for i in $(seq 1 "$MAX_JOBS"); do
