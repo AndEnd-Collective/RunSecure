@@ -348,6 +348,35 @@ failure. To bypass in an emergency: `git push --no-verify`.
 
 ---
 
+## Workflow log diagnostics
+
+Every job run on a RunSecure runner gets two **automatic diagnostic
+groups** in the GitHub Actions UI — no workflow changes required:
+
+```
+▶ RunSecure container — runtime posture
+▶ RunSecure container — hardening properties
+▶ RunSecure container — network posture
+▶ RunSecure container — available toolchains
+▶ RunSecure debugging pointers
+```
+
+These appear under "Job started hook" at the top of every workflow log.
+The "hardening properties" group prints actual values — `CapEff`,
+`NoNewPrivs`, seccomp mode, `/tmp` mount flags, `/etc` mode — so a user
+debugging a job can verify the runtime is enforcing what RunSecure
+documents, without cloning this repo.
+
+The script lives at `infra/runner-hooks/job-started.sh`; it's wired in
+via the actions-runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED` env var
+(set in `images/base.Dockerfile`). A symmetric `job-completed.sh` runs
+at job teardown with an exit summary.
+
+Both hooks are fail-safe — non-zero exit from a hook would fail the
+job per actions-runner contract, so each script wraps every command in
+`|| true` and ends with `trap 'exit 0' ERR`. A diagnostic should
+never be the reason a job fails.
+
 ## Operational notes
 
 ### Per-job logs land on the host
