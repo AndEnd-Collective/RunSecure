@@ -1,0 +1,120 @@
+# ============================================================================
+# RunSecure — Dogfood Workflow
+# ============================================================================
+# Runs the validation + unit lint suite ON A RUNSECURE-HOSTED RUNNER.
+# This proves the project's own runner image works for typical CI
+# workloads (lint, schema-check, file-content scans).
+#
+# Integration tests are NOT run here — they spawn nested Docker
+# (proxy + runner via docker-compose), which is intentionally blocked
+# inside a hardened RunSecure container (cap_drop:ALL + seccomp).
+# That's the security property the project is designed around. The
+# integration suite continues to run on ubuntu-latest in
+# smoke-test.yml.
+#
+# Bootstrap (run on a host with Docker):
+#
+#   ./infra/scripts/run.sh \
+#     --project . \
+#     --repo AndEnd-Collective/RunSecure \
+#     --max-jobs 100
+#
+# When no orchestrator is running, this workflow's jobs queue but
+# don't block other CI.
+# ============================================================================
+
+name: dogfood
+
+on:
+  pull_request:
+    paths:
+      - 'tests/validation/**'
+      - 'tests/unit/**'
+      - 'infra/scripts/**'
+      - '.github/workflows/dogfood.yml'
+      - '.github/runner.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lints-on-self:
+    # If you change these labels, also change them in .github/runner.yml.
+    runs-on: [self-hosted, Linux, ARM64, container]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The base RunSecure image has yq, python3, and pip pre-installed
+      # via the apt: list in .github/runner.yml. PyYAML still needs to
+      # be installed in the running container.
+      - name: Verify host environment + container hardening
+        run: |
+          set -euo pipefail
+          echo "User:   $(id -u):$(id -g) ($(whoami))"
+          echo "Python: $(python3 --version)"
+          echo "Host:   $(uname -a)"
+          # Container hardening sanity — these MUST be true on a RunSecure
+          # runner. If any fail, something has gone very wrong with the
+          # image build or the launch flags.
+          [ "$(id -u)" = "1001" ] || { echo "FAIL: not running as UID 1001"; exit 1; }
+          ! command -v sudo >/dev/null 2>&1 || { echo "FAIL: sudo present"; exit 1; }
+          ! command -v apt  >/dev/null 2>&1 || { echo "FAIL: apt present"; exit 1; }
+          ! command -v wget >/dev/null 2>&1 || { echo "WARN: wget present (recon-tool removal incomplete)"; }
+          echo "Container hardening confirmed."
+
+      - name: Install yq + PyYAML (in-container, no sudo)
+        run: |
+          set -euo pipefail
+          # The hardened runner has no sudo / no apt / no wget. Install
+          # yq into ~/.local/bin via curl (which IS present, needed for
+          # github.com pulls through the proxy) and prepend to $PATH.
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' --tlsv1.2             -o "$HOME/.local/bin/yq"             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod 755 "$HOME/.local/bin/yq"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/yq" --version
+
+          # PyYAML — Debian bookworm marks system Python as PEP 668
+          # externally-managed; --break-system-packages is the documented
+          # opt-out for this kind of automated install.
+          python3 -m pip install --quiet --break-system-packages --user pyyaml
+          python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+
+      - name: Run validation lints
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/validation/test-*.sh; do
+            [ -f "$t" ] || continue
+            case "$(basename "$t")" in
+              test-tool-recipes.sh|test-hardening-idempotency.sh)
+                echo "SKIP $t (Docker-only)"
+                continue ;;
+            esac
+            echo "::group::$t"
+            bash "$t" || FAIL=$((FAIL + 1))
+            echo "::endgroup::"
+          done
+          exit "$FAIL"
+
+      - name: Run unit tests
+        run: |
+          set -uo pipefail
+          FAIL=0
+          for t in tests/unit/test-*.sh; do
+            [ -f "$t" ] || continue
+            # Same Docker-skip rationale as validate.yml — and additionally,
+            # the hardened RunSecure runner blocks nested Docker by design,
+            # so these tests literally cannot run here.
+            case "$(basename "$t")" in
+              test-compose-image.sh|test-runner-yml-schema.sh)
+                echo "SKIP $t (Docker-only, blocked by hardening)"
+                continue ;;
+            esac
+            echo "::group::$t"
+            bash "$t" || FAIL=$((FAIL + 1))
+            echo "::endgroup::"
+          done
+          exit "$FAIL"

@@ -23,23 +23,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# Auto-detect docker compose command
-if docker compose version &>/dev/null; then
-    DC="docker compose"
-elif docker-compose version &>/dev/null; then
-    DC="docker-compose"
-else
-    echo "ERROR: Neither 'docker compose' nor 'docker-compose' found."
-    exit 1
-fi
-
 # --- Default arguments -------------------------------------------------------
 PROJECT_DIR=""
 REPO=""
 MAX_JOBS=5
 FORCE_REBUILD=false
 
-# --- Parse arguments ---------------------------------------------------------
+# --- Parse arguments first (so --help works without Docker) -----------------
+# Don't run any environment checks before this loop — they'd block --help
+# from working in environments that don't have Docker (e.g. inside a
+# hardened RunSecure runner where --help should still be readable).
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project)    PROJECT_DIR="$2"; shift 2 ;;
@@ -59,6 +52,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown argument: $1"
+            echo "Run with --help for usage." >&2
             exit 1
             ;;
     esac
@@ -151,6 +145,23 @@ _gh_scope_warning
 COMPOSE_ARGS=""
 if [[ "$FORCE_REBUILD" == true ]]; then
     COMPOSE_ARGS="--force"
+fi
+
+# Runtime-prerequisite check — the next step actually invokes Docker.
+# Defer this until after arg parsing AND config validation so that:
+#   - `--help` works without Docker
+#   - errors about missing --project / --repo / runner.yml fire before
+#     a less-helpful "Docker not installed" message
+#   - tests that exercise arg-parsing / config-validation paths can run
+#     in environments without Docker (e.g. inside a hardened RunSecure
+#     runner where this very script is exercised by test-run-args.sh)
+if docker compose version &>/dev/null; then
+    DC="docker compose"
+elif docker-compose version &>/dev/null; then
+    DC="docker-compose"
+else
+    echo "[RunSecure] ERROR: Neither 'docker compose' nor 'docker-compose' found."
+    exit 1
 fi
 
 # compose-image.sh outputs the final image name as its last line
