@@ -1,0 +1,173 @@
+# ============================================================================
+# RunSecure — Post-Publish Acceptance Tests
+# ============================================================================
+# Runs AFTER publish-images.yml succeeds. Pulls each just-published image
+# from GHCR and runs the full acceptance suite against it:
+#
+#   In-container checks (run inside the published image with documented
+#   hardening flags applied): identity, root-locked, package manager
+#   removed, no setuid, /etc immutable, cap_drop, no-new-privileges,
+#   /tmp noexec, seccomp blocks.
+#
+#   Stack-level checks (run with the published proxy + runner stack via
+#   docker-compose): direct-internet blocked, HTTP allowlist enforced,
+#   cloud-metadata blocked, TCP egress allowlist enforced, HTTPS-only
+#   enforced.
+#
+# Each check is mapped to a numbered claim in SECURITY.md. A failure here
+# means the published artifact does not deliver on a documented promise.
+#
+# Triggered:
+#   - workflow_run on Publish Images success (every release tag)
+#   - manual workflow_dispatch (provide an image_version input)
+# ============================================================================
+
+name: post-publish-acceptance
+
+on:
+  workflow_run:
+    workflows: ["Publish Images"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: 'GHCR image tag to test (e.g. 1.1.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve image version to test
+        id: v
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.image_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DISPATCH_VERSION" ]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            # Triggered by Publish Images success — find latest tag pushed.
+            VERSION=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve image version to test"
+            exit 1
+          fi
+          echo "Acceptance target: v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  acceptance:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: read
+      # Required to upload SARIF results to Code Scanning. The workflow
+      # emits one SARIF per language matrix leg in the "acceptance-*"
+      # category; failures appear in the repo's Security tab.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lang: node
+            lang_version: "24"
+          - lang: python
+            lang_version: "3.12"
+    env:
+      # Acceptance runs against -beta tags (the just-published, not-yet-validated
+      # release). On all-green, promote-to-stable.yml retags the same digest as
+      # `<ver>` + `latest`.
+      IMAGE_VERSION: ${{ needs.resolve-version.outputs.version }}
+      IMAGE_TAG_SUFFIX: -beta
+      LANG: ${{ matrix.lang }}
+      LANG_VERSION: ${{ matrix.lang_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Login to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull published beta images
+        run: |
+          set -euo pipefail
+          docker pull "ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}"
+          docker pull "ghcr.io/andend-collective/runsecure/${LANG}:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}-${LANG_VERSION}"
+
+      - name: Run acceptance suite (capture output for SARIF)
+        id: acceptance
+        working-directory: tests/acceptance
+        # Capture all output so the SARIF emitter can parse PASS:/FAIL:/SKIP:
+        # lines after the run completes. The compose `up` exits non-zero on
+        # any failure; we capture the exit code into a step output so the
+        # later "fail-build" step can re-raise it AFTER SARIF upload.
+        run: |
+          set -uo pipefail
+          mkdir -p _sarif
+          if docker compose -f docker-compose.acceptance.yml up \
+                --abort-on-container-exit --exit-code-from runner \
+                2>&1 | tee _sarif/raw-output.log; then
+            echo "acceptance_exit=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "acceptance_exit=$?" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate SARIF from acceptance output
+        if: always() && hashFiles('tests/acceptance/_sarif/raw-output.log') != ''
+        working-directory: tests/acceptance
+        env:
+          IMAGE_REF: "ghcr.io/andend-collective/runsecure/${{ env.LANG }}:${{ env.IMAGE_VERSION }}${{ env.IMAGE_TAG_SUFFIX }}-${{ env.LANG_VERSION }}"
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # PyYAML is the only emitter dep; install via pip --user.
+          python3 -m pip install --quiet --user pyyaml
+          python3 sarif-emitter.py \
+            --claims claims.yml \
+            --image-ref "$IMAGE_REF" \
+            --commit-sha "$COMMIT_SHA" \
+            --output "_sarif/acceptance-${LANG}-${LANG_VERSION}.sarif" \
+            < _sarif/raw-output.log
+          ls -la _sarif/
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always() && hashFiles('tests/acceptance/_sarif/acceptance-*.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
+        with:
+          sarif_file: tests/acceptance/_sarif/
+          category: "acceptance-${{ matrix.lang }}-${{ matrix.lang_version }}"
+
+      - name: Re-raise acceptance failure (after SARIF upload)
+        # SARIF upload happens unconditionally so failures land in the
+        # Security tab even when the workflow itself fails. NOW we let
+        # the original exit code propagate so the workflow status is
+        # accurate.
+        if: always() && steps.acceptance.outputs.acceptance_exit != '0'
+        run: |
+          echo "::error::Acceptance suite reported failures (exit ${{ steps.acceptance.outputs.acceptance_exit }}). See Code Scanning Security tab for per-claim findings."
+          exit "${{ steps.acceptance.outputs.acceptance_exit }}"
+
+      - name: Teardown
+        if: always()
+        working-directory: tests/acceptance
+        run: |
+          docker compose -f docker-compose.acceptance.yml down -v 2>/dev/null || true
+          docker rm -f rs-acceptance-proxy rs-acceptance-runner 2>/dev/null || true

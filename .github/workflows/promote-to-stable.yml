@@ -1,0 +1,163 @@
+# ============================================================================
+# RunSecure — Promote Beta to Stable
+# ============================================================================
+# After post-publish-acceptance.yml validates a -beta release against
+# documented security claims, this workflow promotes the same image
+# digest to the stable tag.
+#
+# Promotion is server-side via `docker buildx imagetools create` —
+# no rebuild, no scan re-run. The bytes that consumers pull from
+# `:1.1.2` are byte-identical to the bytes that just passed acceptance
+# as `:1.1.2-beta`.
+#
+# Tag transitions:
+#   base:1.1.2-beta            ───retag──>  base:1.1.2
+#   base:nightly                              base:latest
+#   <lang>:1.1.2-beta-24       ───retag──>  <lang>:1.1.2-24
+#   <lang>:nightly-24                         <lang>:latest-24
+#   proxy:1.1.2-beta           ───retag──>  proxy:1.1.2
+#   proxy:nightly                             proxy:latest
+#
+# Triggered:
+#   - workflow_run on post-publish-acceptance success (auto-promote)
+#   - workflow_dispatch with `image_version` for ad-hoc promotion
+#
+# To switch to manual-only approval, delete the workflow_run trigger
+# below — operators would then promote via `gh workflow run promote-to-stable.yml -f image_version=1.1.2`.
+# ============================================================================
+
+name: promote-to-stable
+
+on:
+  workflow_run:
+    workflows: ["post-publish-acceptance"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: 'Beta image version to promote (e.g. 1.1.2 — without -beta suffix)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve version to promote
+        id: v
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.image_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DISPATCH_VERSION" ]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            # Triggered by acceptance success — derive from latest tag.
+            VERSION=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve version to promote"
+            exit 1
+          fi
+          echo "Promoting beta-$VERSION → stable $VERSION"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  promote:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # base + proxy: <ver>-beta → <ver>, nightly → latest
+          - kind: base
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+            also_alias: latest
+          - kind: proxy
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+            also_alias: latest
+          # Language images: <ver>-beta-<langver> → <ver>-<langver>, nightly-<langver> → latest-<langver>
+          - kind: node
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-24'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}-24'
+            also_alias: latest-24
+          - kind: node
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-22'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}-22'
+            also_alias: latest-22
+          - kind: python
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-3.12'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}-3.12'
+            also_alias: latest-3.12
+          - kind: rust
+            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-stable'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}-stable'
+            also_alias: latest-stable
+    env:
+      KIND: ${{ matrix.kind }}
+      BETA: ${{ matrix.beta_tag }}
+      STABLE: ${{ matrix.stable_tag }}
+      ALIAS: ${{ matrix.also_alias }}
+      REPO: ghcr.io/andend-collective/runsecure
+    steps:
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify beta tag exists
+        run: |
+          set -euo pipefail
+          if ! docker buildx imagetools inspect "${REPO}/${KIND}:${BETA}" >/dev/null 2>&1; then
+            echo "::error::beta tag not found: ${REPO}/${KIND}:${BETA}"
+            echo "Either acceptance never ran for this version, or the publish job didn't run."
+            exit 1
+          fi
+          echo "Found beta: ${REPO}/${KIND}:${BETA}"
+
+      - name: Promote beta digest to stable + alias (server-side retag)
+        run: |
+          set -euo pipefail
+          # `imagetools create -t target source` retargets `target` at the
+          # exact same digest as `source`. Multi-platform manifests are
+          # preserved. No rebuild, no pull, no push of new bytes.
+          docker buildx imagetools create \
+            --tag "${REPO}/${KIND}:${STABLE}" \
+            --tag "${REPO}/${KIND}:${ALIAS}" \
+            "${REPO}/${KIND}:${BETA}"
+          echo "Promoted: ${REPO}/${KIND}:${BETA} → :${STABLE} + :${ALIAS}"
+
+      - name: Verify both stable tags resolve to the beta digest
+        run: |
+          set -euo pipefail
+          beta_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${BETA}" --format '{{.Manifest.Digest}}')
+          stable_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}')
+          alias_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${ALIAS}" --format '{{.Manifest.Digest}}')
+          echo "beta:   $beta_digest"
+          echo "stable: $stable_digest"
+          echo "alias:  $alias_digest"
+          if [ "$beta_digest" != "$stable_digest" ] || [ "$beta_digest" != "$alias_digest" ]; then
+            echo "::error::digest mismatch after retag — promotion failed"
+            exit 1
+          fi
+          echo "Digests match — promotion verified atomic."

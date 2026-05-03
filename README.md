@@ -104,12 +104,17 @@ apt install docker.io gh
 
 ## Quick Start
 
-> **Heads-up on versioning.** The latest published release on GHCR is
-> `v1.1.1` (April 2026). It pre-dates the TCP-egress, DNS, and Grype-scan
-> work merged in PR #24. If you want those, either pin to a newer version
-> once it's published (the weekly auto-bump cuts a fresh release every
-> Monday 02:30 UTC) **or** clone the repo and run from source as shown
-> below.
+> **Heads-up on versioning.** Releases follow a beta-first promotion
+> pipeline:
+>
+> | Tag | Meaning | When to use |
+> |---|---|---|
+> | `1.2.3` (or `latest`) | Promoted to stable after acceptance suite passed against the same digest | **Production** — every consumer should pin one of these |
+> | `1.2.3-beta` (or `nightly`) | Built and Grype-scanned, but acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+>
+> The `:1.2.3-beta` digest is byte-identical to `:1.2.3` after promotion
+> — same artifact, just a server-side retag. If acceptance fails, the
+> beta tag stays and no stable tag is created.
 
 ### Clone-and-run (recommended)
 
@@ -301,6 +306,82 @@ blocks the publish.
 
 ---
 
+## Post-publish acceptance tests
+
+Every published release goes through an acceptance suite that exercises
+the actual GHCR images against documented security claims. The workflow
+(`.github/workflows/post-publish-acceptance.yml`) runs after
+`Publish Images` succeeds:
+
+1. Pulls the just-published `proxy` and `node`/`python` images from GHCR.
+2. Brings up the proxy + runner stack with the documented hardening flags.
+3. Runs **in-container checks** inside the runner: identity, root-locked,
+   package-manager-removed, no-setuid, immutable `/etc`, `cap_drop`,
+   `no-new-privileges`, `/tmp` noexec, seccomp blocks (`keyctl`,
+   `perf_event_open`, `swapon`).
+4. Runs **stack-level checks** through the running proxy: direct-internet
+   blocked, HTTP allowlist enforced, cloud-metadata refused
+   (`169.254.169.254`, `metadata.google.internal`), TCP egress allowlist
+   enforced, HTTPS-only `CONNECT` enforcement.
+
+Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
+to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
+PROMOTION: the `-beta` tag exists and consumers can opt into it, but
+the stable `<version>` and `latest` tags are not created until the
+acceptance suite is fully green. The promotion (`promote-to-stable.yml`)
+runs server-side via `docker buildx imagetools create` — no rebuild,
+no pull, the stable tag points at the exact same digest the acceptance
+suite validated.
+
+To run the same suite locally against your dev images:
+
+```bash
+./tests/acceptance/run-locally.sh node 24
+# or against a specific published version:
+IMAGE_VERSION=1.1.2 ./tests/acceptance/run-locally.sh python 3.12
+```
+
+A lint (`tests/validation/test-acceptance-claim-coverage.sh`) prevents
+new claim IDs from being added to checks without a corresponding header
+that documents them — and without a matching entry in
+`tests/acceptance/claims.yml` (the SARIF rule catalog).
+
+### Findings in the Security tab (SARIF)
+
+Every acceptance run uploads results to GitHub Code Scanning in
+SARIF v2.1.0 format, one upload per language matrix leg:
+
+```
+post-publish-acceptance.yml
+  ├── runs the suite (capture PASS:/FAIL:/SKIP: lines)
+  ├── tests/acceptance/sarif-emitter.py
+  │     ├── reads tests/acceptance/claims.yml (rule catalog)
+  │     ├── reads the captured PASS/FAIL/SKIP output
+  │     └── emits acceptance-<lang>-<ver>.sarif
+  └── github/codeql-action/upload-sarif (category: acceptance-<lang>-<ver>)
+```
+
+What you see in the Security tab when a claim fails:
+
+| Column | Value |
+|---|---|
+| **Rule** | `H03` — *"Package manager removed (apt/dpkg/aptitude)"* |
+| **Severity** | error |
+| **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-beta-24: package manager 'apt' still present at /usr/bin/apt" |
+| **Location** | `SECURITY.md` line 1 (anchor: layer-1-image-hardening-build-time) |
+| **Help** | Markdown explaining the claim + link to the SECURITY.md section |
+| **Fingerprint** | `claim/v1=H03 image-ref/v1=ghcr.io/.../node:1.2.3-beta-24` (deduplicates across runs) |
+
+The `partialFingerprints` mean the same finding on the same image-ref
+shows as one persistent issue across re-runs (not a new finding each
+time), and a regression that re-introduces a previously-fixed claim
+shows up as "new" even after dismissal — exactly what you want for a
+security-claim audit trail.
+
+SARIF is uploaded **always** (even when the workflow itself fails),
+so failures land in the Security tab even when the gating step
+re-raises the original exit code.
+
 ## Self-hosting RunSecure for its own CI
 
 The repo dogfoods its own runner. The `dogfood.yml` workflow runs the
@@ -319,6 +400,17 @@ cd RunSecure
     --project . \
     --repo AndEnd-Collective/RunSecure \
     --max-jobs 100
+```
+
+For PR-time bootstrapping (drain the queue, exit when done) there's a
+thin convenience wrapper with sanity checks (gh auth, Docker daemon,
+runner.yml present):
+
+```bash
+./infra/scripts/dev/bootstrap-self-runner.sh        # default 5 jobs
+./infra/scripts/dev/bootstrap-self-runner.sh 20     # override count
+# Kill it explicitly when the queue is empty:
+kill "$(cat _orchestrator-logs/orch.pid)"
 ```
 
 The repo-root `.github/runner.yml` defines what the self-hosted runner
