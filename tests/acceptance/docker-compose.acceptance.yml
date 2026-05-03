@@ -18,7 +18,7 @@
 
 services:
   proxy:
-    image: ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION:-latest}
+    image: ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION:-latest}${IMAGE_TAG_SUFFIX:-}
     container_name: rs-acceptance-proxy
     init: true
     restart: "no"
@@ -51,7 +51,7 @@ services:
 
   runner:
     # The published language image — exact same artifact consumers get from GHCR.
-    image: ghcr.io/andend-collective/runsecure/${LANG:-node}:${IMAGE_VERSION:-latest}-${LANG_VERSION:-24}
+    image: ghcr.io/andend-collective/runsecure/${LANG:-node}:${IMAGE_VERSION:-latest}${IMAGE_TAG_SUFFIX:-}-${LANG_VERSION:-24}
     container_name: rs-acceptance-runner
     init: true
     depends_on:

@@ -104,12 +104,17 @@ apt install docker.io gh
 
 ## Quick Start
 
-> **Heads-up on versioning.** The latest published release on GHCR is
-> `v1.1.1` (April 2026). It pre-dates the TCP-egress, DNS, and Grype-scan
-> work merged in PR #24. If you want those, either pin to a newer version
-> once it's published (the weekly auto-bump cuts a fresh release every
-> Monday 02:30 UTC) **or** clone the repo and run from source as shown
-> below.
+> **Heads-up on versioning.** Releases follow a beta-first promotion
+> pipeline:
+>
+> | Tag | Meaning | When to use |
+> |---|---|---|
+> | `1.2.3` (or `latest`) | Promoted to stable after acceptance suite passed against the same digest | **Production** — every consumer should pin one of these |
+> | `1.2.3-beta` (or `nightly`) | Built and Grype-scanned, but acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+>
+> The `:1.2.3-beta` digest is byte-identical to `:1.2.3` after promotion
+> — same artifact, just a server-side retag. If acceptance fails, the
+> beta tag stays and no stable tag is created.
 
 ### Clone-and-run (recommended)
 
@@ -320,10 +325,13 @@ the actual GHCR images against documented security claims. The workflow
    enforced, HTTPS-only `CONNECT` enforcement.
 
 Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
-to a numbered claim in [SECURITY.md](./SECURITY.md). A failure means the
-shipped artifact does not deliver on a documented promise — the release
-is implicitly "soft-failed" (the tag is published, but the acceptance
-run shows red and you should investigate before recommending the version).
+to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
+PROMOTION: the `-beta` tag exists and consumers can opt into it, but
+the stable `<version>` and `latest` tags are not created until the
+acceptance suite is fully green. The promotion (`promote-to-stable.yml`)
+runs server-side via `docker buildx imagetools create` — no rebuild,
+no pull, the stable tag points at the exact same digest the acceptance
+suite validated.
 
 To run the same suite locally against your dev images:
 

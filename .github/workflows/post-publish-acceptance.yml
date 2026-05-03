@@ -85,7 +85,11 @@ jobs:
           - lang: python
             lang_version: "3.12"
     env:
+      # Acceptance runs against -beta tags (the just-published, not-yet-validated
+      # release). On all-green, promote-to-stable.yml retags the same digest as
+      # `<ver>` + `latest`.
       IMAGE_VERSION: ${{ needs.resolve-version.outputs.version }}
+      IMAGE_TAG_SUFFIX: -beta
       LANG: ${{ matrix.lang }}
       LANG_VERSION: ${{ matrix.lang_version }}
     steps:
@@ -98,11 +102,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull published images
+      - name: Pull published beta images
         run: |
           set -euo pipefail
-          docker pull "ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION}"
-          docker pull "ghcr.io/andend-collective/runsecure/${LANG}:${IMAGE_VERSION}-${LANG_VERSION}"
+          docker pull "ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}"
+          docker pull "ghcr.io/andend-collective/runsecure/${LANG}:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}-${LANG_VERSION}"
 
       - name: Run acceptance suite
         working-directory: tests/acceptance
