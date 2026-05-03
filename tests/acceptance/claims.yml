@@ -1,0 +1,136 @@
+# ============================================================================
+# RunSecure — Acceptance Claim Catalog
+# ============================================================================
+# Single source of truth for every security claim the acceptance suite
+# verifies. Consumed by:
+#
+#   - sarif-emitter.py        — rule definitions for SARIF output
+#   - test-acceptance-claim-coverage.sh — lint that asserts every claim
+#                                used in a check has an entry here
+#   - README / SECURITY.md     — humans reading what's tested
+#
+# Format per claim ID:
+#   <id>:
+#     short:    one-line headline (rule shortDescription in SARIF)
+#     full:     paragraph explanation (rule fullDescription in SARIF)
+#     severity: error | warning | note
+#                 - error:   security-claim-violated; gates the publish
+#                 - warning: defense-in-depth missing; non-fatal
+#                 - note:    informational
+#     section:  anchor in SECURITY.md (used to construct helpUri)
+#     tags:     SARIF property-bag tags for grouping in the Security tab
+#
+# When adding a new claim:
+#   1. Add a check in tests/acceptance/in-container/checks/ or
+#      tests/acceptance/stack-level/ tagged with the new ID
+#   2. Add an entry here with severity + SECURITY.md section
+#   3. (Recommended) Add the corresponding text to SECURITY.md
+# ============================================================================
+
+# Layer 1 — Image hardening (build-time)
+H01:
+  short: "Container runs as non-root (UID 1001)"
+  full:  "RunSecure containers must run as UID 1001, never as root. The actions-runner and any user job execute under this unprivileged user. Root-only filesystem and process operations are unavailable."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [identity, hardening, layer-1]
+
+H02:
+  short: "Root account locked (nologin shell, /etc/shadow unreadable)"
+  full:  "Even though the container runs as UID 1001, the root account itself must be locked: shell set to /usr/sbin/nologin (or /sbin/nologin), and /etc/shadow not world-readable. Defense-in-depth in case privileges are ever escalated."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [identity, hardening, layer-1]
+
+H03:
+  short: "Package manager removed (apt/dpkg/aptitude)"
+  full:  "Final RunSecure images strip the package manager so a compromised job cannot install attack tools at runtime. Both binaries (apt, dpkg, aptitude) and state directories (/var/lib/apt, /var/lib/dpkg, /etc/apt) must be absent."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [supply-chain, hardening, layer-1]
+
+H04:
+  short: "Network reconnaissance tools removed"
+  full:  "Tools used for lateral discovery (nc/netcat, ssh, telnet, wget) must be absent. ping may be present but must not have the setuid bit (so raw socket creation fails for UID 1001 anyway)."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [network, hardening, layer-1]
+
+H05:
+  short: "No setuid/setgid binaries on PATH"
+  full:  "finalize-hardening strips the setuid/setgid bits from every binary in /usr/bin, /usr/sbin, /bin, /sbin, /usr/local/bin. No tool/recipe install should ever re-add them."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [privesc, hardening, layer-1]
+
+H06:
+  short: "/etc is locked down (555 dir, 444 passwd/group)"
+  full:  "/etc must be chmod 555 (read+execute for all, no write); /etc/passwd and /etc/group must be 444. Write attempts must fail. Defense against tampering with user/group databases at runtime."
+  severity: error
+  section: layer-1-image-hardening-build-time
+  tags: [filesystem, hardening, layer-1]
+
+# Layer 2 — Runtime containment (launch-time)
+R01:
+  short: "Linux capabilities dropped (cap_drop ALL)"
+  full:  "Container must run with cap_drop:ALL — no capabilities granted. Operations requiring CAP_NET_RAW (raw sockets), CAP_SYS_ADMIN (mount), or CAP_NET_BIND_SERVICE (privileged ports) must fail."
+  severity: error
+  section: layer-2-runtime-containment-launch-time
+  tags: [capabilities, containment, layer-2]
+
+R02:
+  short: "no-new-privileges:true (kernel NoNewPrivs=1)"
+  full:  "Container started with --security-opt no-new-privileges:true. The kernel enforces that no execve() can ever increase the process's effective privileges, even via setuid binaries that might slip in."
+  severity: error
+  section: layer-2-runtime-containment-launch-time
+  tags: [privesc, containment, layer-2]
+
+R03:
+  short: "/tmp is mounted noexec+nosuid"
+  full:  "/tmp tmpfs has noexec and nosuid flags. Files written to /tmp cannot be executed even with chmod +x — blocks the typical malware drop-and-execute pattern."
+  severity: error
+  section: layer-2-runtime-containment-launch-time
+  tags: [filesystem, containment, layer-2]
+
+R04:
+  short: "Seccomp profile blocks dangerous syscalls"
+  full:  "Custom seccomp filter blocks keyctl, perf_event_open, swapon, ptrace, mount, bpf, etc. — syscalls that grant process-inspection, kernel-memory access, or unprivileged escalation paths."
+  severity: error
+  section: layer-2-runtime-containment-launch-time
+  tags: [syscalls, containment, layer-2]
+
+# Layer 3 — Network isolation (network-level)
+N01:
+  short: "No direct internet route (proxy is mandatory)"
+  full:  "The runner-net is internal:true — no default gateway. Bypassing the proxy (curl --noproxy, raw /dev/tcp) must fail. The proxy is the only network egress path."
+  severity: error
+  section: layer-3-network-isolation-network-level
+  tags: [network, egress, layer-3]
+
+N02:
+  short: "HTTP allowlist enforced (Squid)"
+  full:  "Squid filters HTTP/HTTPS by domain. Whitelisted domains (github.com, npmjs.org, etc.) reach origin; non-whitelisted domains are refused with 403 from the proxy."
+  severity: error
+  section: layer-3-network-isolation-network-level
+  tags: [network, egress, layer-3]
+
+N03:
+  short: "Cloud metadata endpoints blocked"
+  full:  "Critical SSRF guard. 169.254.169.254 (AWS/OpenStack), metadata.google.internal (GCP), and any 169.254.x.x address must be refused regardless of allowlist state. Loopback HTTP is also unreachable from runner-net."
+  severity: error
+  section: layer-3-network-isolation-network-level
+  tags: [ssrf, egress, layer-3]
+
+N04:
+  short: "TCP egress allowlist enforced (HAProxy)"
+  full:  "Raw TCP allowlist via HAProxy frontends. Connections to declared host:port pairs accepted; connections to non-declared ports refused (no listener on those ports)."
+  severity: error
+  section: layer-3-network-isolation-network-level
+  tags: [network, egress, layer-3]
+
+N05:
+  short: "HTTPS-only enforcement (CONNECT to non-443 refused)"
+  full:  "Squid CONNECT method is restricted to specific ports (443, etc). Tunneling other protocols through the HTTPS proxy (e.g. SSH on port 22) must be refused at the CONNECT request."
+  severity: error
+  section: layer-3-network-isolation-network-level
+  tags: [network, egress, layer-3]
