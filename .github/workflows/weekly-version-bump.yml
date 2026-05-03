@@ -65,6 +65,15 @@ jobs:
           # Need full history + tags to find the latest semver tag.
           fetch-depth: 0
           fetch-tags: true
+          # Use a PAT (or GitHub App token) so the resulting tag-push
+          # fires downstream workflows (publish-images.yml). Tags pushed
+          # via the default GITHUB_TOKEN are deliberately suppressed by
+          # GitHub to prevent recursion — which silently breaks our
+          # bump → publish → acceptance → promote cascade.
+          # Falls back to GITHUB_TOKEN if RELEASE_TOKEN isn't configured;
+          # in that case the cascade must be kicked off manually by
+          # re-pushing the tag from a local terminal.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Compute next version
         id: next_version
