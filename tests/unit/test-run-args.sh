@@ -190,12 +190,14 @@ cat > "$PROJECT_DEFAULTS/.github/runner.yml" <<'YAML'
 runtime: node:24
 YAML
 
-# Run run.sh and check its output for the resource values it reads
-# run.sh will fail after reading config (no gh CLI), but its output shows values
-OUTPUT=$("$RUN_SCRIPT" --project "$PROJECT_DEFAULTS" --repo "owner/test" 2>&1 || true)
-
-# Verify defaults by checking that run.sh's yq expressions produce expected values
-# These must match the expressions in run.sh lines 94-96
+# Verify the same yq expressions run.sh uses produce the expected
+# defaults. We don't invoke run.sh here — it would launch the full
+# orchestration loop (Docker build, JIT request, retry-sleep). An
+# earlier version of this test captured run.sh's output into an
+# UNUSED variable and the orchestration loop made the test hang
+# indefinitely on dogfood-runner CI.
+#
+# These yq expressions must match the ones in run.sh (around line 94).
 MEMORY=$(yq '.resources.memory // "8g"' "$PROJECT_DEFAULTS/.github/runner.yml")
 CPUS=$(yq '.resources.cpus // "4"' "$PROJECT_DEFAULTS/.github/runner.yml")
 PIDS=$(yq '.resources.pids // "2048"' "$PROJECT_DEFAULTS/.github/runner.yml")
