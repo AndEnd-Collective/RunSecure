@@ -1,0 +1,110 @@
+# ============================================================================
+# RunSecure — Acceptance Test Compose (against PUBLISHED images)
+# ============================================================================
+# Brings up the proxy (with HAProxy + dnsmasq) and a runner container
+# from PUBLISHED GHCR images. Mounts the acceptance test scripts and
+# runs them inside the runner.
+#
+# Variables:
+#   IMAGE_VERSION   — tag of the published images to test (e.g. "1.1.2")
+#   LANG            — language layer to test (node|python|rust)
+#   LANG_VERSION    — version of the language (e.g. "24" for node)
+#
+# Usage:
+#   IMAGE_VERSION=1.1.2 LANG=node LANG_VERSION=24 \
+#     docker compose -f docker-compose.acceptance.yml up \
+#     --abort-on-container-exit --exit-code-from runner
+# ============================================================================
+
+services:
+  proxy:
+    image: ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION:-latest}
+    container_name: rs-acceptance-proxy
+    init: true
+    restart: "no"
+    volumes:
+      - ../../infra/squid/base.conf:/etc/squid/squid.conf:ro
+      # tcp_egress for the dummy project: postgres on port 5432
+      - ./fixtures/acceptance-haproxy.cfg:/etc/haproxy/haproxy.cfg:ro
+    environment:
+      - ENABLE_HAPROXY=true
+      - ENABLE_DNSMASQ=false
+    networks:
+      runner-net:
+        ipv4_address: 10.11.12.13
+        aliases:
+          - proxy
+      proxy-external: {}
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:../../infra/seccomp/node-runner.json
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check -f /etc/squid/squid.conf || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  runner:
+    # The published language image — exact same artifact consumers get from GHCR.
+    image: ghcr.io/andend-collective/runsecure/${LANG:-node}:${IMAGE_VERSION:-latest}-${LANG_VERSION:-24}
+    container_name: rs-acceptance-runner
+    init: true
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - HTTP_PROXY=http://proxy:3128
+      - HTTPS_PROXY=http://proxy:3128
+      - http_proxy=http://proxy:3128
+      - https_proxy=http://proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,proxy
+      - no_proxy=localhost,127.0.0.1,proxy
+    volumes:
+      - ../../tests/acceptance:/acceptance:ro
+    # Run the FULL acceptance suite: in-container checks + stack-level checks.
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -uo pipefail
+        FAIL=0
+        echo "=== In-container checks ==="
+        bash /acceptance/in-container/run-all.sh || FAIL=$((FAIL + 1))
+        echo ""
+        echo "=== Stack-level checks (need proxy) ==="
+        for c in /acceptance/stack-level/*.sh; do
+            echo ""
+            echo "--- $(basename $c) ---"
+            bash "$c" || FAIL=$((FAIL + 1))
+        done
+        exit $FAIL
+    user: "1001:0"
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:../../infra/seccomp/node-runner.json
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2"
+          pids: 256
+    networks:
+      - runner-net
+
+networks:
+  runner-net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.11.12.0/24
+          ip_range: 10.11.12.96/28
+  proxy-external:
+    driver: bridge

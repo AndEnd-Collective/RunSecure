@@ -301,6 +301,42 @@ blocks the publish.
 
 ---
 
+## Post-publish acceptance tests
+
+Every published release goes through an acceptance suite that exercises
+the actual GHCR images against documented security claims. The workflow
+(`.github/workflows/post-publish-acceptance.yml`) runs after
+`Publish Images` succeeds:
+
+1. Pulls the just-published `proxy` and `node`/`python` images from GHCR.
+2. Brings up the proxy + runner stack with the documented hardening flags.
+3. Runs **in-container checks** inside the runner: identity, root-locked,
+   package-manager-removed, no-setuid, immutable `/etc`, `cap_drop`,
+   `no-new-privileges`, `/tmp` noexec, seccomp blocks (`keyctl`,
+   `perf_event_open`, `swapon`).
+4. Runs **stack-level checks** through the running proxy: direct-internet
+   blocked, HTTP allowlist enforced, cloud-metadata refused
+   (`169.254.169.254`, `metadata.google.internal`), TCP egress allowlist
+   enforced, HTTPS-only `CONNECT` enforcement.
+
+Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
+to a numbered claim in [SECURITY.md](./SECURITY.md). A failure means the
+shipped artifact does not deliver on a documented promise — the release
+is implicitly "soft-failed" (the tag is published, but the acceptance
+run shows red and you should investigate before recommending the version).
+
+To run the same suite locally against your dev images:
+
+```bash
+./tests/acceptance/run-locally.sh node 24
+# or against a specific published version:
+IMAGE_VERSION=1.1.2 ./tests/acceptance/run-locally.sh python 3.12
+```
+
+A lint (`tests/validation/test-acceptance-claim-coverage.sh`) prevents
+new claim IDs from being added to checks without a corresponding header
+that documents them.
+
 ## Operational notes
 
 ### Per-job logs land on the host
