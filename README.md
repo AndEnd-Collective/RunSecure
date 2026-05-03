@@ -345,6 +345,82 @@ A lint (`tests/validation/test-acceptance-claim-coverage.sh`) prevents
 new claim IDs from being added to checks without a corresponding header
 that documents them.
 
+## Self-hosting RunSecure for its own CI
+
+The repo dogfoods its own runner. The `dogfood.yml` workflow runs the
+validation and unit lints on a RunSecure-hardened runner, proving the
+runtime works for real CI workloads.
+
+To bring it online, run the orchestrator on any Linux host with Docker
+(or macOS with Colima):
+
+```bash
+git clone https://github.com/AndEnd-Collective/RunSecure.git
+cd RunSecure
+
+# Pick up dogfood.yml jobs as they queue — runs forever, one job per cycle
+./infra/scripts/run.sh \
+    --project . \
+    --repo AndEnd-Collective/RunSecure \
+    --max-jobs 100
+```
+
+The repo-root `.github/runner.yml` defines what the self-hosted runner
+should look like (Node 24 base, minimal allowlist for `github.com` + PyPI,
+ARM64 labels). When no orchestrator is running, `dogfood.yml`'s jobs
+queue silently without blocking the rest of CI (`smoke-test`, `validate`,
+`grype-scan` all run on `ubuntu-latest`).
+
+**Why `dogfood.yml` doesn't run integration tests**: integration tests
+spawn nested Docker (`docker-compose` brings up the proxy + a second
+runner). Inside a hardened RunSecure container with `cap_drop: ALL` +
+seccomp, that's intentionally blocked — it's the security property the
+project is built around. The full integration suite continues to run on
+`ubuntu-latest` via `smoke-test.yml`.
+
+## Pre-push lint hook
+
+A pre-push hook in `.githooks/pre-push` runs the same lints CI runs,
+catching regressions before they leave your laptop. One-time setup:
+
+```bash
+./.githooks/install
+```
+
+Now `git push` runs all 11 lint files (~30s) and refuses to push on any
+failure. To bypass in an emergency: `git push --no-verify`.
+
+---
+
+## Workflow log diagnostics
+
+Every job run on a RunSecure runner gets two **automatic diagnostic
+groups** in the GitHub Actions UI — no workflow changes required:
+
+```
+▶ RunSecure container — runtime posture
+▶ RunSecure container — hardening properties
+▶ RunSecure container — network posture
+▶ RunSecure container — available toolchains
+▶ RunSecure debugging pointers
+```
+
+These appear under "Job started hook" at the top of every workflow log.
+The "hardening properties" group prints actual values — `CapEff`,
+`NoNewPrivs`, seccomp mode, `/tmp` mount flags, `/etc` mode — so a user
+debugging a job can verify the runtime is enforcing what RunSecure
+documents, without cloning this repo.
+
+The script lives at `infra/runner-hooks/job-started.sh`; it's wired in
+via the actions-runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED` env var
+(set in `images/base.Dockerfile`). A symmetric `job-completed.sh` runs
+at job teardown with an exit summary.
+
+Both hooks are fail-safe — non-zero exit from a hook would fail the
+job per actions-runner contract, so each script wraps every command in
+`|| true` and ends with `trap 'exit 0' ERR`. A diagnostic should
+never be the reason a job fails.
+
 ## Operational notes
 
 ### Per-job logs land on the host

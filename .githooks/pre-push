@@ -1,0 +1,71 @@
+#!/bin/bash
+# ============================================================================
+# RunSecure — pre-push hook
+# ============================================================================
+# Runs the host-only validation lints before allowing a push. Mirrors what
+# .github/workflows/validate.yml runs in CI; failing here saves you a CI
+# round-trip.
+#
+# To skip in an emergency: `git push --no-verify` (don't make this a habit).
+#
+# To install: `./.githooks/install` (or `git config core.hooksPath .githooks`)
+# ============================================================================
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[pre-push] running validation lints..."
+
+FAIL=0
+for t in tests/validation/test-*.sh; do
+    [ -f "$t" ] || continue
+    # Skip the Docker-required ones — those need a live daemon and are
+    # owned by the smoke-test workflow / explicit local invocation.
+    case "$(basename "$t")" in
+        test-tool-recipes.sh|test-hardening-idempotency.sh)
+            continue
+            ;;
+    esac
+    if ! out=$(bash "$t" 2>&1); then
+        printf '\n[pre-push] FAIL: %s\n' "$t"
+        printf '%s\n' "$out" | tail -5
+        FAIL=$((FAIL + 1))
+    else
+        printf '[pre-push]   ok: %s — %s\n' "$(basename "$t")" "$(printf '%s' "$out" | tail -1)"
+    fi
+done
+
+# tests/unit/test-*.sh — pure-bash unit tests, fast
+if [ -d tests/unit ]; then
+    for t in tests/unit/test-*.sh; do
+        [ -f "$t" ] || continue
+        # Skip Docker-requiring unit tests — they invoke compose-image.sh
+        # / generate-egress-conf.sh which trigger image builds (slow,
+        # need a Docker daemon, can take several minutes on first run).
+        # Run them explicitly (`bash tests/unit/test-compose-image.sh`)
+        # when you actually want to exercise the build path.
+        case "$(basename "$t")" in
+            test-compose-image.sh|test-runner-yml-schema.sh)
+                continue
+                ;;
+        esac
+        if ! out=$(bash "$t" 2>&1); then
+            printf '\n[pre-push] FAIL: %s\n' "$t"
+            printf '%s\n' "$out" | tail -5
+            FAIL=$((FAIL + 1))
+        else
+            printf '[pre-push]   ok: %s\n' "$(basename "$t")"
+        fi
+    done
+fi
+
+if [ "$FAIL" -gt 0 ]; then
+    echo ""
+    echo "[pre-push] ${FAIL} test file(s) failed. Fix and re-run, or use --no-verify to bypass." >&2
+    exit 1
+fi
+
+echo "[pre-push] all lints green. Pushing..."
+exit 0
