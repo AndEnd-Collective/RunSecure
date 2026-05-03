@@ -1,21 +1,21 @@
 # ============================================================================
-# RunSecure — Promote Beta to Stable
+# RunSecure — Promote Canary to Stable
 # ============================================================================
-# After post-publish-acceptance.yml validates a -beta release against
+# After post-publish-acceptance.yml validates a -canary release against
 # documented security claims, this workflow promotes the same image
 # digest to the stable tag.
 #
 # Promotion is server-side via `docker buildx imagetools create` —
 # no rebuild, no scan re-run. The bytes that consumers pull from
 # `:1.1.2` are byte-identical to the bytes that just passed acceptance
-# as `:1.1.2-beta`.
+# as `:1.1.2-canary`.
 #
 # Tag transitions:
-#   base:1.1.2-beta            ───retag──>  base:1.1.2
+#   base:1.1.2-canary            ───retag──>  base:1.1.2
 #   base:nightly                              base:latest
-#   <lang>:1.1.2-beta-24       ───retag──>  <lang>:1.1.2-24
+#   <lang>:1.1.2-canary-24       ───retag──>  <lang>:1.1.2-24
 #   <lang>:nightly-24                         <lang>:latest-24
-#   proxy:1.1.2-beta           ───retag──>  proxy:1.1.2
+#   proxy:1.1.2-canary           ───retag──>  proxy:1.1.2
 #   proxy:nightly                             proxy:latest
 #
 # Triggered:
@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       image_version:
-        description: 'Beta image version to promote (e.g. 1.1.2 — without -beta suffix)'
+        description: 'Canary image version to promote (e.g. 1.1.2 — without -canary suffix)'
         required: true
         type: string
 
@@ -71,7 +71,7 @@ jobs:
             echo "::error::could not resolve version to promote"
             exit 1
           fi
-          echo "Promoting beta-$VERSION → stable $VERSION"
+          echo "Promoting canary-$VERSION → stable $VERSION"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
   promote:
@@ -84,35 +84,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # base + proxy: <ver>-beta → <ver>, nightly → latest
+          # base + proxy: <ver>-canary → <ver>, nightly → latest
           - kind: base
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
             stable_tag: '${{ needs.resolve-version.outputs.version }}'
             also_alias: latest
           - kind: proxy
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
             stable_tag: '${{ needs.resolve-version.outputs.version }}'
             also_alias: latest
-          # Language images: <ver>-beta-<langver> → <ver>-<langver>, nightly-<langver> → latest-<langver>
+          # Language images: <ver>-canary-<langver> → <ver>-<langver>, nightly-<langver> → latest-<langver>
           - kind: node
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-24'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-24'
             stable_tag: '${{ needs.resolve-version.outputs.version }}-24'
             also_alias: latest-24
           - kind: node
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-22'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-22'
             stable_tag: '${{ needs.resolve-version.outputs.version }}-22'
             also_alias: latest-22
           - kind: python
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-3.12'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-3.12'
             stable_tag: '${{ needs.resolve-version.outputs.version }}-3.12'
             also_alias: latest-3.12
           - kind: rust
-            beta_tag: '${{ needs.resolve-version.outputs.version }}-beta-stable'
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-stable'
             stable_tag: '${{ needs.resolve-version.outputs.version }}-stable'
             also_alias: latest-stable
     env:
       KIND: ${{ matrix.kind }}
-      BETA: ${{ matrix.beta_tag }}
+      CANARY: ${{ matrix.canary_tag }}
       STABLE: ${{ matrix.stable_tag }}
       ALIAS: ${{ matrix.also_alias }}
       REPO: ghcr.io/andend-collective/runsecure
@@ -125,17 +125,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify beta tag exists
+      - name: Verify canary tag exists
         run: |
           set -euo pipefail
-          if ! docker buildx imagetools inspect "${REPO}/${KIND}:${BETA}" >/dev/null 2>&1; then
-            echo "::error::beta tag not found: ${REPO}/${KIND}:${BETA}"
+          if ! docker buildx imagetools inspect "${REPO}/${KIND}:${CANARY}" >/dev/null 2>&1; then
+            echo "::error::canary tag not found: ${REPO}/${KIND}:${CANARY}"
             echo "Either acceptance never ran for this version, or the publish job didn't run."
             exit 1
           fi
-          echo "Found beta: ${REPO}/${KIND}:${BETA}"
+          echo "Found canary: ${REPO}/${KIND}:${CANARY}"
 
-      - name: Promote beta digest to stable + alias (server-side retag)
+      - name: Promote canary digest to stable + alias (server-side retag)
         run: |
           set -euo pipefail
           # `imagetools create -t target source` retargets `target` at the
@@ -144,19 +144,19 @@ jobs:
           docker buildx imagetools create \
             --tag "${REPO}/${KIND}:${STABLE}" \
             --tag "${REPO}/${KIND}:${ALIAS}" \
-            "${REPO}/${KIND}:${BETA}"
-          echo "Promoted: ${REPO}/${KIND}:${BETA} → :${STABLE} + :${ALIAS}"
+            "${REPO}/${KIND}:${CANARY}"
+          echo "Promoted: ${REPO}/${KIND}:${CANARY} → :${STABLE} + :${ALIAS}"
 
-      - name: Verify both stable tags resolve to the beta digest
+      - name: Verify both stable tags resolve to the canary digest
         run: |
           set -euo pipefail
-          beta_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${BETA}" --format '{{.Manifest.Digest}}')
+          canary_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${CANARY}" --format '{{.Manifest.Digest}}')
           stable_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}')
           alias_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${ALIAS}" --format '{{.Manifest.Digest}}')
-          echo "beta:   $beta_digest"
+          echo "canary:   $canary_digest"
           echo "stable: $stable_digest"
           echo "alias:  $alias_digest"
-          if [ "$beta_digest" != "$stable_digest" ] || [ "$beta_digest" != "$alias_digest" ]; then
+          if [ "$canary_digest" != "$stable_digest" ] || [ "$canary_digest" != "$alias_digest" ]; then
             echo "::error::digest mismatch after retag — promotion failed"
             exit 1
           fi

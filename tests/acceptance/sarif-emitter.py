@@ -11,7 +11,7 @@ GitHub Code Scanning surfaces in the Security tab.
 Usage:
     python3 sarif-emitter.py \\
         --claims tests/acceptance/claims.yml \\
-        --image-ref ghcr.io/andend-collective/runsecure/node:1.2.3-beta-24 \\
+        --image-ref ghcr.io/andend-collective/runsecure/node:1.2.3-canary-24 \\
         --commit-sha abc123 \\
         < acceptance-output.txt > acceptance.sarif
 
@@ -196,7 +196,7 @@ def main():
     p.add_argument("--claims", required=True, type=Path,
                    help="Path to claims.yml (catalog of every acceptance claim ID)")
     p.add_argument("--image-ref", default="(unspecified)",
-                   help="The published image being tested (e.g. ghcr.io/.../node:1.2.3-beta-24)")
+                   help="The published image being tested (e.g. ghcr.io/.../node:1.2.3-canary-24)")
     p.add_argument("--commit-sha", default="(unspecified)",
                    help="Git commit SHA the acceptance run was for")
     p.add_argument("--output", "-o", type=Path, default=None,
