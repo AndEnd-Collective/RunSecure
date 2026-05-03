@@ -40,19 +40,19 @@ env:
 permissions: {}
 
 jobs:
-  # --- Build and push base image first (all others depend on it) -------------
-  base:
+  # --- Single approval gate + version resolver ------------------------------
+  # Every push job (base, proxy, languages) depends on this. The
+  # `environment: ghcr-publish` clause forces one human approval per
+  # release; the rest of the pipeline runs unattended after that.
+  # Version is also computed here so proxy can build in parallel with
+  # base instead of waiting on it.
+  gate:
     runs-on: ubuntu-latest
     environment: ghcr-publish
-    permissions:
-      contents: read
-      packages: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Extract version (tag → semver; manual dispatch → manual-build)
+      - name: Resolve version (tag → semver; manual dispatch → manual-build)
         id: version
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -66,6 +66,24 @@ jobs:
           else
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Approval recorded
+        env:
+          APPROVER: ${{ github.actor }}
+          REF: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "GHCR publish approved by $APPROVER for ref $REF (version $VERSION)"
+
+  # --- Build and push base image (language images depend on it) -------------
+  base:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
@@ -89,17 +107,16 @@ jobs:
           # validates these tags; on success, promote-to-stable.yml retags
           # the same digest as `<ver>` + `latest`.
           tags: |
-            ${{ env.IMAGE_PREFIX }}/base:${{ steps.version.outputs.version }}-canary
+            ${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/base:nightly
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
 
-  # --- Build language images (depend on base) --------------------------------
+  # --- Build language images (depend on base for FROM, gate for version) -----
   languages:
-    needs: base
+    needs: [gate, base]
     runs-on: ubuntu-latest
-    environment: ghcr-publish
     permissions:
       contents: read
       packages: write
@@ -141,20 +158,19 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
-            BASE_TAG=${{ needs.base.outputs.version }}-canary
+            BASE_TAG=${{ needs.gate.outputs.version }}-canary
             ${{ matrix.build_arg }}
           tags: |
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.base.outputs.version }}-canary-${{ matrix.lang_version }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:nightly-${{ matrix.lang_version }}
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
-            org.opencontainers.image.version=${{ needs.base.outputs.version }}
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
 
-  # --- Build proxy image (independent of base) -------------------------------
+  # --- Build proxy image (independent of base — runs in parallel) ------------
   proxy:
     runs-on: ubuntu-latest
-    needs: base
-    environment: ghcr-publish
+    needs: gate
     permissions:
       contents: read
       packages: write
@@ -176,11 +192,11 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-canary
+            ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/proxy:nightly
           labels: |
             org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
-            org.opencontainers.image.version=${{ needs.base.outputs.version }}
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
 
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
@@ -192,7 +208,7 @@ jobs:
   # with "vulnerability database was built N weeks ago" when the upstream
   # CDN drifts past the pinned grype's tolerance.
   grype-scan:
-    needs: base
+    needs: [gate, base]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -219,7 +235,7 @@ jobs:
         # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
         # evaluated when the step runs and resolves correctly.
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.base.outputs.version }}-canary"
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
@@ -239,7 +255,7 @@ jobs:
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
   grype-scan-proxy:
-    needs: [proxy, base]
+    needs: [gate, proxy]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -262,7 +278,7 @@ jobs:
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.base.outputs.version }}-canary"
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
           grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
