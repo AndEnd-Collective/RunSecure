@@ -40,7 +40,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # contents:write needed by the `release` job to create a GitHub Release
+  # after successful promotion. Other jobs only need read.
+  contents: write
   packages: write
 
 jobs:
@@ -161,3 +163,49 @@ jobs:
             exit 1
           fi
           echo "Digests match — promotion verified atomic."
+
+  # --- Create GitHub Release for the promoted version ------------------------
+  # Fires only after the entire promote matrix succeeds. The Release reflects
+  # what's actually pullable as stable from GHCR (canary that passed
+  # acceptance and was retagged), not just what got tagged in git. Notes are
+  # auto-generated from PRs/commits since the previous tag.
+  release:
+    needs: [resolve-version, promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Skip if Release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists — skipping creation"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release with auto-generated notes
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # --generate-notes: GitHub auto-builds notes from merged PRs and
+          # commits between the previous tag and this one. No external action
+          # needed; gh CLI is preinstalled on ubuntu-latest.
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            --notes-start-tag "$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -A1 "^v${VERSION}$" | tail -1)"
+          echo "Created Release: v${VERSION}"
