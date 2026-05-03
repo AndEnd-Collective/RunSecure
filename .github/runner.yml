@@ -25,14 +25,14 @@
 
 runtime: node:24
 
-# Egress allowlist — only what the validation lints actually need.
-# (No Docker means no docker.io / no GHCR egress required.)
-http_egress:
-  - .github.com           # gh CLI calls in the version-bump test
-  - .githubusercontent.com # raw fetches if any test needs them
-  - .pypi.org             # PyYAML install
-  - .pythonhosted.org     # PyYAML wheel download
-  - github.com            # bare host for git operations
+# No project-specific http_egress: every domain the dogfood lints need
+# (github.com, githubusercontent.com, pypi.org, files.pythonhosted.org)
+# is already in the base allowlist (infra/squid/base.conf). Adding them
+# here would create duplicate Squid ACLs — Squid refuses overlapping
+# dstdomain entries (e.g. base has `.github.com`; project entry
+# `github.com` is treated as a redundant subset and rejects the config).
+#
+# Add entries here ONLY for domains not already covered by base.conf.
 
 # yq is needed by the schema-validator lint. PyYAML is needed by the
 # workflow-yaml-valid lint. Everything else is plain bash + grep.
