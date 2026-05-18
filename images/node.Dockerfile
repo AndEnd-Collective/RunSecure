@@ -20,7 +20,10 @@ USER root
 
 # Install Node.js from NodeSource using GPG-verified apt repo (no pipe-to-bash).
 # gnupg is needed to dearmor the signing key; removed after setup.
+# `apt-get upgrade` is repeated here (also in base) because NodeSource's repo
+# can pull in transitive deps at older patch levels that need re-upgrading.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends gnupg \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -29,6 +32,7 @@ RUN apt-get update \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
+    && apt-get upgrade -y \
     && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/* \
     && node --version \

@@ -20,7 +20,10 @@ USER root
 
 # Rust needs a linker and basic build tools.
 # Base image retains apt so language layers can install packages.
+# `apt-get upgrade` pulls latest security patches for any packages whose
+# transitive dependencies got pulled in at older patch levels.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
          gcc \
          libc6-dev \

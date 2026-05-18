@@ -56,3 +56,23 @@ ignore:
   - vulnerability: GHSA-qffp-2rhf-9h96  # tar 6.2.1
   - vulnerability: GHSA-8qq5-rm4j-mr97  # tar 6.2.1
   - vulnerability: GHSA-83g3-92jg-28cx  # tar 6.2.1
+
+  # --- Go stdlib inside the actions/runner v2.334.0 binary -----------------
+  # actions/runner v2.334.0 (2026-04-21) was compiled with go1.26.2. The Go
+  # team patched the stdlib in go1.25.10 / go1.26.3 (2026-05-01) for the
+  # CVEs below. actions/runner has not yet shipped a release rebuilt against
+  # the patched toolchain — once a v2.335.x lands, bump RUNNER_VERSION in
+  # images/base.Dockerfile and remove these entries.
+  # Tracking: https://github.com/actions/runner/releases
+  #
+  # Reachability: the runner uses Go only for its own process management
+  # (worker spawning, IPC, log forwarding). The vulnerable code paths
+  # (net/http, crypto/x509, encoding/* in Go stdlib) are not in the runner's
+  # hot path for executing workflow code; impact is limited to the runner's
+  # own control plane, which only talks to api.github.com over a pinned cert.
+  - vulnerability: CVE-2026-33811  # go stdlib
+  - vulnerability: CVE-2026-33814  # go stdlib
+  - vulnerability: CVE-2026-39820  # go stdlib
+  - vulnerability: CVE-2026-39836  # go stdlib
+  - vulnerability: CVE-2026-42499  # go stdlib
+  - vulnerability: CVE-2026-42501  # go stdlib

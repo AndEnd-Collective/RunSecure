@@ -10,9 +10,14 @@
 # monitors them. Exits non-zero if Squid exits non-zero.
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
+# `apt-get upgrade` pulls latest security patches for the base layer. Without
+# this, grype flags HIGH CVEs in unpatched debian:bookworm-slim packages
+# (libc6, libsystemd0, libcap2, etc) even on a fresh digest, because Debian
+# ships security updates faster than the base image is rebuilt.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
          squid \
          haproxy \

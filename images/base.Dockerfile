@@ -50,8 +50,14 @@ LABEL security.hardening="full"
 
 # ---- System dependencies ----------------------------------------------------
 # Pin versions and use --no-install-recommends to minimize attack surface.
-# hadolint ignore=DL3008
+# `apt-get upgrade` pulls latest security patches for everything in the base
+# layer (libc6, dpkg, libsystemd0, libcap2, sed, etc) — without this, grype
+# flags HIGH CVEs in the unpatched debian:bookworm-slim packages even on a
+# fresh digest, because Debian publishes security updates faster than the
+# base image is rebuilt.
+# hadolint ignore=DL3008,DL3005
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
