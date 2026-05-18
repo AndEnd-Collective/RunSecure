@@ -158,7 +158,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Code Scanning
         if: always() && hashFiles('tests/acceptance/_sarif/acceptance-*.sarif') != ''
-        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
         with:
           sarif_file: tests/acceptance/_sarif/
           category: "acceptance-${{ matrix.lang }}-${{ matrix.lang_version }}"

@@ -248,7 +248,7 @@ jobs:
 
       - name: Upload Grype scan results (base) to GitHub Security
         if: always() && hashFiles('grype-base.sarif') != ''
-        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
         with:
           sarif_file: grype-base.sarif
           category: grype-base
@@ -291,7 +291,7 @@ jobs:
 
       - name: Upload Grype scan results (proxy) to GitHub Security
         if: always() && hashFiles('grype-proxy.sarif') != ''
-        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0 # v4.35.2
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
         with:
           sarif_file: grype-proxy.sarif
           category: grype-proxy
