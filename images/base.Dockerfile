@@ -21,7 +21,7 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS base
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS base
 
 # ---- Build arguments --------------------------------------------------------
 # All pins follow a 48-hour freshness rule: the chosen version must be at
@@ -50,8 +50,14 @@ LABEL security.hardening="full"
 
 # ---- System dependencies ----------------------------------------------------
 # Pin versions and use --no-install-recommends to minimize attack surface.
-# hadolint ignore=DL3008
+# `apt-get upgrade` pulls latest security patches for everything in the base
+# layer (libc6, dpkg, libsystemd0, libcap2, sed, etc) — without this, grype
+# flags HIGH CVEs in the unpatched debian:bookworm-slim packages even on a
+# fresh digest, because Debian publishes security updates faster than the
+# base image is rebuilt.
+# hadolint ignore=DL3008,DL3005
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

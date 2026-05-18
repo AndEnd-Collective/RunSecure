@@ -65,7 +65,7 @@ rm -rf /var/lib/apt/lists/*
 # A floating `npm i -g cypress` builds a different image each run and
 # silently absorbs upstream supply-chain changes. Bump this manually
 # when you intend to upgrade.
-CYPRESS_VERSION="15.14.2"
+CYPRESS_VERSION="15.15.0"
 npm install -g "cypress@${CYPRESS_VERSION}"
 HOME=/home/runner cypress install
 # Note: `cypress verify` is intentionally NOT run during image build.
