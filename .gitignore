@@ -66,3 +66,6 @@ docs/superpowers/
 
 # Local orchestrator logs (created when running ./infra/scripts/run.sh from this checkout)
 _orchestrator-logs/
+
+# Plan A: per-scope orchestrator env files contain PAT paths and other secrets
+infra/orchestrator/scopes/*.env
