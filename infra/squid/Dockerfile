@@ -12,6 +12,15 @@
 
 FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
+# ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
+LABEL org.opencontainers.image.title="RunSecure Egress Proxy"
+LABEL org.opencontainers.image.description="Multi-protocol egress filter (Squid HTTP/HTTPS + HAProxy TCP + dnsmasq DNS) used by RunSecure runner containers to enforce a per-project allowlist."
+LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
+LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="AndEnd Collective"
+
 # `apt-get upgrade` pulls latest security patches for the base layer. Without
 # this, grype flags HIGH CVEs in unpatched debian:bookworm-slim packages
 # (libc6, libsystemd0, libcap2, etc) even on a fresh digest, because Debian

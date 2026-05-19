@@ -16,6 +16,16 @@ FROM ${BASE_IMAGE}:${BASE_TAG} AS rust
 
 ARG RUST_VERSION=stable
 
+# ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
+LABEL org.opencontainers.image.title="RunSecure Rust"
+LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions runner with Rust toolchain. One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
+LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="AndEnd Collective"
+LABEL security.hardening="full"
+
 USER root
 
 # Rust needs a linker and basic build tools.
