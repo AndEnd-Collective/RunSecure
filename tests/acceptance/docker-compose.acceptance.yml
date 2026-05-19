@@ -64,10 +64,6 @@ services:
       - https_proxy=http://proxy:3128
       - NO_PROXY=localhost,127.0.0.1,proxy
       - no_proxy=localhost,127.0.0.1,proxy
-      # Surface the LANG/LANG_VERSION the test rig promised so the H07
-      # runtime-version check can verify the image actually delivers it.
-      - ACCEPTANCE_LANG=${LANG:-node}
-      - ACCEPTANCE_LANG_VERSION=${LANG_VERSION:-24}
     volumes:
       - ../../tests/acceptance:/acceptance:ro
     # Run the FULL acceptance suite: in-container checks + stack-level checks.

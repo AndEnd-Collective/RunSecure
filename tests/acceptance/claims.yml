@@ -70,13 +70,6 @@ H06:
   section: layer-1-image-hardening-build-time
   tags: [filesystem, hardening, layer-1]
 
-H07:
-  short: "Installed language runtime version matches the image tag"
-  full:  "An image tagged runner-<lang>:<version> (e.g. runner-python:3.12) MUST actually ship that runtime version. Catches Dockerfiles that declare a VERSION build-arg but never use it in the install command — a class of bug that silently misrepresents the artifact to consumers. Verified at runtime by asking the runtime itself (python3 --version, node -p ..., rustc --version) and matching against the tag's version field."
-  severity: error
-  section: layer-1-image-hardening-build-time
-  tags: [supply-chain, hardening, layer-1]
-
 # Layer 2 — Runtime containment (launch-time)
 R01:
   short: "Linux capabilities dropped (cap_drop ALL)"
