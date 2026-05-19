@@ -182,15 +182,26 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Skip if Release already exists
+      - name: Delete orphan draft + skip if a real Release already exists
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "Release v${VERSION} already exists — skipping creation"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          # Idempotency: skip ONLY if a PUBLISHED (non-draft) release exists.
+          # A leftover draft from a cancelled prior attempt must be deleted —
+          # otherwise the create step is skipped and the new tag never gets
+          # a real release (caught when v1.1.5 first shipped: a stale draft
+          # from a cancelled attempt orphaned the actual release).
+          if existing=$(gh release view "v${VERSION}" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [ "$existing" = "true" ]; then
+              echo "Found orphan draft for v${VERSION} — deleting before creating real release"
+              gh release delete "v${VERSION}" --yes
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Published Release v${VERSION} already exists — skipping creation"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
