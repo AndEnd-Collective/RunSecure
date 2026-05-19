@@ -38,6 +38,15 @@ RUN apt-get update \
     && node --version \
     && npm --version
 
+# ---- BUILD-TIME ASSERTION ---------------------------------------------------
+# Fail the build if the installed Node major version does not match
+# NODE_VERSION. Prevents the kind of tag-vs-reality drift that hit python.
+RUN INSTALLED_MAJOR=$(node -p 'process.versions.node.split(".")[0]') \
+    && if [ "$INSTALLED_MAJOR" != "${NODE_VERSION}" ]; then \
+         echo "::error::Installed Node major is $INSTALLED_MAJOR but NODE_VERSION build-arg is ${NODE_VERSION}" >&2; \
+         exit 1; \
+       fi
+
 # Re-apply setuid stripping (NodeSource may add new binaries)
 RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 

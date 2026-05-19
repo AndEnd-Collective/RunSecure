@@ -59,6 +59,18 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rustc --version \
     && cargo --version
 
+# ---- BUILD-TIME ASSERTION ---------------------------------------------------
+# Fail the build if the installed rustc channel does not match RUST_VERSION.
+# Rust uses channel names (stable/beta/nightly) OR explicit versions like
+# 1.78.0; rustup reports the channel for named channels and the version
+# otherwise. We accept either form.
+RUN . "$HOME/.cargo/env" \
+    && CHANNEL=$(rustup show active-toolchain | awk '{print $1}' | cut -d'-' -f1) \
+    && if [ "$CHANNEL" != "${RUST_VERSION}" ] && ! echo "$CHANNEL" | grep -qE "^${RUST_VERSION}(\$|-)"; then \
+         echo "::error::Active rust toolchain is $CHANNEL but RUST_VERSION build-arg is ${RUST_VERSION}" >&2; \
+         exit 1; \
+       fi
+
 ENV PATH="/home/runner/.cargo/bin:/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
 
 WORKDIR /home/runner
