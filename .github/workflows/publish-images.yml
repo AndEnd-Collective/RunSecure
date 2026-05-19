@@ -51,6 +51,7 @@ jobs:
     environment: ghcr-publish
     outputs:
       version: ${{ steps.version.outputs.version }}
+      build_date: ${{ steps.meta.outputs.build_date }}
     steps:
       - name: Resolve version (tag → semver; manual dispatch → manual-build)
         id: version
@@ -66,6 +67,10 @@ jobs:
           else
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Compute build metadata (single source of truth for all jobs)
+        id: meta
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Approval recorded
         env:
@@ -109,9 +114,11 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/base:nightly
+          # Dynamic OCI labels — statics live in the Dockerfile.
           labels: |
-            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
   # --- Build language images (depend on base for FROM, gate for version) -----
   languages:
@@ -163,9 +170,11 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:nightly-${{ matrix.lang_version }}
+          # Dynamic OCI labels — statics live in the Dockerfile.
           labels: |
-            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
   # --- Build proxy image (independent of base — runs in parallel) ------------
   proxy:
@@ -194,9 +203,11 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/proxy:nightly
+          # Dynamic OCI labels — statics live in the Dockerfile.
           labels: |
-            org.opencontainers.image.source=https://github.com/AndEnd-Collective/RunSecure
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs

@@ -382,6 +382,54 @@ SARIF is uploaded **always** (even when the workflow itself fails),
 so failures land in the Security tab even when the gating step
 re-raises the original exit code.
 
+## Consuming RunSecure images
+
+If you're operating RunSecure yourself, see [Self-hosting RunSecure](#self-hosting-runsecure-for-its-own-ci) below. **This section is for everyone whose CI pulls a RunSecure image off GHCR.** Two different audiences.
+
+### Tag scheme
+
+Images are at `ghcr.io/andend-collective/runsecure/<image>:<tag>`. Three tag styles:
+
+| Tag form | Example | What it points at | When to use |
+|---|---|---|---|
+| **Pinned** | `python:1.1.5-3.12` | One specific build, byte-identical forever | Production. Lock to a known-good build; bump deliberately. |
+| **Floating minor** | `python:1.1-3.12` | The latest patch of the 1.1.x line | Stable projects that want auto-patches but not breaking changes. (Tag is published only by promote-to-stable after acceptance.) |
+| **Rolling latest** | `python:latest-3.12` | Whatever the most recent successful release was | Local development, CI scratchpads. **Do not use in production** — a new release can silently change behavior under you. |
+| **Canary** | `python:1.1.5-canary-3.12` | The just-published, not-yet-acceptance-validated build | Don't pull this directly. It exists so the acceptance suite can test before promote. |
+
+The promotion is server-side via `docker buildx imagetools create` — `:1.1.5`, `:1.1`, and `:latest` are all the same digest as the canary that passed acceptance. No rebuild, no drift.
+
+### Verify what you pulled
+
+Every image carries OCI metadata. To see the source commit, build date, and version:
+
+```bash
+docker inspect ghcr.io/andend-collective/runsecure/python:1.1.5-3.12 \
+  | jq '.[0].Config.Labels | {
+      title: ."org.opencontainers.image.title",
+      version: ."org.opencontainers.image.version",
+      created: ."org.opencontainers.image.created",
+      revision: ."org.opencontainers.image.revision",
+      source: ."org.opencontainers.image.source"
+    }'
+```
+
+If `revision` doesn't match a commit on `main` of the source repo, the image isn't ours.
+
+### Lifecycle
+
+- A new patch release ships every Monday at 02:30 UTC (`weekly-version-bump.yml`).
+- Pinned tags (`:1.1.5`, `:1.1.5-3.12`, etc.) are **never moved**. Once published, the digest behind that tag is permanent.
+- Floating tags (`:1.1`, `:1.1-3.12`, `:latest`, `:latest-3.12`) move on every release.
+- We do not delete old pinned tags. Consumers can stay on an older pin indefinitely; security fixes only land in newer pins.
+
+### Anti-patterns — don't do this
+
+- **Don't `FROM` a RunSecure image** to add your own tooling. The hardening (`apt` removed, `/etc` read-only, setuid stripped, no shell for root) is designed to be terminal. Layering on top either breaks the hardening or breaks your install. If you need a tool, add it via the `tools:` block in your project's `runner.yml` so it's added before finalize-hardening runs.
+- **Don't run the container with `--user 0` or `--cap-add`.** The image is designed to run as UID 1001 with `cap_drop: ALL`. Re-adding privileges defeats every claim in SECURITY.md.
+- **Don't pull `:latest` in production.** It moves silently. Pin to `:X.Y.Z[-langver]` and bump deliberately.
+- **Don't reuse a container across jobs.** The whole security model relies on `--rm` after every job. If you need warm caches, use volume mounts for the cache directory, not container reuse.
+
 ## Self-hosting RunSecure for its own CI
 
 The repo dogfoods its own runner. The `dogfood.yml` workflow runs the

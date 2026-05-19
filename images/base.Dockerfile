@@ -41,11 +41,18 @@ ARG GH_CLI_SHA256_ARM64=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d4
 
 ARG TARGETARCH
 
-# ---- Labels -----------------------------------------------------------------
+# ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
+# Standard OCI labels surface in `docker inspect`, GHCR's package page
+# (description is auto-promoted), and most container security scanners.
+# `documentation` is the single canonical pointer for consumers asking
+# "what is this and how am I supposed to use it".
 LABEL org.opencontainers.image.title="RunSecure Base"
-LABEL org.opencontainers.image.description="Hardened GitHub Actions self-hosted runner base image"
-LABEL org.opencontainers.image.source="https://github.com/NaorPenso/RunSecure"
-LABEL org.opencontainers.image.vendor="RunSecure"
+LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions self-hosted runner base image. One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
+LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="AndEnd Collective"
 LABEL security.hardening="full"
 
 # ---- System dependencies ----------------------------------------------------

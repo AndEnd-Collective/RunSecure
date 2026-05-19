@@ -29,6 +29,16 @@ FROM ${BASE_IMAGE}:${BASE_TAG} AS python
 
 ARG PYTHON_VERSION=3.12
 
+# ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
+LABEL org.opencontainers.image.title="RunSecure Python"
+LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions runner with Python (astral-sh/python-build-standalone, SHA256-verified). One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
+LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="AndEnd Collective"
+LABEL security.hardening="full"
+
 USER root
 
 # `apt-get upgrade` pulls latest security patches; no Python packages from

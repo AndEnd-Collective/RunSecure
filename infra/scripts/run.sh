@@ -12,6 +12,19 @@
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo --max-jobs 5
 #
+# Invocation patterns — preferred to direct:
+#   1. Self-CI on this repo:
+#        infra/scripts/dev/bootstrap-self-runner.sh [N]
+#      (handles project + repo + sensible max-jobs default; exits when drained)
+#   2. One-shot for any other repo: invoke directly with --project + --repo
+#
+# DO NOT wrap this in `while true; do ...; sleep N; done`. The script
+# already processes --max-jobs ephemeral runners and exits cleanly. A
+# wrapper loop re-introduces the credential-helper noise + polling
+# pathology that caused the daemon-style orchestrator to be retired.
+# If you need continuous availability, set --max-jobs higher and invoke
+# once. See AGENTS.md "Architecture decisions" for context.
+#
 # Prerequisites:
 #   - Docker
 #   - gh CLI (authenticated)
