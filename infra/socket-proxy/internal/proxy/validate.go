@@ -29,13 +29,35 @@ var (
 )
 
 // Forbidden host-path prefixes for HostConfig.Binds source paths.
+//
+// Covers:
+//   - the docker socket itself (escape hatch)
+//   - /proc, /sys (kernel state)
+//   - /etc (host configuration)
+//   - /root, /home, /Users (user homes — macOS uses /Users; Linux /home + /root)
+//   - /var/run (docker socket variant), /var/lib (docker state, container runtimes)
 var forbiddenBindPrefixes = []string{
 	"/var/run/docker.sock",
+	"/var/run",
+	"/var/lib",
 	"/proc",
 	"/sys",
 	"/etc",
 	"/root",
 	"/home",
+	"/Users",
+}
+
+// Suffix-blocklist: any bind source path ending in one of these is refused,
+// regardless of its prefix. Covers user-relative sensitive folders that
+// could appear under arbitrary parents (e.g. ~/.ssh, ~/.aws, ~/.kube).
+var forbiddenBindSuffixes = []string{
+	"/.ssh",
+	"/.aws",
+	"/.kube",
+	"/.config/gh",
+	"/.docker",
+	"/.gnupg",
 }
 
 // ValidateContainerCreate parses body as Docker's containers/create request
@@ -149,6 +171,11 @@ func checkBinds(v any) error {
 		}
 		for _, bad := range forbiddenBindPrefixes {
 			if src == bad || strings.HasPrefix(src, bad+"/") {
+				return fmt.Errorf("%w: %s", ErrBindForbidden, src)
+			}
+		}
+		for _, bad := range forbiddenBindSuffixes {
+			if strings.HasSuffix(src, bad) {
 				return fmt.Errorf("%w: %s", ErrBindForbidden, src)
 			}
 		}

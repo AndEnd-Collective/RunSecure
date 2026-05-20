@@ -120,16 +120,44 @@ func TestValidateContainerCreate_RequiresCapDropALL(t *testing.T) {
 func TestValidateContainerCreate_RefusesForbiddenBinds(t *testing.T) {
 	for _, bind := range []string{
 		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/something:/x",
+		"/var/lib/docker:/x",
 		"/proc:/host/proc",
 		"/sys:/host/sys",
 		"/etc:/etc",
 		"/root:/root",
+		"/home/foo:/x",
+		"/Users/naor:/x",
+		"/some/weird/path/.ssh:/ssh", // suffix
+		"/Users/x/.aws:/aws",         // suffix (also matched by /Users prefix)
+		"/opt/state/.kube:/k",        // suffix-only
+		"/private/.config/gh:/gh",    // suffix
+		"/data/.docker:/dock",        // suffix
+		"/secrets/.gnupg:/gpg",       // suffix
 	} {
 		t.Run(bind, func(t *testing.T) {
 			b := minimalValidBody()
 			b["HostConfig"].(map[string]any)["Binds"] = []any{bind}
 			err := validate(t, b)
 			require.ErrorIs(t, err, ErrBindForbidden)
+		})
+	}
+}
+
+func TestValidateContainerCreate_PermitsSafeBinds(t *testing.T) {
+	for _, bind := range []string{
+		"/tmp/orch-egress/spawn-x:/etc/squid:ro",
+		"/var/folders/abc/T/runsecure/spawn-y:/etc/squid",
+		"/opt/runsecure-data:/data",
+	} {
+		t.Run(bind, func(t *testing.T) {
+			b := minimalValidBody()
+			b["HostConfig"].(map[string]any)["Binds"] = []any{bind}
+			// /var/folders is under /var/lib's prefix check? No — /var/lib only
+			// matches /var/lib and /var/lib/*; /var/folders is unrelated.
+			// But /var/run also matched as a prefix earlier — /var/folders is
+			// fine because /var alone is NOT in the prefix list.
+			require.NoError(t, validate(t, b))
 		})
 	}
 }
