@@ -216,6 +216,101 @@ func TestPoll_RecordsTickEveryCycle(t *testing.T) {
 		"RecordPollTick must fire on every tick (bug #2 regression)")
 }
 
+// --- Mutation-kill regression tests ---
+
+// Mutation kill: poll.go:93 — `if queued > 0`. Mutation to `>= 0` would
+// emit poll.queued_jobs_observed even when there are zero queued jobs.
+func TestPoll_DoesNotEmitQueuedJobsObserved_WhenZero(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 0
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventPollQueuedJobsObserved,
+		"queued=0 must NOT emit poll.queued_jobs_observed")
+}
+
+// Mutation kill: poll.go:99 — `avail := repo.MaxConcurrent - in_flight`.
+// Asserts exact spawn count obeys the per-repo cap minus existing in-flight.
+func TestPoll_RespectsRepoCapMinusInFlight(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 10
+	srv.mu.Unlock()
+
+	d.st.IncrementInFlight("o/r")
+	d.st.IncrementInFlight("o/r")
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 100, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 5}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Len(t, d.intents, 3, "must spawn exactly repo_cap - in_flight = 3")
+}
+
+// Mutation kill: poll.go:100 — global cap subtraction.
+func TestPoll_GlobalCapBindsBeforeRepoCap(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 10
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 2, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 10}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Len(t, d.intents, 2, "global cap (2) must bind below repo cap (10)")
+}
+
+// Mutation kill: poll.go:103 — `if avail < 0 { avail = 0 }`.
+// Without the clamp, an over-committed repo could produce negative spawn count.
+func TestPoll_AvailNegativeClampedToZero(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 5
+	srv.mu.Unlock()
+	for i := 0; i < 5; i++ {
+		d.st.IncrementInFlight("o/r")
+	}
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 2}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Empty(t, d.intents, "negative avail must clamp to 0 spawns")
+}
+
+// Mutation kill: poll.go:107 — `if toSpawn > avail`. Asserts toSpawn is
+// clamped to avail when queued exceeds available capacity.
+func TestPoll_ToSpawnClampedToAvail(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 100 // way more than capacity
+	srv.mu.Unlock()
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 4, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Len(t, d.intents, 3, "toSpawn must clamp to min(queued, avail)=3")
+}
+
 func TestPoll_PollTickEventFiresEveryCycle(t *testing.T) {
 	d := newPollDeps(t)
 	gh, srv := newFakeGitHubClient(t)

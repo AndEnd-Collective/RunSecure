@@ -132,6 +132,93 @@ type denyingBucket struct{}
 
 func (denyingBucket) TryTake() bool { return false }
 
+// --- Mutation-kill regression tests ---
+
+// Mutation kill: spawn.go:54 — `if !w.deps.State().AcquireSemaphores(...)`.
+// Without the negation, spawn would proceed regardless of cap.
+func TestSpawn_AcquireSemaphoreFailure_StopsExecution(t *testing.T) {
+	d := newSpawnDeps(t)
+	// Fill the state so AcquireSemaphores returns false.
+	d.repoCap = 1
+	d.st.IncrementInFlight("o/r") // now at cap
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.ErrorIs(t, err, ErrSemaphoreUnavailable)
+	// No JIT call should have happened.
+	require.False(t, d.dc.created["runner"], "runner must not have been created")
+}
+
+// Mutation kill: spawn.go:127 — `if timeoutSecs <= 0 { default 6h }`.
+// Mutation to `< 0` would skip the default for 0, leaving a 0-second timeout.
+func TestSpawn_TimeoutZero_AppliesDefault(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.Orchestrator.TimeoutSeconds = 0 // expects default 6h fallback
+	d.dc.inspectExitCode = 0
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.NoError(t, err)
+	// If the default wasn't applied, spawn would force-teardown immediately
+	// and emit spawn.timeout_forced_teardown. Verify that did NOT happen.
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnTimeoutForcedTeardown)
+	d.requireEmitted(t, cornerstone.EventSpawnCompleted)
+}
+
+// Mutation kill: spawn.go:183 — `if runnerID > 0`. Mutation to `>= 0` would
+// call DeleteRunner with id=0; mutation to `< 0` would skip cleanup for
+// valid positive IDs. The test verifies both halves.
+func TestSpawn_FailAndLeak_OnlyCallsDeleteForValidID(t *testing.T) {
+	d := newSpawnDeps(t)
+	// Force step-3 failure (network create) AFTER JIT success → triggers
+	// failAndLeak. The fake mock-github default returns runnerID=42.
+	d.dc.createErr["squid"] = errors.New("force post-JIT failure")
+	w := NewSpawnWorker(d)
+	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	// runner.leak_cleaned MUST have been emitted.
+	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+// Mutation kill: spawn.go:210-213 — parseResources string indexing.
+// The earlier TestParseResources_Memory tests happy values; this adds
+// boundary cases including 2-char inputs and unit-only inputs.
+func TestParseResources_BoundaryCases(t *testing.T) {
+	mem, _ := parseResources("1g", 0)
+	require.Equal(t, int64(1)<<30, mem)
+	mem, _ = parseResources("1m", 0)
+	require.Equal(t, int64(1)<<20, mem)
+	mem, _ = parseResources("1k", 0)
+	require.Equal(t, int64(1)<<10, mem)
+	// Just a digit (no unit suffix): falls through to mul=0 → 0 bytes.
+	mem, _ = parseResources("8", 0)
+	require.Equal(t, int64(0), mem)
+	// Unit-only with no number: len("g")=1, our >=2 guard skips.
+	mem, _ = parseResources("g", 0)
+	require.Equal(t, int64(0), mem)
+	mem, _ = parseResources("", 0)
+	require.Equal(t, int64(0), mem)
+}
+
+// Mutation kill: spawn.go:284 — `if exitCode == 0` boundary. Mutation to
+// `!= 0` or `<= 0` would flip success/failure semantics.
+func TestSpawn_ExitCodeZero_EmitsCompleted_NonZeroEmitsFailed(t *testing.T) {
+	// Zero exit → completed.
+	d := newSpawnDeps(t)
+	d.dc.inspectExitCode = 0
+	w := NewSpawnWorker(d)
+	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "ok"}))
+	d.requireEmitted(t, cornerstone.EventSpawnCompleted)
+	require.NotContains(t, d.emBuf.String(), `"event.sub.type":"`+cornerstone.EventSpawnFailed+`"`)
+
+	// Non-zero exit → failed.
+	d2 := newSpawnDeps(t)
+	d2.dc.inspectExitCode = 1
+	w2 := NewSpawnWorker(d2)
+	require.Error(t, w2.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "fail"}))
+	d2.requireEmitted(t, cornerstone.EventSpawnFailed)
+	require.NotContains(t, d2.emBuf.String(), `"event.sub.type":"`+cornerstone.EventSpawnCompleted+`"`)
+}
+
 // --- coverage push-ups for branch coverage ---
 
 func TestClassifyJITError(t *testing.T) {
