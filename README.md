@@ -8,6 +8,11 @@ If you run self-hosted GH Actions runners on your own hardware, RunSecure
 is the layer between "I need a runner" and "the runner can read my SSH
 keys, push to my AWS, and stay alive between jobs."
 
+> **Long-running orchestrator (new in Plan A):** see
+> [`install.md`](install.md) for a Compose-based persistent orchestrator
+> that polls GitHub for queued jobs and spawns hardened ephemeral
+> runners on demand. Coexists with `run.sh` — neither replaces the other.
+
 ---
 
 ## Why you might want this
