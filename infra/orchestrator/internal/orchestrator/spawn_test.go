@@ -98,6 +98,36 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventSpawnFailed)
 }
 
+// Bug #1 regression test: breaker.opened fires when the breaker transitions
+// to Open. Previously the return values from RecordFailure were dropped.
+func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.dc.createErr["squid"] = errors.New("force failure")
+	w := NewSpawnWorker(d)
+	for i := 0; i < 5; i++ {
+		_ = w.Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
+		})
+	}
+	d.requireEmitted(t, cornerstone.EventBreakerOpened)
+}
+
+func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.dc.createErr["squid"] = errors.New("force failure")
+	w := NewSpawnWorker(d)
+	for i := 0; i < 5; i++ {
+		_ = w.Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
+		})
+	}
+	delete(d.dc.createErr, "squid")
+	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "ok",
+	}))
+	d.requireEmitted(t, cornerstone.EventBreakerClosed)
+}
+
 type denyingBucket struct{}
 
 func (denyingBucket) TryTake() bool { return false }

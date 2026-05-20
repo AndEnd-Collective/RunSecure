@@ -55,6 +55,9 @@ func (p *Poll) Run(ctx context.Context) {
 
 // tick runs one poll cycle.
 func (p *Poll) tick(ctx context.Context) {
+	// Bug #2 fix: record this tick to update the /healthz freshness signal.
+	p.deps.RecordPollTick()
+
 	// If we're in a rate-limit pause for this scope, check if it's cleared.
 	if p.deps.IsRateLimited(p.scope.Name) {
 		if p.deps.MaybeClearRateLimit(p.scope.Name) {

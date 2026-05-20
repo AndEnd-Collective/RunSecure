@@ -227,16 +227,23 @@ func newFakeBreakers() *fakeBreakers {
 
 func (b *fakeBreakers) IsOpen(repo string) bool { b.mu.Lock(); defer b.mu.Unlock(); return b.open[repo] }
 func (b *fakeBreakers) MaybeHalfOpen(repo string) bool { return false }
-func (b *fakeBreakers) RecordSuccess(repo string) {
+func (b *fakeBreakers) RecordSuccess(repo string) (closed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	wasOpen := b.open[repo]
 	b.closed[repo]++
 	b.open[repo] = false
+	return wasOpen
 }
-func (b *fakeBreakers) RecordFailure(repo string) (bool, int) {
+func (b *fakeBreakers) RecordFailure(repo string) (opened bool, count int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	wasOpen := b.open[repo]
 	b.failed[repo]++
+	if !wasOpen && b.failed[repo] >= 5 {
+		b.open[repo] = true
+		return true, b.failed[repo]
+	}
 	return false, b.failed[repo]
 }
 

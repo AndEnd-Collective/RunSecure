@@ -36,7 +36,10 @@ func Run(ctx context.Context, scopePath string) error {
 
 	clk := clock.System()
 	em := cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID)
-	gh, err := github.NewClient(github.DefaultBaseURL, s.Auth.PATFile)
+	// Bug #3 fix: respect RUNSECURE_GITHUB_BASE_URL for integration tests
+	// (mock-github) and future GitHub Enterprise deployments.
+	baseURL := envOr("RUNSECURE_GITHUB_BASE_URL", github.DefaultBaseURL)
+	gh, err := github.NewClient(baseURL, s.Auth.PATFile)
 	if err != nil {
 		return err
 	}
@@ -173,11 +176,11 @@ func (b *breakerMap) get(repo string) *state.Breaker {
 
 func (b *breakerMap) IsOpen(repo string) bool        { return b.get(repo).IsOpen() }
 func (b *breakerMap) MaybeHalfOpen(repo string) bool { return b.get(repo).MaybeHalfOpen() }
-func (b *breakerMap) RecordSuccess(repo string)      { b.get(repo).RecordSuccess() }
-func (b *breakerMap) RecordFailure(repo string) (bool, int) {
-	br := b.get(repo)
-	br.RecordFailure()
-	return br.IsOpen(), br.ConsecutiveFailures()
+func (b *breakerMap) RecordSuccess(repo string) (closed bool) {
+	return b.get(repo).RecordSuccess()
+}
+func (b *breakerMap) RecordFailure(repo string) (opened bool, count int) {
+	return b.get(repo).RecordFailure()
 }
 func (b *breakerMap) snapshot() map[string]bool {
 	b.mu.Lock()
@@ -328,6 +331,14 @@ func (p *productionDeps) MaybeClearRateLimit(_ string) bool {
 }
 func (p *productionDeps) NewSpawnID() string {
 	return fmt.Sprintf("%d%d", time.Now().UnixNano(), nextSeq())
+}
+
+// RecordPollTick (bug #2 fix) updates the serverDeps freshness signal that
+// /healthz reads. Without this, lastPoll is set once at boot and /healthz
+// goes red after 3*poll_interval and stays there.
+func (p *productionDeps) RecordPollTick() {
+	t := time.Now()
+	p.serverDeps.lastPoll.Store(&t)
 }
 
 // SpawnDeps-only --------------------------------------------------------

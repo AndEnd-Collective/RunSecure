@@ -68,7 +68,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 	if err != nil {
 		reason := classifyJITError(err)
-		w.deps.Breakers().RecordFailure(intent.Repo)
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.fail(intent, containerName, reason, err)
 	}
 	_ = w.deps.Emit().EmitSpawnJITAcquired(cornerstone.SpawnJITAcquiredFields{
@@ -79,7 +79,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// Step 2: generate per-spawn egress configs.
 	egressDir, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
 	if err != nil {
-		w.deps.Breakers().RecordFailure(intent.Repo)
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, "egress_render", err, jit.RunnerID)
 	}
 
@@ -89,7 +89,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		Name: netName, Driver: "bridge", Internal: true, Attachable: false,
 	})
 	if err != nil {
-		w.deps.Breakers().RecordFailure(intent.Repo)
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
@@ -109,7 +109,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 	if err != nil {
 		_ = w.deps.Docker().DeleteNetwork(ctx, netID)
-		w.deps.Breakers().RecordFailure(intent.Repo)
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
@@ -141,13 +141,13 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 			ConfiguredTimeoutSecs: timeoutSecs,
 			ElapsedSeconds:        elapsed,
 		})
-		w.deps.Breakers().RecordFailure(intent.Repo)
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return errors.New("spawn timed out")
 	}
 
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	if exitCode == 0 {
-		w.deps.Breakers().RecordSuccess(intent.Repo)
+		w.recordSuccessAndMaybeEmit(intent.Scope, intent.Repo)
 		_ = w.deps.Emit().EmitSpawnCompleted(cornerstone.SpawnCompletedFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 			ContainerID: containerIDs["runner"], ContainerName: containerName,
@@ -155,7 +155,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		})
 		return nil
 	}
-	w.deps.Breakers().RecordFailure(intent.Repo)
+	w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 	_ = w.deps.Emit().EmitSpawnFailed(cornerstone.SpawnFailedFields{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		ContainerName: containerName,
@@ -221,6 +221,28 @@ func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID
 		_ = w.deps.Docker().DeleteContainer(ctx, id, force)
 	}
 	_ = w.deps.Docker().DeleteNetwork(ctx, netID)
+}
+
+// recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits
+// breaker.opened on the open transition (FIX for bug #1: the events were
+// previously never emitted because the return values were dropped).
+func (w *SpawnWorker) recordFailureAndMaybeEmit(scope, repo string) {
+	opened, consecutive := w.deps.Breakers().RecordFailure(repo)
+	if opened {
+		_ = w.deps.Emit().EmitBreakerOpened(cornerstone.BreakerFields{
+			Scope: scope, Repo: repo, ConsecutiveFailures: consecutive,
+		})
+	}
+}
+
+// recordSuccessAndMaybeEmit calls RecordSuccess and emits breaker.closed
+// only when the breaker just transitioned from a non-Closed state.
+func (w *SpawnWorker) recordSuccessAndMaybeEmit(scope, repo string) {
+	if closed := w.deps.Breakers().RecordSuccess(repo); closed {
+		_ = w.deps.Emit().EmitBreakerClosed(cornerstone.BreakerFields{
+			Scope: scope, Repo: repo,
+		})
+	}
 }
 
 func classifyJITError(err error) string {

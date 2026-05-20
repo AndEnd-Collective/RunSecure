@@ -14,9 +14,10 @@ import (
 // pollDeps wraps spawnDeps + an intent channel and rate-limit state.
 type pollDeps struct {
 	*spawnDeps
-	intents chan SpawnIntent
-	rl      struct {
-		paused   atomic.Bool
+	intents       chan SpawnIntent
+	pollTickCount atomic.Int64
+	rl            struct {
+		paused    atomic.Bool
 		remaining int
 		limit     int
 		reset     string
@@ -56,6 +57,8 @@ func (d *pollDeps) NewSpawnID() string {
 	n := spawnIDCounter.Add(1)
 	return time.Now().Format("20060102T150405") + "-" + itoa(n)
 }
+
+func (d *pollDeps) RecordPollTick() { d.pollTickCount.Add(1) }
 
 func itoa(n int64) string {
 	if n == 0 {
@@ -190,6 +193,27 @@ func TestPoll_Run_ExitsOnContextCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit on cancel")
 	}
+}
+
+func TestPoll_RecordsTickEveryCycle(t *testing.T) {
+	// Bug #2 regression: poll.tick must call RecordPollTick so /healthz
+	// stays fresh.
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 0
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	p := NewPoll(scope, d)
+	p.tick(context.Background())
+	p.tick(context.Background())
+	require.Equal(t, int64(2), d.pollTickCount.Load(),
+		"RecordPollTick must fire on every tick (bug #2 regression)")
 }
 
 func TestPoll_PollTickEventFiresEveryCycle(t *testing.T) {

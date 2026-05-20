@@ -81,3 +81,28 @@ func TestBreaker_DefaultsWhenZero(t *testing.T) {
 	b.RecordFailure()
 	require.True(t, b.IsOpen())
 }
+
+// RecordFailure return-value tests — added with bug #1 fix so the
+// transition signal is now observable.
+func TestBreaker_RecordFailure_ReturnsOpenedOnTransition(t *testing.T) {
+	b := NewBreaker(3, time.Minute, nil)
+	opened, count := b.RecordFailure()
+	require.False(t, opened)
+	require.Equal(t, 1, count)
+	opened, _ = b.RecordFailure()
+	require.False(t, opened)
+	opened, count = b.RecordFailure()
+	require.True(t, opened, "third failure crosses threshold → opened=true")
+	require.Equal(t, 3, count)
+	// Subsequent failures while Open: NOT a new transition.
+	opened, _ = b.RecordFailure()
+	require.False(t, opened, "already-Open breaker doesn't re-transition")
+}
+
+func TestBreaker_RecordSuccess_ReturnsClosedOnTransition(t *testing.T) {
+	b := NewBreaker(1, time.Minute, nil)
+	require.False(t, b.RecordSuccess(), "no transition when already Closed")
+	b.RecordFailure() // → Open
+	require.True(t, b.RecordSuccess(), "Open → Closed transition")
+	require.False(t, b.RecordSuccess(), "second success: no transition")
+}

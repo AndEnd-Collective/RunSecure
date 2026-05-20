@@ -69,23 +69,31 @@ func (b *Breaker) MaybeHalfOpen() bool {
 }
 
 // RecordSuccess closes the breaker (whatever state it was in).
-func (b *Breaker) RecordSuccess() {
+// Returns true if the breaker transitioned from a non-Closed state — useful
+// for callers that want to emit a breaker.closed event only on transition.
+func (b *Breaker) RecordSuccess() (transitionedToClosed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	transitioned := b.state != BreakerClosed
 	b.state = BreakerClosed
 	b.consecutiveFailures = 0
+	return transitioned
 }
 
 // RecordFailure increments the failure counter; opens the breaker if the
 // threshold is reached. From HalfOpen, any failure goes straight to Open.
-func (b *Breaker) RecordFailure() {
+// Returns whether the breaker just transitioned to Open (was Closed/HalfOpen
+// before this call) and the current consecutive-failure count.
+func (b *Breaker) RecordFailure() (transitionedToOpen bool, consecutiveFailures int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	prev := b.state
 	b.consecutiveFailures++
 	if b.state == BreakerHalfOpen || b.consecutiveFailures >= b.threshold {
 		b.state = BreakerOpen
 		b.openedAt = b.now()
 	}
+	return prev != BreakerOpen && b.state == BreakerOpen, b.consecutiveFailures
 }
 
 // ConsecutiveFailures returns the current failure count.

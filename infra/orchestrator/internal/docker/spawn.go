@@ -105,6 +105,15 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	runnerHC.NanoCPUs = in.ResourcesNanoCPUs
 	runnerHC.PidsLimit = in.ResourcesPIDs
 	runnerHC.Tmpfs = map[string]string{"/tmp": "noexec,nosuid,nodev,size=512m"}
+	// Bug #4 fix: thread the seccomp profile path from runner.yml into
+	// HostConfig.SecurityOpt. Without this, runner.yml's
+	// orchestrator.seccomp_profile was silently ignored — a strictness
+	// regression vs. the existing run.sh path.
+	if in.SeccompProfilePath != "" {
+		// Don't mutate hcBase's slice; build a fresh one.
+		runnerHC.SecurityOpt = append(append([]string{}, hcBase.SecurityOpt...),
+			"seccomp="+in.SeccompProfilePath)
+	}
 	runnerName := fmt.Sprintf("rs-%s-runner", in.SpawnID)
 	runnerID, err := c.CreateContainer(ctx, CreateContainerRequest{
 		Name: runnerName, Image: in.RunnerImage, User: "1001:0",

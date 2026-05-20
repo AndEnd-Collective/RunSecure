@@ -75,6 +75,49 @@ func TestSpawn_PolicyDeniedOnRunner_RollsBack(t *testing.T) {
 	require.GreaterOrEqual(t, atomic.LoadInt64(&deleteCount), int64(3), "must roll back the 3 proxy containers")
 }
 
+// Bug #4 regression: SeccompProfilePath must end up in the runner
+// container's HostConfig.SecurityOpt as `seccomp=<path>`.
+func TestSpawn_SeccompProfile_AppliedToRunner(t *testing.T) {
+	var runnerBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/containers/create") {
+			name := r.URL.Query().Get("name")
+			if strings.Contains(name, "runner") {
+				_ = json.NewDecoder(r.Body).Decode(&runnerBody)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + name})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/start") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+
+	_, err := Spawn(context.Background(), c, SpawnInputs{
+		SpawnID:            "x",
+		NetworkID:          "n",
+		RunnerImage:        "r@sha256:r",
+		ProxyImage:         "p@sha256:p",
+		SeccompProfilePath: "/host/seccomp/node-runner.json",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, runnerBody, "runner create body captured")
+	hc := runnerBody["HostConfig"].(map[string]any)
+	secopts := hc["SecurityOpt"].([]any)
+
+	foundSeccomp := false
+	for _, s := range secopts {
+		if str, ok := s.(string); ok && str == "seccomp=/host/seccomp/node-runner.json" {
+			foundSeccomp = true
+		}
+	}
+	require.True(t, foundSeccomp, "SecurityOpt must include seccomp=<path>: %v", secopts)
+}
+
 func TestSpawn_StartFails_RollsBack(t *testing.T) {
 	var deleteCount int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
