@@ -85,6 +85,19 @@ func TestApplyOverrides_WildcardElementTypeMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "must be strings")
 }
 
+// Mutation kill: overrides.go:50 — `if len(base.DoHProviders) > 0`.
+// Without the >0 check, setting an empty DoH list would still flip
+// AllowDoH=true. With it, only non-empty lists do.
+func TestApplyOverrides_EmptyDoHListDoesNotSetFlag(t *testing.T) {
+	merged, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_doh"},
+		map[string]any{"allow_doh": []any{}}, // empty
+	)
+	require.NoError(t, err)
+	require.False(t, merged.AllowDoH, "empty DoH list must not flip AllowDoH=true")
+	require.Empty(t, merged.DoHProviders)
+}
+
 func TestApplyOverrides_UnknownKeyIgnored(t *testing.T) {
 	merged, err := ApplyProjectOverrides(Defaults("strict"),
 		[]string{"allow_wildcards", "unknown"},

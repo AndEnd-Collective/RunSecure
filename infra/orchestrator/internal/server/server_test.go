@@ -66,6 +66,30 @@ func TestHealthz_OkWhenFresh(t *testing.T) {
 	require.Equal(t, int64(1), h.Hits())
 }
 
+// Mutation kill: healthz.go:44 — `if staleness >= limit`. Boundary case
+// where staleness EXACTLY equals limit should be treated as stale.
+func TestHealthz_StaleAtExactBoundary(t *testing.T) {
+	d := newDeps(t)
+	// staleness = limit (3 * 15s = 45s). With >=, this should be stale.
+	d.lastPoll = d.now.Add(-45 * time.Second)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	h := NewHealthz(d, em)
+	rr := httpRec()
+	h.ServeHTTP(rr, httpReq("GET", "/healthz"))
+	require.Equal(t, http.StatusInternalServerError, rr.Code,
+		"staleness exactly equal to limit must return 500 (>=, not >)")
+}
+
+func TestHealthz_OkJustBelowBoundary(t *testing.T) {
+	d := newDeps(t)
+	d.lastPoll = d.now.Add(-44*time.Second - 999*time.Millisecond)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	h := NewHealthz(d, em)
+	rr := httpRec()
+	h.ServeHTTP(rr, httpReq("GET", "/healthz"))
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
 func TestHealthz_StaleWhenLastPollTooOld(t *testing.T) {
 	d := newDeps(t)
 	d.lastPoll = d.now.Add(-3 * time.Minute) // way past 3 * 15s
