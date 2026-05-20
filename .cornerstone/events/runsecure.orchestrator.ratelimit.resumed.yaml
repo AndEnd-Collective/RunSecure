@@ -1,0 +1,20 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.ratelimit.resumed
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1d
+  description: |
+    Rate-limit window elapsed; scope polling resumes.
+  status: active
+  tags: [runsecure, orchestrator, ratelimit]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - rate_limit_context

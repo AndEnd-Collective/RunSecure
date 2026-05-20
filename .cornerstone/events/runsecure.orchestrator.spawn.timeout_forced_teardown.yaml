@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.timeout_forced_teardown
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a18
+  description: |
+    A2 wall-clock timeout reached (runner.yml orchestrator.timeout_seconds,
+    default 6h). Orchestrator force-tears-down. Severity Warning. Carries the
+    elapsed duration and the configured cap in event.details.error.data.
+  status: active
+  tags: [runsecure, orchestrator, spawn, defensive-A2]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context

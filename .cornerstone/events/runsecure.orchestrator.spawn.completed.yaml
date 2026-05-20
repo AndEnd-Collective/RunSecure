@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.completed
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a16
+  description: |
+    Runner exited 0; teardown complete; in-flight counter decremented. The
+    canonical successful completion event. Severity Informational.
+  status: active
+  tags: [runsecure, orchestrator, spawn]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context

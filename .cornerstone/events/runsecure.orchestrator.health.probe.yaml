@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.health.probe
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a22
+  description: |
+    Emitted by the /healthz handler on each probe. Severity Debug. Used to
+    verify probe traffic is reaching the orchestrator from the supervisor
+    (docker HEALTHCHECK or k8s livenessProbe — though k8s is Plan B).
+  status: active
+  tags: [runsecure, orchestrator, health]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts: []

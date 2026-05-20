@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.auth.degraded
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1f
+  description: |
+    PAT authentication failed (401/403) against GitHub for one or more repos in
+    a scope. The scope is marked degraded and polling stops for it. Payload
+    MUST NOT contain the PAT or PAT prefix. Severity Error.
+  status: active
+  tags: [runsecure, orchestrator, auth]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts: []

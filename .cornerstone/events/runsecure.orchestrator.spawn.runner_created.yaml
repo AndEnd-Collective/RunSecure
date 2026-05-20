@@ -1,0 +1,23 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.runner_created
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a15
+  description: |
+    All four containers (squid + haproxy + dnsmasq + runner) created on the
+    per-spawn isolated network. About to start. Carries network_context with
+    the network name + driver.
+  status: active
+  tags: [runsecure, orchestrator, spawn]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context
+    - network_context

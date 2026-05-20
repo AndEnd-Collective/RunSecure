@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.jit_acquired
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a14
+  description: |
+    GitHub returned a JIT config for the spawn. The runner registration on
+    GitHub now exists; A1 leak cleanup is responsible if subsequent steps fail.
+  status: active
+  tags: [runsecure, orchestrator, spawn]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context

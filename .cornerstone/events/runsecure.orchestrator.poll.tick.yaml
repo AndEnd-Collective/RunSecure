@@ -1,0 +1,23 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.poll.tick
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a11
+  description: |
+    Fires once per poll_interval_seconds per scope. Carries the rate_limit_context
+    with current GitHub API budget. Default severity is Debug — typically silenced
+    in production by log filtering. Useful for verifying the orchestrator is alive
+    when /healthz is unavailable.
+  status: active
+  tags: [runsecure, orchestrator, poll]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - rate_limit_context
