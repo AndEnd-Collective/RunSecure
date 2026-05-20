@@ -1,0 +1,78 @@
+# RunSecure orchestrator — per-scope compose stack.
+#
+# Usage:
+#   export RUNSECURE_SCOPE=datacentric
+#   docker compose -f infra/orchestrator/compose.scope.yml \
+#     --env-file infra/orchestrator/scopes/datacentric.env up -d
+#
+# Three containers per stack:
+#   - orchestrator: distroless Go binary; polls GitHub, spawns runners via socket-proxy
+#   - socket-proxy: distroless Go binary; the ONLY thing mounting docker.sock
+#   - orch-egress:  the orchestrator's only outbound HTTP path (api.github.com allowlist)
+services:
+  socket-proxy:
+    image: ${RUNSECURE_SOCKET_PROXY_IMAGE}
+    container_name: rs-orch-${RUNSECURE_SCOPE}-socket-proxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "65532:65532"  # distroless nonroot
+    networks: [orch-internal]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
+      RUNSECURE_LISTEN_ADDR: ":2375"
+      RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
+
+  orch-egress:
+    image: ${RUNSECURE_PROXY_IMAGE}
+    container_name: rs-orch-${RUNSECURE_SCOPE}-egress
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      orch-internal:
+      orch-external:
+
+  orchestrator:
+    image: ${RUNSECURE_ORCHESTRATOR_IMAGE}
+    container_name: rs-orch-${RUNSECURE_SCOPE}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "65532:65532"
+    networks: [orch-internal]
+    depends_on: [socket-proxy, orch-egress]
+    environment:
+      RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
+      DOCKER_HOST: "tcp://socket-proxy:2375"
+      HTTP_PROXY: "http://orch-egress:3128"
+      HTTPS_PROXY: "http://orch-egress:3128"
+      NO_PROXY: "localhost,socket-proxy"
+      RUNSECURE_PROXY_IMAGE: ${RUNSECURE_PROXY_IMAGE}
+      RUNSECURE_RUNNER_IMAGE_DEFAULT: ${RUNSECURE_RUNNER_IMAGE_DEFAULT}
+      RUNSECURE_RUNNER_IMAGE_NODE: ${RUNSECURE_RUNNER_IMAGE_NODE:-}
+      RUNSECURE_RUNNER_IMAGE_PYTHON: ${RUNSECURE_RUNNER_IMAGE_PYTHON:-}
+      RUNSECURE_RUNNER_IMAGE_RUST: ${RUNSECURE_RUNNER_IMAGE_RUST:-}
+    volumes:
+      - ./scopes/${RUNSECURE_SCOPE}.yml:/etc/runsecure/scope.yml:ro
+      - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
+      # Add per-repo project bindings here, e.g.:
+      # - /Users/foo/Code/datacentric:/projects/datacentric:ro
+    ports:
+      # Localhost-only by design — never publish externally.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=64m
+
+networks:
+  orch-internal:
+    driver: bridge
+    internal: true       # orchestrator + socket-proxy have NO host egress
+  orch-external:
+    driver: bridge       # orch-egress's external interface (host-routable)

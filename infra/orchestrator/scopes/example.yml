@@ -1,0 +1,35 @@
+apiVersion: runsecure.io/v1alpha1
+
+# A descriptive name; appears in container names, log events, /state/snapshot.
+name: example-scope
+description: "Template scope. Copy this to <yourname>.yml and edit."
+
+# Host-wide ceiling across all repos in this scope.
+global_max_runners: 5
+
+# Poll cadence (seconds). Minimum 5.
+poll_interval_seconds: 15
+
+# strict | standard | permissive | custom.
+# strict denies wildcards/DoH/IMDS/kube-api by default. User-explicit
+# entries in runner.yml security_overrides always win (see
+# allow_project_overrides).
+security_profile: strict
+
+# Which knobs a project's runner.yml is allowed to override. Anything not
+# listed here is silently ignored if a project sets it.
+allow_project_overrides:
+  - allow_wildcards
+
+auth:
+  type: pat
+  pat_file: /run/secrets/runsecure-pat
+
+orch_egress:
+  allow_domains:
+    - api.github.com
+
+repos:
+  - repo: owner/repo
+    project_dir: /projects/repo
+    max_concurrent: 3
