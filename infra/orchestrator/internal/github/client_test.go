@@ -90,6 +90,38 @@ func TestClient_MissingPATFile_Errors(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestClient_Do_UnmarshalableBody(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://x", patFile)
+	require.NoError(t, err)
+	// channels are unmarshalable by encoding/json.
+	_, err = c.Do(context.Background(), "POST", "/x", make(chan int))
+	require.Error(t, err)
+}
+
+func TestClient_Do_BadURL(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://[::1]:x", patFile) // invalid port
+	require.NoError(t, err)
+	_, err = c.Do(context.Background(), "GET", "/x", nil)
+	require.Error(t, err)
+}
+
+func TestClient_Reload_StatFails(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://x", patFile)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(patFile))
+	_, err = c.Do(context.Background(), "GET", "/x", nil)
+	require.Error(t, err)
+}
+
 // Tiny io reader without pulling in additional imports in this file's tests.
 func readAll(r interface {
 	Read(p []byte) (n int, err error)

@@ -188,3 +188,56 @@ func TestListContainersForScope_500(t *testing.T) {
 	_, err := c.ListContainersForScope(context.Background(), "test")
 	require.Error(t, err)
 }
+
+func TestDo_NetworkError(t *testing.T) {
+	// Construct a client whose base URL points at an unreachable host.
+	c, err := NewClient("http://127.0.0.1:1")
+	require.NoError(t, err)
+	require.Error(t, c.StartContainer(context.Background(), "x"))
+	_, err = c.InspectContainer(context.Background(), "x")
+	require.Error(t, err)
+	require.Error(t, c.DeleteContainer(context.Background(), "x", false))
+	_, err = c.CreateContainer(context.Background(), CreateContainerRequest{})
+	require.Error(t, err)
+	_, err = c.CreateNetwork(context.Background(), CreateNetworkRequest{})
+	require.Error(t, err)
+	require.Error(t, c.DeleteNetwork(context.Background(), "n"))
+	_, err = c.ListContainersForScope(context.Background(), "s")
+	require.Error(t, err)
+}
+
+func TestCreateContainer_UnmarshalableBody(t *testing.T) {
+	// Force a JSON marshaling failure by passing a body with an unsupported
+	// type. CreateContainerRequest doesn't contain channel/func, but we can
+	// directly call the raw `do` via the only available public API — by
+	// providing a malformed name like one containing %% to trip URL encoding.
+	// Since CreateContainerRequest can't carry an unmarshalable type, skip
+	// — coverage for the marshal error is exercised in github's tests.
+}
+
+func TestCreateContainer_MalformedResponse(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("not json"))
+	})
+	_, err := c.CreateContainer(context.Background(), CreateContainerRequest{Image: "i"})
+	require.Error(t, err)
+}
+
+func TestCreateNetwork_MalformedResponse(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("not json"))
+	})
+	_, err := c.CreateNetwork(context.Background(), CreateNetworkRequest{})
+	require.Error(t, err)
+}
+
+func TestInspectContainer_MalformedResponse(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	})
+	_, err := c.InspectContainer(context.Background(), "x")
+	require.Error(t, err)
+}

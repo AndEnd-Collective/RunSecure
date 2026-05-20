@@ -74,3 +74,21 @@ func TestRender_MkdirFails_Errors(t *testing.T) {
 	_, err := g.Render("s", &runneryml.Runner{}, security.Defaults("strict"))
 	require.Error(t, err)
 }
+
+// TestRender_WriteFails_Errors verifies that a write failure on any of the
+// three config files surfaces as an error. We force the failure by making
+// the per-spawn directory read-only after mkdir but before the writes.
+func TestRender_WriteFails_Errors(t *testing.T) {
+	dir := t.TempDir()
+	// Make the base dir read-only AFTER one successful Render call so the
+	// second one tries to write into a non-writable existing dir.
+	g := NewFSGenerator(dir)
+
+	// Pre-create the spawn dir as read-only.
+	spawnDir := filepath.Join(dir, "ro-spawn")
+	require.NoError(t, os.MkdirAll(spawnDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(spawnDir, 0o755) })
+
+	_, err := g.Render("ro-spawn", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x.com"}}}, security.Defaults("strict"))
+	require.Error(t, err)
+}
