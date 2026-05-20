@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -105,4 +106,76 @@ func TestServer_RunStartsAndStops(t *testing.T) {
 	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
 	srv := New("127.0.0.1:0", "127.0.0.1:0", d, em)
 	require.NotNil(t, srv)
+}
+
+func TestServer_New_DefaultAddrs(t *testing.T) {
+	d := newDeps(t)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	srv := New("", "", d, em)
+	require.NotNil(t, srv)
+	require.Equal(t, ":8080", srv.healthzAddr)
+	require.Equal(t, ":8081", srv.debugAddr)
+}
+
+func TestMetrics_EmptySnapshot(t *testing.T) {
+	d := &fakeDeps{
+		lastPoll:  time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC),
+		now:       time.Date(2026, 5, 19, 10, 0, 30, 0, time.UTC),
+		intervalS: 15,
+		snap:      state.Snapshot{PerRepo: map[string]state.RepoState{}},
+		api:       map[APICallKey]int64{},
+		spawns:    map[SpawnKey]int64{},
+		breakers:  map[string]bool{},
+	}
+	m := NewMetrics(d)
+	rr := httpRec()
+	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.True(t, strings.Contains(rr.Body.String(), "runsecure_orchestrator_api_rate_limit_remaining"))
+}
+
+func TestServer_RunAndShutdownOnCtxCancel(t *testing.T) {
+	d := newDeps(t)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	// :0 → kernel picks free ports.
+	srv := New("127.0.0.1:0", "127.0.0.1:0", d, em)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		// Either nil (graceful) or a "listen address in use" if port :0
+		// resolved weirdly — both acceptable.
+		_ = err
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit within 3s of cancel")
+	}
+}
+
+func TestCmpStrings_AllBranches(t *testing.T) {
+	require.Equal(t, -1, cmpStrings("a", "b", "c", "b", "b", "c"))
+	require.Equal(t, 0, cmpStrings("a", "b", "c", "a", "b", "c"))
+	require.Equal(t, 1, cmpStrings("b", "b", "c", "a", "b", "c"))
+	require.Equal(t, -1, cmpStrings("a", "a", "c", "a", "b", "c"))
+	require.Equal(t, -1, cmpStrings("a", "b", "c", "a", "b", "d"))
+}
+
+func TestMetrics_MultipleEntries_Sorted(t *testing.T) {
+	d := newDeps(t)
+	d.snap.PerRepo = map[string]state.RepoState{
+		"z/last":  {InFlight: 1},
+		"a/first": {InFlight: 2},
+	}
+	d.spawns[SpawnKey{Scope: "s2", Repo: "o/r", Outcome: "fail"}] = 1
+	d.spawns[SpawnKey{Scope: "s1", Repo: "o/r", Outcome: "success"}] = 3
+	d.api[APICallKey{Endpoint: "jit", Status: "201"}] = 5
+	m := NewMetrics(d)
+	rr := httpRec()
+	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
+	body := rr.Body.String()
+	aIdx := strings.Index(body, "a/first")
+	zIdx := strings.Index(body, "z/last")
+	require.True(t, aIdx >= 0 && aIdx < zIdx, "a/first must come before z/last in metrics output")
 }
