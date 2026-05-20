@@ -29,8 +29,14 @@ func NewSpawnWorker(deps SpawnDeps) *SpawnWorker {
 func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// Pre-step: B1 rate limit. Defensive — the poll loop already shaped the
 	// stream, but a misconfigured pool could still try to spawn faster than
-	// the bucket allows.
+	// the bucket allows. Emit spawn.failed on deny so a rate-limited backlog
+	// is visible to operators and the test suite rather than silently dropped.
 	if !w.deps.RateLimiter().TryTake() {
+		_ = w.deps.Emit().EmitSpawnFailed(cornerstone.SpawnFailedFields{
+			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+			FailureReason: "spawn_rate_limited",
+			Detail:        "B1 token bucket denied — backlog larger than burst",
+		})
 		return ErrRateLimitBackoff
 	}
 

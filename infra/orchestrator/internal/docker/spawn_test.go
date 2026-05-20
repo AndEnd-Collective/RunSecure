@@ -22,7 +22,7 @@ func TestSpawn_HappyPath(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + r.URL.Query().Get("name")})
 		case strings.HasSuffix(r.URL.Path, "/start"):
-			started = append(started, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.43/containers/"), "/start"))
+			started = append(started, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.44/containers/"), "/start"))
 			w.WriteHeader(http.StatusNoContent)
 		}
 	}))

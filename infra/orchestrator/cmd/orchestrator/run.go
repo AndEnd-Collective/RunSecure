@@ -65,7 +65,11 @@ func Run(ctx context.Context, scopePath string) error {
 
 	// Build everything the poll + spawn deps need.
 	intentCh := make(chan orchestrator.SpawnIntent, 32)
-	rl := state.NewTokenBucket(1, 1, time.Now)
+	// B1 rate limiter — token bucket protecting against unbounded burst.
+	// Defaults: 5 tokens/sec sustained, burst 10. The burst allows initial
+	// fan-out when the orchestrator first sees a queued backlog; sustained
+	// rate prevents a runaway poll loop from spawning thousands.
+	rl := state.NewTokenBucket(5, 10, time.Now)
 	brks := newBreakerMap()
 	eg := egress.NewFSGenerator(envOr("RUNSECURE_EGRESS_BASE_DIR", "/tmp/runsecure/egress"))
 	resolvedPolicy := security.Defaults(s.SecurityProfile)
@@ -365,8 +369,20 @@ func (p *productionDeps) RunnerImageDigestFor(runtime string) string {
 	return os.Getenv("RUNSECURE_RUNNER_IMAGE_DEFAULT")
 }
 func (p *productionDeps) SeccompProfileHostPath(name string) string {
+	// Empty name → no seccomp profile applied (defense in depth on top of
+	// cap_drop:ALL + no-new-privileges, not load-bearing).
+	//
+	// When set, the path must be a JSON-encoded profile that dockerd can
+	// read at container-start time. Note: Docker's SecurityOpt API expects
+	// the JSON CONTENTS, not a file path — passing a path triggers
+	// "Decoding seccomp profile failed". A path-based wiring requires the
+	// orchestrator to read the file and inject the JSON inline, which
+	// requires bind-mounting the seccomp dir into the orchestrator. That
+	// integration is deferred; for now an explicit profile name is treated
+	// as a no-op until the bind-mount is wired (next: read the file in
+	// productionDeps and pass JSON inline).
 	if name == "" {
-		name = "node-runner.json"
+		return ""
 	}
 	return "/host/seccomp/" + name
 }

@@ -38,7 +38,7 @@ func TestNewClient_BadURL(t *testing.T) {
 
 func TestCreateContainer_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/containers/create", r.URL.Path)
+		require.Equal(t, "/v1.44/containers/create", r.URL.Path)
 		require.Equal(t, "rs-x", r.URL.Query().Get("name"))
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"Id": "abc123"})
@@ -70,7 +70,7 @@ func TestCreateContainer_500(t *testing.T) {
 
 func TestStartContainer_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/containers/abc/start", r.URL.Path)
+		require.Equal(t, "/v1.44/containers/abc/start", r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	require.NoError(t, c.StartContainer(context.Background(), "abc"))
@@ -85,7 +85,7 @@ func TestStartContainer_Errors(t *testing.T) {
 
 func TestInspectContainer_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/containers/abc/json", r.URL.Path)
+		require.Equal(t, "/v1.44/containers/abc/json", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"Id":    "abc",
@@ -108,7 +108,7 @@ func TestInspectContainer_500(t *testing.T) {
 
 func TestDeleteContainer_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/containers/abc", r.URL.Path)
+		require.Equal(t, "/v1.44/containers/abc", r.URL.Path)
 		require.Equal(t, "true", r.URL.Query().Get("force"))
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -131,7 +131,7 @@ func TestDeleteContainer_OtherError(t *testing.T) {
 
 func TestCreateNetwork_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/networks/create", r.URL.Path)
+		require.Equal(t, "/v1.44/networks/create", r.URL.Path)
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.True(t, body["Internal"].(bool))
@@ -167,7 +167,7 @@ func TestDeleteNetwork_500(t *testing.T) {
 
 func TestListContainersForScope(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1.43/containers/json", r.URL.Path)
+		require.Equal(t, "/v1.44/containers/json", r.URL.Path)
 		q, _ := url.QueryUnescape(r.URL.RawQuery)
 		require.Contains(t, q, `runsecure.scope=test`)
 		w.WriteHeader(http.StatusOK)

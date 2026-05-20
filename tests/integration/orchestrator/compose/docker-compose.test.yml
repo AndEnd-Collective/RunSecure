@@ -28,7 +28,10 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    user: "65532:65532"
+    # Runs as root inside the container to read /var/run/docker.sock
+    # (Docker Desktop / Colima own the socket root:root mode 600).
+    # Strictness preserved by cap_drop + no-new-privileges + read_only.
+    user: "0:0"
     networks: [test-net]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

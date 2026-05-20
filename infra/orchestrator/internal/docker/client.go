@@ -101,7 +101,10 @@ func normalizeHost(dh string) (string, error) {
 	if u.Scheme == "" {
 		return "", errors.New("docker: DOCKER_HOST must include a scheme")
 	}
-	u.Path = "/v1.43"
+	// Docker Engine 25.0+ (Jan 2024) requires API ≥ v1.44; older clients
+	// get HTTP 400 with "client version X is too old". v1.44 is the floor
+	// across all currently-supported daemons.
+	u.Path = "/v1.44"
 	return u.String(), nil
 }
 
@@ -256,8 +259,11 @@ type containerJSON struct {
 }
 
 func (c *httpClient) ListContainersForScope(ctx context.Context, scope string) ([]Container, error) {
-	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"]}`, scope)
-	path := "/containers/json?all=true&filters=" + url.QueryEscape(filter)
+	// Only return RUNNING containers — exited ones are stale and would
+	// inflate the cold-start in-flight count. Status filtering server-side
+	// avoids returning hundreds of stopped containers from prior runs.
+	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"],"status":["running"]}`, scope)
+	path := "/containers/json?filters=" + url.QueryEscape(filter)
 	resp, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err

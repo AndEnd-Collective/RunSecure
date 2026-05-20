@@ -11,8 +11,8 @@ wait_for_log "runsecure.orchestrator.spawn.runner_created" 30 || exit 1
 
 # Kill orchestrator container; restart it.
 pname="$(project_name)"
-docker compose -f "${COMPOSE_FILE}" -p "${pname}" kill orchestrator
-docker compose -f "${COMPOSE_FILE}" -p "${pname}" start orchestrator
+$DC -f "${COMPOSE_FILE}" -p "${pname}" kill orchestrator
+$DC -f "${COMPOSE_FILE}" -p "${pname}" start orchestrator
 
 # After restart, /state/snapshot should report ≥ 1 in-flight runner if any
 # spawned containers are still running.

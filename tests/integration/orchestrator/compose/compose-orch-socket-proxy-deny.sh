@@ -10,16 +10,19 @@ trap stack_down EXIT
 
 MOCK_QUEUED_OWNER_REPO=0 stack_up
 
-# Probe the socket-proxy directly (it's on test-net so we can reach it from
-# the mock-github container via docker exec).
-RESP=$(docker exec rs-test-mock-github sh -c '\
-  wget -qO- --header "Content-Type: application/json" \
-    --post-data "{\"Image\":\"bad\",\"User\":\"\",\"HostConfig\":{\"Privileged\":true}}" \
-    http://socket-proxy:2375/v1.43/containers/create 2>&1 || true')
+# Probe the socket-proxy directly from a throwaway alpine container on the
+# test network (mock-github is distroless — no curl/wget). Body has
+# Privileged:true which the socket-proxy must refuse with 403.
+NETNAME="rs-test-$(basename $0 .sh)_test-net"
+STATUS=$(docker run --rm --network "$NETNAME" curlimages/curl:8.10.1 \
+  -sk -o /dev/null -w "%{http_code}" -X POST \
+  -H "Content-Type: application/json" \
+  --data-raw '{"Image":"bad","User":"","HostConfig":{"Privileged":true}}' \
+  http://socket-proxy:2375/v1.44/containers/create 2>&1 | tail -1)
 
-if echo "$RESP" | grep -q "403"; then
-  echo "OK: socket-proxy refused Privileged:true"
+if [[ "$STATUS" == "403" ]]; then
+  echo "OK: socket-proxy refused Privileged:true (status $STATUS)"
 else
-  echo "FAIL: expected 403, got: $RESP"
+  echo "FAIL: expected 403, got: $STATUS"
   exit 1
 fi

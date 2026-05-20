@@ -10,7 +10,9 @@ source "$(cd "$(dirname "$0")" && pwd)/_lib.sh"
 
 trap stack_down EXIT
 
-# Run ensure_testdata first (which populates the allowlist), then override.
+# Tell ensure_test_allowlist (called transitively by stack_up) NOT to
+# overwrite the empty allowlist we're about to write.
+export RUNSECURE_TEST_OVERRIDE_ALLOWLIST=1
 ensure_testdata
 echo "# Empty allowlist — forces socket_proxy_denied post-JIT (this test only)." \
   > "${TESTDATA_DIR}/allowed-images.txt"
