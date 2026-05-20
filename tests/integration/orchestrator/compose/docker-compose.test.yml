@@ -32,6 +32,9 @@ services:
     networks: [test-net]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Bug #5 fix: bind-mount the test allowlist over the baked-in empty
+      # file so socket-proxy will accept spawns of the test-runner image.
+      - ./testdata/allowed-images.txt:/etc/runsecure/socket-proxy/allowed-images.txt:ro
     environment:
       RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
       RUNSECURE_LISTEN_ADDR: ":2375"
@@ -51,6 +54,11 @@ services:
       DOCKER_HOST: "tcp://socket-proxy:2375"
       # Point the github client at the mock instead of api.github.com.
       RUNSECURE_GITHUB_BASE_URL: "http://mock-github:80"
+      # Test runner image — must match the digest in allowed-images.txt.
+      # _lib.sh's ensure_test_allowlist() resolves the digest and writes
+      # it to testdata/allowed-images.txt before each test.
+      RUNSECURE_RUNNER_IMAGE_DEFAULT: "${RUNSECURE_TEST_RUNNER_REF:-runsecure-test-runner:local}"
+      RUNSECURE_PROXY_IMAGE: "${RUNSECURE_TEST_PROXY_REF:-runsecure-test-runner:local}"
     volumes:
       - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
       - ./testdata/pat:/run/secrets/runsecure-pat:ro

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# A1 leak cleanup: simulate a spawn that succeeds at JIT generation but
-# fails container creation; verify the orchestrator DELETEs the orphan
-# runner registration on the GitHub side (mock-github records the call).
+# A1 leak cleanup: spawn succeeds at JIT generation but fails container
+# creation; orchestrator DELETEs the orphan GitHub runner registration.
 #
-# To force the post-JIT failure path, we'd ideally remove the runner
-# image from the socket-proxy allowlist between JIT and container-create.
-# Plan A's allowlist is bake-time, so this test verifies the orchestrator
-# emits runner.leak_cleaned in the natural failure path induced by an
-# image-not-allowed condition.
+# With the bug #5 fix populating a test allowlist, we now have to force
+# the post-JIT failure path manually — override the allowlist for THIS
+# test only to be empty so socket-proxy refuses every containers/create.
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_lib.sh"
 
 trap stack_down EXIT
 
+# Run ensure_testdata first (which populates the allowlist), then override.
+ensure_testdata
+echo "# Empty allowlist — forces socket_proxy_denied post-JIT (this test only)." \
+  > "${TESTDATA_DIR}/allowed-images.txt"
+
 MOCK_QUEUED_OWNER_REPO=1 stack_up
 
-# The socket-proxy's allowed-images.txt is empty by default — every image
-# reference is refused. The orchestrator will get a JIT then fail at the
-# socket-proxy refuse, triggering A1 leak cleanup.
 if wait_for_log "runsecure.orchestrator.runner.leak_cleaned" 45; then
   echo "OK: leak cleanup fired for orphan JIT"
 else
