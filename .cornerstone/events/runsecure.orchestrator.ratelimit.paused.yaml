@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.ratelimit.paused
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1c
+  description: |
+    GitHub API returned 429 or X-RateLimit-Remaining: 0. Scope polling paused
+    until X-RateLimit-Reset. Correctness floor on top of the fixed-cadence
+    polling. Severity Warning.
+  status: active
+  tags: [runsecure, orchestrator, ratelimit]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - rate_limit_context

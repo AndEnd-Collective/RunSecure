@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.started
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a13
+  description: |
+    Spawn intent reached the worker; semaphores acquired; about to request JIT
+    config. Carries container_context with the planned container name + image
+    digest. Trace ID matches the spawn_id used for all subsequent spawn.* events.
+  status: active
+  tags: [runsecure, orchestrator, spawn]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context

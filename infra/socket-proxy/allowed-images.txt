@@ -1,0 +1,16 @@
+# RunSecure socket-proxy: image-digest allowlist.
+#
+# One image reference per line in the form:
+#     <registry>/<image>@sha256:<hex>
+#
+# Tag-only references are rejected at proxy startup. The orchestrator passes
+# only digest-pinned image references; this file enumerates which digests it
+# is allowed to spawn.
+#
+# Maintained by .github/workflows/weekly-version-bump.yml — do not hand-edit
+# unless the bump workflow is paused.
+#
+# Initial entries are intentionally absent: until the orchestrator's compose
+# stack publishes its first runner-image digests, the allowlist is empty and
+# every spawn attempt is correctly refused. The bump workflow seeds entries
+# when it runs.

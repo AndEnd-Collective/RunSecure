@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/file-context.json",
+  "title": "File Context",
+  "description": "File handling and transfer information",
+  "type": "object",
+  "properties": {
+    "file.name": {
+      "type": "string",
+      "description": "Filename with extension"
+    },
+    "file.size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "File size in bytes"
+    },
+    "file.type": {
+      "type": "string",
+      "description": "MIME type per RFC 6838"
+    },
+    "file.extension": {
+      "type": "string",
+      "description": "File extension"
+    },
+    "file.hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Hash values with algorithm names as keys (sha256, sha1, md5, etc.)"
+    },
+    "file.location": {
+      "type": "string",
+      "enum": ["local", "S3", "Glacier", "ftp", "nis", "cifs", "azure-blob", "gcs"],
+      "description": "Storage location type"
+    },
+    "file.path": {
+      "type": "string",
+      "description": "File path (relative for local, full path for remote)"
+    }
+  },
+  "additionalProperties": true
+}

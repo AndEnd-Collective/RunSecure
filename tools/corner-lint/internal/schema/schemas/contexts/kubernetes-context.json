@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/kubernetes-context.json",
+  "title": "Kubernetes Context",
+  "description": "Kubernetes cluster and workload metadata",
+  "type": "object",
+  "properties": {
+    "k8s.cluster.name": {
+      "type": "string",
+      "description": "Kubernetes cluster name"
+    },
+    "k8s.namespace.name": {
+      "type": "string",
+      "description": "Kubernetes namespace name"
+    },
+    "k8s.pod.uid": {
+      "type": "string",
+      "description": "Pod unique identifier"
+    },
+    "k8s.pod.name": {
+      "type": "string",
+      "description": "Pod name"
+    },
+    "k8s.replicaset.uid": {
+      "type": "string",
+      "description": "ReplicaSet unique identifier"
+    },
+    "k8s.replicaset.name": {
+      "type": "string",
+      "description": "ReplicaSet name"
+    },
+    "k8s.deployment.uid": {
+      "type": "string",
+      "description": "Deployment unique identifier"
+    },
+    "k8s.deployment.name": {
+      "type": "string",
+      "description": "Deployment name"
+    },
+    "k8s.statefulset.uid": {
+      "type": "string",
+      "description": "StatefulSet unique identifier"
+    },
+    "k8s.statefulset.name": {
+      "type": "string",
+      "description": "StatefulSet name"
+    },
+    "k8s.daemonset.uid": {
+      "type": "string",
+      "description": "DaemonSet unique identifier"
+    },
+    "k8s.daemonset.name": {
+      "type": "string",
+      "description": "DaemonSet name"
+    },
+    "k8s.job.uid": {
+      "type": "string",
+      "description": "Job unique identifier"
+    },
+    "k8s.job.name": {
+      "type": "string",
+      "description": "Job name"
+    },
+    "k8s.cronjob.uid": {
+      "type": "string",
+      "description": "CronJob unique identifier"
+    },
+    "k8s.cronjob.name": {
+      "type": "string",
+      "description": "CronJob name"
+    }
+  },
+  "additionalProperties": true
+}

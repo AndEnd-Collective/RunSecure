@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/encryption-context.json",
+  "title": "Encryption Context",
+  "description": "Encryption details for PCI-DSS and HIPAA compliance",
+  "type": "object",
+  "properties": {
+    "encryption.in.transit": {
+      "type": "boolean",
+      "description": "Data encrypted in transit"
+    },
+    "encryption.at.rest": {
+      "type": "boolean",
+      "description": "Data encrypted at rest"
+    },
+    "encryption.protocol": {
+      "type": "string",
+      "description": "TLS version or encryption protocol"
+    },
+    "encryption.algorithm": {
+      "type": "string",
+      "description": "Encryption algorithm used"
+    },
+    "encryption.key.id": {
+      "type": "string",
+      "description": "Key identifier (not the key itself)"
+    }
+  },
+  "additionalProperties": true
+}

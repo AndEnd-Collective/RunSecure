@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/rate-limit-context.json",
+  "title": "Rate Limit Context",
+  "description": "Rate limiting information for DDoS detection and capacity planning",
+  "type": "object",
+  "properties": {
+    "rate.limit.name": {
+      "type": "string",
+      "description": "Rate limit rule name"
+    },
+    "rate.limit.max": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum allowed in window"
+    },
+    "rate.limit.current": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Current count in window"
+    },
+    "rate.limit.window.seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Time window size in seconds"
+    },
+    "rate.limit.exceeded": {
+      "type": "boolean",
+      "description": "Whether limit was exceeded"
+    }
+  },
+  "additionalProperties": true
+}

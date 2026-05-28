@@ -46,6 +46,12 @@ jobs:
             --build-arg PYTHON_VERSION=3.12 \
             -t runner-python:3.12 .
 
+      - name: Build Rust image
+        run: |
+          docker build -f images/rust.Dockerfile \
+            --build-arg RUST_VERSION=stable \
+            -t runner-rust:stable .
+
       - name: Build proxy image
         run: docker build -f infra/squid/Dockerfile -t runsecure-proxy:latest infra/squid/
 
@@ -111,29 +117,14 @@ jobs:
 
           docker stop smoke-proxy
 
-      - name: Integration test — egress proxy filtering
+      - name: Install gh CLI (required by log-loss test for API smoke check)
         run: |
-          RUNNER_IMAGE=runner-node:24 \
-            docker compose -f tests/integration/docker-compose.test.yml \
-            up --abort-on-container-exit --exit-code-from runner
-        env:
-          TEST_SCRIPT: test-egress-proxy.sh
+          # gh CLI ships preinstalled on GitHub-hosted runners; this step is a
+          # no-op safety net for self-hosted scenarios.
+          command -v gh >/dev/null 2>&1 || sudo apt-get install -y gh
 
-      - name: Teardown egress test
-        if: always()
-        run: docker compose -f tests/integration/docker-compose.test.yml down -v 2>/dev/null || true
-
-      - name: Integration test — Python CI through proxy
-        run: |
-          RUNNER_IMAGE=runner-python:3.12 \
-            docker compose -f tests/integration/docker-compose.test.yml \
-            up --abort-on-container-exit --exit-code-from runner
-        env:
-          TEST_SCRIPT: test-ci-workflow-python.sh
-
-      - name: Teardown Python test
-        if: always()
-        run: docker compose -f tests/integration/docker-compose.test.yml down -v 2>/dev/null || true
+      - name: Run full integration test suite
+        run: ./tests/integration/run-integration-tests.sh --skip-build
 
       - name: Final cleanup
         if: always()

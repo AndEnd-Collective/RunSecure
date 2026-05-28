@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/cloud-context.json",
+  "title": "Cloud Context",
+  "description": "Cloud provider metadata (OpenTelemetry aligned)",
+  "type": "object",
+  "properties": {
+    "cloud.provider": {
+      "type": "string",
+      "enum": ["aws", "gcp", "azure", "digitalocean", "oci", "alibaba", "ibm", "tencent"],
+      "description": "Cloud provider name"
+    },
+    "cloud.account.id": {
+      "type": "string",
+      "description": "Cloud account identifier"
+    },
+    "cloud.region": {
+      "type": "string",
+      "description": "Cloud region (e.g., us-east-1, europe-west1)"
+    },
+    "cloud.zone": {
+      "type": "string",
+      "description": "Cloud availability zone"
+    }
+  },
+  "additionalProperties": true
+}

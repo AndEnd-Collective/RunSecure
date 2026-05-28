@@ -1,0 +1,77 @@
+# Integration test stack for the orchestrator.
+#
+# Three containers:
+#   mock-github  — stub GitHub API server controlled via MOCK_* env vars
+#   socket-proxy — production socket-proxy image (built local)
+#   orchestrator — production orchestrator image (built local)
+#
+# All on a shared private network with internal=false so the orchestrator
+# can reach the mock; the production stack uses internal=true for the
+# orchestrator's own network, but tests need to talk to the mock.
+
+services:
+  mock-github:
+    build: ./mock-github
+    image: runsecure-mock-github:test
+    container_name: rs-test-mock-github
+    networks: [test-net]
+    environment:
+      MOCK_LISTEN: ":80"
+      MOCK_QUEUED_OWNER_REPO: "${MOCK_QUEUED_OWNER_REPO:-0}"
+      MOCK_AUTH_FAIL: "${MOCK_AUTH_FAIL:-}"
+      MOCK_JIT_FAIL: "${MOCK_JIT_FAIL:-}"
+      MOCK_RATE_LIMIT: "${MOCK_RATE_LIMIT:-}"
+
+  socket-proxy:
+    image: runsecure-socket-proxy:local
+    container_name: rs-test-socket-proxy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Runs as root inside the container to read /var/run/docker.sock
+    # (Docker Desktop / Colima own the socket root:root mode 600).
+    # Strictness preserved by cap_drop + no-new-privileges + read_only.
+    user: "0:0"
+    networks: [test-net]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Bug #5 fix: bind-mount the test allowlist over the baked-in empty
+      # file so socket-proxy will accept spawns of the test-runner image.
+      - ./testdata/allowed-images.txt:/etc/runsecure/socket-proxy/allowed-images.txt:ro
+    environment:
+      RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
+      RUNSECURE_LISTEN_ADDR: ":2375"
+      RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
+
+  orchestrator:
+    image: runsecure-orchestrator:local
+    container_name: rs-test-orchestrator
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "65532:65532"
+    networks: [test-net]
+    depends_on: [mock-github, socket-proxy]
+    environment:
+      RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
+      DOCKER_HOST: "tcp://socket-proxy:2375"
+      # Point the github client at the mock instead of api.github.com.
+      RUNSECURE_GITHUB_BASE_URL: "http://mock-github:80"
+      # Test runner image — must match the digest in allowed-images.txt.
+      # _lib.sh's ensure_test_allowlist() resolves the digest and writes
+      # it to testdata/allowed-images.txt before each test.
+      RUNSECURE_RUNNER_IMAGE_DEFAULT: "${RUNSECURE_TEST_RUNNER_REF:-runsecure-test-runner:local}"
+      RUNSECURE_PROXY_IMAGE: "${RUNSECURE_TEST_PROXY_REF:-runsecure-test-runner:local}"
+    volumes:
+      - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
+      - ./testdata/pat:/run/secrets/runsecure-pat:ro
+      - ./testdata/proj:/projects/proj:ro
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18081:8081"
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=64m
+
+networks:
+  test-net:
+    driver: bridge

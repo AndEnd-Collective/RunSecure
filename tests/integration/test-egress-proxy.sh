@@ -41,12 +41,16 @@ fail() {
 
 # --- Helpers -----------------------------------------------------------------
 
-# Test that a URL is reachable through the proxy
+# Test that a URL is reachable through the proxy. crates.io and some other
+# package indexes require a real User-Agent (they 403 the default curl one),
+# so we send a stable UA on every probe — what matters here is that the
+# PROXY let the traffic through, not that we look like a default curl.
 assert_allowed() {
     local url="$1"
     local desc="$2"
     local http_code
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -A "runsecure-egress-test/1.0 (+https://github.com/AndEnd-Collective/RunSecure)" \
         --connect-timeout 10 --max-time 15 "$url" 2>/dev/null)
     if [[ "$http_code" =~ ^(200|301|302|303|304|307|308|404)$ ]]; then
         pass "ALLOW $desc → HTTP $http_code"

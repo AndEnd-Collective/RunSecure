@@ -145,3 +145,45 @@ jobs:
         run: |
           echo "DRY RUN — would tag $NEXT_VERSION but did not."
           echo "$NEXT_VERSION" > "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
+      # Plan A: refresh socket-proxy's image-digest allowlist when runner
+      # images publish. The allowlist is baked into the socket-proxy image
+      # at build time, so this step opens a PR with the updated digests
+      # that the publish-images workflow will then pick up.
+      # ----------------------------------------------------------------------
+      - name: Refresh socket-proxy allowed-images.txt
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ALLOW="infra/socket-proxy/allowed-images.txt"
+          {
+            sed '/^# Initial entries/,$d' "$ALLOW"
+            echo ""
+            echo "# Auto-refreshed by weekly-version-bump.yml at $NEXT_VERSION."
+            for img in proxy runner-node runner-python runner-rust; do
+              # Resolve the latest digest from GHCR. If the image isn't
+              # published yet (greenfield), skip silently.
+              DIGEST=$(gh api -H "Accept: application/vnd.github+json" \
+                "/users/AndEnd-Collective/packages/container/runsecure%2F${img}/versions" \
+                --jq '.[0].name' 2>/dev/null || true)
+              if [[ -n "$DIGEST" && "$DIGEST" =~ ^sha256: ]]; then
+                echo "ghcr.io/andend-collective/runsecure/${img}@${DIGEST}"
+              fi
+            done
+          } > "${ALLOW}.new"
+          mv "${ALLOW}.new" "$ALLOW"
+          if git diff --quiet "$ALLOW"; then
+            echo "no digest changes; skipping PR"
+            exit 0
+          fi
+          git add "$ALLOW"
+          git commit -m "chore(socket-proxy): refresh allowed-images.txt for $NEXT_VERSION"
+          git push origin "HEAD:refs/heads/bot/allowed-images-${NEXT_VERSION}"
+          gh pr create \
+            --title "chore(socket-proxy): refresh allowed-images for $NEXT_VERSION" \
+            --body "Automated refresh of infra/socket-proxy/allowed-images.txt; the socket-proxy rebuild on this PR will bake in the updated digests." \
+            --base main --head "bot/allowed-images-${NEXT_VERSION}" || true

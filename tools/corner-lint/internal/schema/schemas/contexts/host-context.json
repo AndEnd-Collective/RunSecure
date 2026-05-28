@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/host-context.json",
+  "title": "Host Context",
+  "description": "Host/VM metadata (OpenTelemetry aligned)",
+  "type": "object",
+  "properties": {
+    "host.name": {
+      "type": "string",
+      "description": "Hostname"
+    },
+    "host.name.type": {
+      "type": "string",
+      "enum": ["FQDN", "netbios"],
+      "description": "Type of hostname"
+    },
+    "host.id": {
+      "type": "string",
+      "description": "Unique host identifier (cloud instance ID)"
+    },
+    "host.image.name": {
+      "type": "string",
+      "description": "VM image name"
+    },
+    "host.image.version": {
+      "type": "string",
+      "description": "VM image version"
+    },
+    "host.ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Host IP address"
+    },
+    "host.os": {
+      "type": "string",
+      "description": "Operating system name"
+    },
+    "host.arch": {
+      "type": "string",
+      "enum": ["amd64", "arm64", "x86", "arm"],
+      "description": "Host architecture"
+    },
+    "host.tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Host tags"
+    },
+    "host.user": {
+      "type": "string",
+      "description": "Currently logged-in user"
+    },
+    "host.impersonator.user": {
+      "type": "string",
+      "description": "Original user in elevation scenario (sudo/run-as)"
+    }
+  },
+  "additionalProperties": true
+}

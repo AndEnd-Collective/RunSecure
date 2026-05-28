@@ -209,6 +209,67 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+  # --- Build orchestrator image (Plan A: long-running orchestrator) ---------
+  # SECURITY: this job uses only `needs.gate.outputs.*` (job-internal),
+  # `github.sha`/`github.actor` (GitHub-trusted), and `secrets.GITHUB_TOKEN`.
+  # No untrusted-input vectors (no event.* fields).
+  orchestrator:
+    runs-on: ubuntu-latest
+    needs: gate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: infra/orchestrator
+          file: infra/orchestrator/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary
+            ${{ env.IMAGE_PREFIX }}/orchestrator:nightly
+          labels: |
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  # --- Build socket-proxy image (Plan A) -----------------------------------
+  socket-proxy:
+    runs-on: ubuntu-latest
+    needs: gate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: infra/socket-proxy
+          file: infra/socket-proxy/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary
+            ${{ env.IMAGE_PREFIX }}/socket-proxy:nightly
+          labels: |
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
   # are found WITH a fix available (unfixed CVEs upload to the Security tab

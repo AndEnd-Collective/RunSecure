@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/cornerstone-event.json",
+  "title": "Cornerstone Event",
+  "description": "JSON Schema for validating Cornerstone semantic logging events",
+  "type": "object",
+  "properties": {
+    "event.uuid": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this event"
+    },
+    "event.signature": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Event signature that associates the event with pre-declared structure"
+    },
+    "deployment.environment": {
+      "type": "string",
+      "enum": ["Development", "Testing", "Staging", "Production"],
+      "description": "Deployment environment"
+    },
+    "environment.uuid": {
+      "type": "string",
+      "description": "Identifier for the specific environment instance"
+    },
+    "customer.uuid": {
+      "type": "string",
+      "description": "Customer identifier for multi-tenant applications"
+    },
+    "session.id": {
+      "type": "string",
+      "description": "Session identifier for event grouping"
+    },
+    "trace.id": {
+      "type": "string",
+      "description": "OpenTelemetry trace identifier"
+    },
+    "span.id": {
+      "type": "string",
+      "description": "OpenTelemetry span identifier"
+    },
+    "time.stamp": {
+      "type": "string",
+      "description": "Event timestamp in ISO 8601 format or epoch"
+    },
+    "event.type": {
+      "type": "string",
+      "enum": ["Activity", "Change"],
+      "description": "Type of event - Activity (read operations) or Change (modifications)"
+    },
+    "event.sub.type": {
+      "type": "string",
+      "description": "More specific event categorization"
+    },
+    "event.details": {
+      "$ref": "event-details.json",
+      "description": "Container for event details"
+    },
+    "initiating.user": {
+      "$ref": "contexts/user-context.json",
+      "description": "User who initiated the activity"
+    },
+    "impacted.user": {
+      "type": "array",
+      "items": {
+        "$ref": "contexts/user-context.json"
+      },
+      "description": "User(s) affected by the activity"
+    },
+    "web.context": {
+      "$ref": "contexts/web-context.json",
+      "description": "HTTP request/response information"
+    },
+    "database.context": {
+      "$ref": "contexts/database-context.json",
+      "description": "Database operation details"
+    },
+    "network.context": {
+      "$ref": "contexts/network-context.json",
+      "description": "Network communication details"
+    },
+    "file.context": {
+      "$ref": "contexts/file-context.json",
+      "description": "File handling information"
+    },
+    "data.classification": {
+      "$ref": "contexts/data-classification.json",
+      "description": "Sensitive data scanning results"
+    },
+    "anti.malware": {
+      "$ref": "contexts/anti-malware-context.json",
+      "description": "Malware scanning results"
+    },
+    "information.context": {
+      "$ref": "contexts/information-context.json",
+      "description": "Sensitive data reference"
+    },
+    "data.import": {
+      "$ref": "contexts/data-import-context.json",
+      "description": "Data ingress information"
+    },
+    "data.export": {
+      "$ref": "contexts/data-export-context.json",
+      "description": "Data egress information"
+    },
+    "cloud.context": {
+      "$ref": "contexts/cloud-context.json",
+      "description": "Cloud provider metadata"
+    },
+    "k8s.context": {
+      "$ref": "contexts/kubernetes-context.json",
+      "description": "Kubernetes workload metadata"
+    },
+    "container.context": {
+      "$ref": "contexts/container-context.json",
+      "description": "Container runtime metadata"
+    },
+    "host.context": {
+      "$ref": "contexts/host-context.json",
+      "description": "Host/VM metadata"
+    },
+    "geo.context": {
+      "$ref": "contexts/geo-context.json",
+      "description": "Geographic location information"
+    },
+    "device.context": {
+      "$ref": "contexts/device-context.json",
+      "description": "Device and client information"
+    },
+    "session.context": {
+      "$ref": "contexts/session-context.json",
+      "description": "Session metadata"
+    },
+    "encryption.context": {
+      "$ref": "contexts/encryption-context.json",
+      "description": "Encryption details for compliance"
+    },
+    "rate.limit.context": {
+      "$ref": "contexts/rate-limit-context.json",
+      "description": "Rate limiting information"
+    },
+    "audit.context": {
+      "$ref": "contexts/audit-context.json",
+      "description": "Change tracking and audit trail"
+    }
+  },
+  "required": [
+    "event.uuid",
+    "event.signature",
+    "time.stamp",
+    "event.type",
+    "event.details"
+  ],
+  "additionalProperties": true
+}

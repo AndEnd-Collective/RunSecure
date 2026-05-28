@@ -1,0 +1,51 @@
+# .cornerstone/manifest.yaml
+# Project-local Cornerstone registry. See:
+# https://github.com/Cerebras/Cornerstone/blob/master/schemas/cornerstone-manifest.json
+# This project emits Cornerstone-shaped JSON directly to stderr. The
+# instrument skill bakes defaults + transformations into the generated code;
+# the collector picks them up via an OTLP / filelog receiver.
+
+apiVersion: cornerstone.cerebras.net/v1
+kind: ProjectManifest
+
+metadata:
+  name: runsecure-orchestrator
+  # owner: your-team
+  # description: One-line summary of what this project emits.
+
+emission:
+  style: raw-json
+  language: go
+
+uuid_strategy:
+  mode: random        # random | deterministic
+  # If you want stable UUIDs across forks of this project, switch to:
+  # mode: deterministic
+  # namespace: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+
+# Always set on every event emitted from this project.
+defaults:
+  signature: runsecure-orchestrator-v1
+  # environment: ${CORNERSTONE_ENV:-production}
+  # tags: []
+
+# Field-level transformations applied at emit time (e.g. never log raw email).
+# transformations:
+#   - field: initiating.user.user.email
+#     transform: sha256
+#   - field: web.context.headers.authorization
+#     transform: redact
+
+# Project-wide rules enforced by `corner-lint registry validate` and the
+# cornerstone_validator collector processor.
+# conventions:
+#   required_contexts: [initiating_user]
+#   forbidden_fields: [web.context.body]
+#   severity_floor: informational
+
+# Where the application code lives (used by the instrument and retrofit skills).
+# sources:
+#   python:
+#     - "src/**/*.py"
+#   typescript:
+#     - "src/**/*.ts"

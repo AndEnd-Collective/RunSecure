@@ -95,7 +95,11 @@ fi
 # ============================================================================
 echo -e "\n${BOLD}--- Step 4: crates.io API access ---${NC}"
 
+# crates.io's API rejects requests without a real User-Agent (their
+# documented policy). The test cares whether the proxy lets traffic
+# through, not what UA we look like — so set a stable UA.
 CRATES_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 \
+    -A "runsecure-rust-ci-test/1.0 (+https://github.com/AndEnd-Collective/RunSecure)" \
     "https://crates.io/api/v1/crates/serde" 2>/dev/null)
 if [[ "$CRATES_CODE" =~ ^(200|301|302)$ ]]; then
     pass "crates.io API accessible through proxy ($CRATES_CODE)"

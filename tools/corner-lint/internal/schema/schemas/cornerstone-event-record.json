@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/cornerstone-event-record.json",
+  "title": "Cornerstone Event Record",
+  "description": "Schema for .cornerstone/events/<name>.yaml — a single event registered in the project's local registry. Wraps an event signature with stable UUID, lifecycle status, and code locations where this event is emitted.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "signature"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "cornerstone.cerebras.net/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "EventSignature"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "uuid"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]*$",
+          "description": "Event sub-type identifier; matches the file name (e.g. auth.login → events/auth.login.yaml). Stable; renaming is a breaking change for consumers."
+        },
+        "uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Canonical event ID. Stable across renames; the value SIEM rules / dashboards / runbooks key off."
+        },
+        "description": {
+          "type": "string",
+          "description": "One-line description of what this event represents."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "deprecated", "removed"],
+          "default": "active",
+          "description": "Lifecycle state. `deprecated` events still emit but should not have new emit_sites added. `removed` events are validated only for historical search; producing them in code is a lint error."
+        },
+        "deprecation_note": {
+          "type": "string",
+          "description": "Required when status is 'deprecated' or 'removed'. Explains why and what to migrate to."
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"enum": ["deprecated", "removed"]}}},
+          "then": {"required": ["deprecation_note"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "description": "The event signature itself — references the canonical event-signature.json schema. Required fields: event.signature, configuration. Additional Cornerstone signature fields are passed through.",
+      "required": ["event.signature", "configuration"],
+      "properties": {
+        "event.signature": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configuration": {
+          "type": "object"
+        },
+        "required_contexts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "initiating_user", "impacted_user", "web_context", "database_context",
+              "network_context", "file_context", "cloud_context", "k8s_context",
+              "container_context", "host_context", "geo_context", "device_context",
+              "session_context", "audit_context", "rate_limit_context",
+              "data_classification", "anti_malware_context", "encryption_context",
+              "data_import_context", "data_export_context", "information_context"
+            ]
+          },
+          "description": "Context names that events using this signature must include."
+        }
+      },
+      "additionalProperties": true
+    },
+    "emit_sites": {
+      "type": "array",
+      "description": "Code locations where this event is emitted. Maintained automatically by the instrument and retrofit skills; humans should not hand-edit this list.",
+      "items": {
+        "type": "object",
+        "required": ["file", "line"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "function": {
+            "type": "string",
+            "description": "Enclosing function or method name; helps when a file is reformatted and line numbers shift."
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date",
+            "description": "ISO 8601 date when the skill last verified this site is still emitting this event. Stale entries flagged by `corner-lint registry`."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "examples": {
+      "type": "array",
+      "description": "Sample event payloads for this signature. Used by `corner-lint validate` as fixtures and by the docs site for examples.",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": false
+}

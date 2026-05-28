@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/session-context.json",
+  "title": "Session Context",
+  "description": "Session metadata for hijacking detection and MFA compliance",
+  "type": "object",
+  "properties": {
+    "session.created.at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Session creation timestamp"
+    },
+    "session.expires.at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Session expiration timestamp"
+    },
+    "session.mfa.used": {
+      "type": "boolean",
+      "description": "Whether MFA was used"
+    },
+    "session.auth.method": {
+      "type": "string",
+      "description": "Authentication method (password, sso, oauth, api-key)"
+    },
+    "session.ip.original": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "IP address at session creation"
+    }
+  },
+  "additionalProperties": true
+}

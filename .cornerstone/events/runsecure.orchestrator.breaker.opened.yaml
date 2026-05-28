@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.breaker.opened
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1a
+  description: |
+    B4 circuit breaker tripped for a repo after N consecutive spawn failures
+    (default 5). Polling for that repo pauses until breaker.closed fires.
+    Severity Warning.
+  status: active
+  tags: [runsecure, orchestrator, defensive-B4]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts: []

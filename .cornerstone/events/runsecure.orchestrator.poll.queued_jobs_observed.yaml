@@ -1,0 +1,20 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.poll.queued_jobs_observed
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a12
+  description: |
+    Emitted when a poll cycle sees >0 queued jobs for a repo. Carries the count
+    in event.details.error.data.queued_count. Severity Informational.
+  status: active
+  tags: [runsecure, orchestrator, poll]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts: []

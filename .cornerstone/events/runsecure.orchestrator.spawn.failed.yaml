@@ -1,0 +1,23 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.spawn.failed
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a17
+  description: |
+    Runner exited non-zero OR a pre-start step failed (socket-proxy 403, image
+    pull, JIT generation error, etc.). event.details.failure.reason is required
+    and is a short stable code (snake_case); the original error text goes in
+    event.details.error.data.detail. Severity Error.
+  status: active
+  tags: [runsecure, orchestrator, spawn]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context

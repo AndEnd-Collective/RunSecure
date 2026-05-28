@@ -1,0 +1,21 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.config.reloaded
+  uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a20
+  description: |
+    PAT secret file mtime changed; orchestrator picked up new token. Carries
+    audit_context.action=pat_rotated.
+  status: active
+  tags: [runsecure, orchestrator, config]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - audit_context
