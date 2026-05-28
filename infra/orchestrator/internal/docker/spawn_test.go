@@ -118,6 +118,87 @@ func TestSpawn_SeccompProfile_AppliedToRunner(t *testing.T) {
 	require.True(t, foundSeccomp, "SecurityOpt must include seccomp=<path>: %v", secopts)
 }
 
+// Cover docker.Spawn's squid create-error branch (lines 65-68).
+func TestSpawn_SquidCreateFails_RollsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			name := r.URL.Query().Get("name")
+			if strings.Contains(name, "squid") {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":"x"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + name})
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+	_, err := Spawn(context.Background(), c, SpawnInputs{
+		SpawnID: "x", NetworkID: "n", RunnerImage: "r@sha256:r", ProxyImage: "p@sha256:p",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "create squid")
+}
+
+// Cover docker.Spawn's haproxy/dnsmasq create-error branches (lines 65/80).
+func TestSpawn_HaproxyCreateFails_RollsBack(t *testing.T) {
+	var deleteCount int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			name := r.URL.Query().Get("name")
+			if strings.Contains(name, "haproxy") {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":"x"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + name})
+		case http.MethodDelete:
+			atomic.AddInt64(&deleteCount, 1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+	_, err := Spawn(context.Background(), c, SpawnInputs{
+		SpawnID: "x", NetworkID: "n", RunnerImage: "r@sha256:r", ProxyImage: "p@sha256:p",
+	})
+	require.Error(t, err)
+	require.GreaterOrEqual(t, atomic.LoadInt64(&deleteCount), int64(1))
+}
+
+func TestSpawn_DnsmasqCreateFails_RollsBack(t *testing.T) {
+	var deleteCount int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			name := r.URL.Query().Get("name")
+			if strings.Contains(name, "dnsmasq") {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":"x"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + name})
+		case http.MethodDelete:
+			atomic.AddInt64(&deleteCount, 1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+	_, err := Spawn(context.Background(), c, SpawnInputs{
+		SpawnID: "x", NetworkID: "n", RunnerImage: "r@sha256:r", ProxyImage: "p@sha256:p",
+	})
+	require.Error(t, err)
+	require.GreaterOrEqual(t, atomic.LoadInt64(&deleteCount), int64(2))
+}
+
 func TestSpawn_StartFails_RollsBack(t *testing.T) {
 	var deleteCount int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -67,3 +67,28 @@ func TestSystemClockAndUUID(t *testing.T) {
 	require.NotEmpty(t, SystemClock())
 	require.Len(t, SystemUUID(), 36) // canonical UUID string length
 }
+
+// erroringWriter always returns an error on Write — covers emit.go's
+// e.w.Write error branch.
+type erroringWriter struct{}
+
+func (erroringWriter) Write(_ []byte) (int, error) {
+	return 0, errBoom
+}
+
+var errBoom = simulatedErr{}
+
+type simulatedErr struct{}
+
+func (simulatedErr) Error() string { return "simulated write failure" }
+
+func TestEmitter_WriteError_PropagatesAsError(t *testing.T) {
+	em := NewEmitter(erroringWriter{}, FixedClock("t"), FixedUUID("u"))
+	err := em.Emit(Event{
+		EventSubType: EventPollTick,
+		EventType:    EventTypeActivity,
+		EventDetails: EventDetails{Summary: "x", Severity: 6, Result: ResultSuccess},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cornerstone: write")
+}

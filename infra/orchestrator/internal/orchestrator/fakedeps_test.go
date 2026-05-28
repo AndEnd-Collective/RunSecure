@@ -148,6 +148,7 @@ type fakeDockerClient struct {
 	forceDeleted     map[string]bool
 	netCreated       int
 	netDeleted       int
+	netCreateErr     error // injected error for CreateNetwork
 	inspectExitCode  int
 	inspectExitDelay time.Duration // simulate "never exits"
 	inspectAfter     time.Time     // exited after this wall-clock time
@@ -199,6 +200,9 @@ func (f *fakeDockerClient) DeleteContainer(ctx context.Context, id string, force
 func (f *fakeDockerClient) CreateNetwork(ctx context.Context, r docker.CreateNetworkRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.netCreateErr != nil {
+		return "", f.netCreateErr
+	}
 	f.netCreated++
 	return "net-" + r.Name, nil
 }
@@ -251,9 +255,15 @@ type fakeBucket struct{ taken atomic.Int64 }
 
 func (f *fakeBucket) TryTake() bool { f.taken.Add(1); return true }
 
-type fakeEgress struct{ tempBase string }
+type fakeEgress struct {
+	tempBase string
+	renderErr error
+}
 
 func (f *fakeEgress) Render(spawnID string, r *runneryml.Runner) (string, error) {
+	if f.renderErr != nil {
+		return "", f.renderErr
+	}
 	dir := filepath.Join(f.tempBase, spawnID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -277,11 +287,12 @@ type spawnDeps struct {
 	scopeName   string
 	globalCap   int
 	repoCap     int
-	runnerYML   *runneryml.Runner
-	imageDigest string
-	proxyDigest string
-	breakers    *fakeBreakers
-	bucket      TokenBucket
+	runnerYML    *runneryml.Runner
+	runnerYMLErr error
+	imageDigest  string
+	proxyDigest  string
+	breakers     *fakeBreakers
+	bucket       TokenBucket
 }
 
 func (d *spawnDeps) GitHub() *github.Client       { return d.gh }
@@ -290,6 +301,9 @@ func (d *spawnDeps) Emit() *cornerstone.Emitter   { return d.em }
 func (d *spawnDeps) Clock() ClockLike             { return d.clk }
 func (d *spawnDeps) Egress() EgressGenerator      { return d.eg }
 func (d *spawnDeps) RunnerYML(_ string) (*RunnerYMLSnapshot, error) {
+	if d.runnerYMLErr != nil {
+		return nil, d.runnerYMLErr
+	}
 	return &RunnerYMLSnapshot{YML: d.runnerYML, ImageDigest: d.imageDigest}, nil
 }
 func (d *spawnDeps) State() StateLike              { return d.st }

@@ -80,15 +80,39 @@ func TestRender_MkdirFails_Errors(t *testing.T) {
 // the per-spawn directory read-only after mkdir but before the writes.
 func TestRender_WriteFails_Errors(t *testing.T) {
 	dir := t.TempDir()
-	// Make the base dir read-only AFTER one successful Render call so the
-	// second one tries to write into a non-writable existing dir.
 	g := NewFSGenerator(dir)
-
-	// Pre-create the spawn dir as read-only.
 	spawnDir := filepath.Join(dir, "ro-spawn")
 	require.NoError(t, os.MkdirAll(spawnDir, 0o555))
 	t.Cleanup(func() { _ = os.Chmod(spawnDir, 0o755) })
 
 	_, err := g.Render("ro-spawn", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x.com"}}}, security.Defaults("strict"))
+	require.Error(t, err)
+}
+
+// Covers generate.go:43 — haproxy.cfg write fails (squid.conf already written).
+func TestRender_HAProxyWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	spawnDir := filepath.Join(dir, "spawn-1")
+	require.NoError(t, os.MkdirAll(spawnDir, 0o755))
+	// Write squid.conf successfully; then put a directory at haproxy.cfg so
+	// the WriteFile fails with "is a directory".
+	require.NoError(t, os.WriteFile(filepath.Join(spawnDir, "squid.conf"), []byte("ok"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(spawnDir, "haproxy.cfg"), 0o755))
+
+	_, err := g.Render("spawn-1", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x"}}}, security.Defaults("strict"))
+	require.Error(t, err)
+}
+
+// Covers generate.go:46 — dnsmasq.conf write fails.
+func TestRender_DNSMasqWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	spawnDir := filepath.Join(dir, "spawn-2")
+	require.NoError(t, os.MkdirAll(spawnDir, 0o755))
+	// Pre-create dnsmasq.conf as a directory.
+	require.NoError(t, os.MkdirAll(filepath.Join(spawnDir, "dnsmasq.conf"), 0o755))
+
+	_, err := g.Render("spawn-2", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x"}}}, security.Defaults("strict"))
 	require.Error(t, err)
 }

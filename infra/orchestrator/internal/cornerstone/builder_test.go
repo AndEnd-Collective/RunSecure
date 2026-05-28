@@ -36,6 +36,23 @@ func TestBuilder_SpawnStarted_HasContainerContext(t *testing.T) {
 	require.Contains(t, tags, "repo:NaorPenso/datacentric")
 }
 
+// Covers builder.go:133 — ExtraErrorData merging into error.data.
+func TestBuilder_SpawnFailed_WithExtraErrorData(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, FixedClock("t"), FixedUUID("u"))
+	require.NoError(t, em.EmitSpawnFailed(SpawnFailedFields{
+		Scope: "s", Repo: "o/r", SpawnID: "i",
+		FailureReason: "boom",
+		Detail:        "primary detail",
+		ExtraErrorData: map[string]any{
+			"http_status": 500,
+			"endpoint":    "queue",
+		},
+	}))
+	require.Contains(t, buf.String(), `"http_status":500`)
+	require.Contains(t, buf.String(), `"endpoint":"queue"`)
+}
+
 func TestBuilder_SpawnFailed_CarriesFailureReason(t *testing.T) {
 	var buf bytes.Buffer
 	em := NewEmitter(&buf, FixedClock("t"), FixedUUID("u"))

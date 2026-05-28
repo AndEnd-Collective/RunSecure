@@ -79,3 +79,14 @@ func TestQueuedJobs_MalformedResponse(t *testing.T) {
 	_, err := c.QueuedJobs(context.Background(), "o/r")
 	require.Error(t, err)
 }
+
+// Cover the Do() network-error branch (server closed or network down).
+func TestQueuedJobs_NetworkErrorBubbles(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://127.0.0.1:1", patFile)
+	require.NoError(t, err)
+	_, err = c.QueuedJobs(context.Background(), "o/r")
+	require.Error(t, err)
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -120,5 +122,24 @@ func TestDeleteRunner_UnexpectedStatus(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
+	require.Error(t, c.DeleteRunner(context.Background(), "o/r", 42))
+}
+
+func TestJIT_NetworkError(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://127.0.0.1:1", patFile)
+	require.NoError(t, err)
+	_, err = c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
+	require.Error(t, err)
+}
+
+func TestDeleteRunner_NetworkError(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+	c, err := NewClient("http://127.0.0.1:1", patFile)
+	require.NoError(t, err)
 	require.Error(t, c.DeleteRunner(context.Background(), "o/r", 42))
 }

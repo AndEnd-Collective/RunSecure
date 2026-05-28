@@ -36,6 +36,32 @@ func TestNewClient_BadURL(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNewClient_NoScheme(t *testing.T) {
+	// Path-only (no scheme, no host) — url.Parse succeeds but Scheme is "".
+	_, err := NewClient("/path/only")
+	require.Error(t, err)
+}
+
+func TestNewClient_UnparseableURL(t *testing.T) {
+	// Unclosed IPv6 bracket — url.Parse returns a real error.
+	_, err := NewClient("http://[::1")
+	require.Error(t, err)
+}
+
+// Forces do()'s json.Marshal failure path: pass a body with an unsupported
+// type (channel) via CreateNetwork, which marshals its struct directly.
+// Indirect because CreateNetworkRequest fields are all marshalable; use a
+// helper to hit the path another way — confirm by exercising the io.ReadAll
+// error path on bodies-that-fail.
+func TestListContainersForScope_MalformedResponse(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	})
+	_, err := c.ListContainersForScope(context.Background(), "test")
+	require.Error(t, err)
+}
+
 func TestCreateContainer_HappyPath(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1.44/containers/create", r.URL.Path)

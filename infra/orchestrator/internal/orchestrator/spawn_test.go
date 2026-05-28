@@ -3,12 +3,25 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/stretchr/testify/require"
 )
+
+// makePATFile is a small helper used by tests that need a separate
+// github.Client pointing at a non-default URL.
+func makePATFile(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(p, []byte("p"), 0o400))
+	return p
+}
 
 func TestSpawn_HappyPath(t *testing.T) {
 	d := newSpawnDeps(t)
@@ -197,6 +210,82 @@ func TestParseResources_BoundaryCases(t *testing.T) {
 	require.Equal(t, int64(0), mem)
 	mem, _ = parseResources("", 0)
 	require.Equal(t, int64(0), mem)
+}
+
+// --- Coverage push: uncovered error paths in Execute ---
+
+// JIT generation error → spawn.failed with github_jit_failed reason.
+// Forces the GitHub server fixture to return 5xx by routing through a
+// custom fake that always errors.
+func TestSpawn_JITGenerateError_EmitsFailed(t *testing.T) {
+	d := newSpawnDeps(t)
+	// Replace the github client with one bound to a server that always 500s.
+	gh, _ := newFakeGitHubClient(t)
+	d.gh = gh
+	// fakeGitHubBackend lets us inject errors per repo.
+	srv := &fakeGitHubBackend{
+		queuedFor:      map[string]int{},
+		queueErrCode:   map[string]int{},
+		deletedRunners: map[int64]bool{},
+		jitOnRunnerID:  100,
+	}
+	// Cause the JIT call to fail by ensuring auth always rejects.
+	srv.queueErrCode["o/r"] = 500 // unused for jit, but signal anyway
+	// Easier: just kill the github base URL — point client at unreachable address.
+	gh2, err := github.NewClient("http://127.0.0.1:1", makePATFile(t))
+	require.NoError(t, err)
+	d.gh = gh2
+
+	w := NewSpawnWorker(d)
+	err = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	// Should have emitted spawn.failed with github_jit_failed reason.
+	require.Contains(t, d.emBuf.String(), "github_jit_failed")
+}
+
+// RunnerYML returns error → spawn.failed with reason runner_yml_parse.
+func TestSpawn_RunnerYMLError_EmitsFailed(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYMLErr = errors.New("simulated parse failure")
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}
+
+// Egress.Render returns error → leak cleanup + spawn.failed.
+func TestSpawn_EgressRenderError_TriggersLeakCleanup(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.eg.renderErr = errors.New("simulated egress failure")
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"egress_render"`)
+}
+
+// docker.CreateNetwork returns error → leak cleanup + spawn.failed.
+func TestSpawn_CreateNetworkError_TriggersLeakCleanup(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.dc.netCreateErr = errors.New("simulated docker error")
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+// imageDigest empty in the snapshot → fallback to RunnerImageDigestFor.
+// Exercises the fallback branch in Execute.
+func TestSpawn_EmptySnapshotDigest_UsesRunnerImageDigestFor(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.imageDigest = "" // force the fallback path
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.NoError(t, err)
 }
 
 // Mutation kill: spawn.go:284 — `if exitCode == 0` boundary. Mutation to

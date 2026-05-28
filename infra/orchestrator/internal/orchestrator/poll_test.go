@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,10 +18,11 @@ type pollDeps struct {
 	intents       chan SpawnIntent
 	pollTickCount atomic.Int64
 	rl            struct {
-		paused    atomic.Bool
-		remaining int
-		limit     int
-		reset     string
+		paused      atomic.Bool
+		stickPaused atomic.Bool // when set, MaybeClearRateLimit never clears
+		remaining   int
+		limit       int
+		reset       string
 	}
 }
 
@@ -45,6 +47,11 @@ func (d *pollDeps) RecordRateLimit(_ string, _ github.RateLimit) {}
 func (d *pollDeps) MarkRateLimited(_ string)                { d.rl.paused.Store(true) }
 func (d *pollDeps) IsRateLimited(_ string) bool             { return d.rl.paused.Load() }
 func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
+	// Honour rl.stickPaused: when set, never clear (so the "still paused;
+	// skip this tick" return in tick() is exercised).
+	if d.rl.stickPaused.Load() {
+		return false
+	}
 	if d.rl.paused.Load() {
 		d.rl.paused.Store(false)
 		return true
@@ -296,6 +303,60 @@ func TestPoll_AvailNegativeClampedToZero(t *testing.T) {
 
 // Mutation kill: poll.go:107 — `if toSpawn > avail`. Asserts toSpawn is
 // clamped to avail when queued exceeds available capacity.
+// Run() returns immediately if context is already cancelled before the
+// loop runs (covers poll.go:43-44).
+func TestPoll_Run_ReturnsImmediatelyOnCancelledCtx(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 0
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	p := NewPoll(scope, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	done := make(chan struct{})
+	go func() { p.Run(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return on cancelled context")
+	}
+}
+
+// Rate-limit pause persists across multiple ticks (covers the "still
+// paused; skip this tick" return at poll.go:68-70).
+func TestPoll_RateLimitedTickReturnsEarly(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queueErrCode["o/r"] = 429
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	p := NewPoll(scope, d)
+	// First tick: rate-limited, marks scope paused.
+	p.tick(context.Background())
+	require.True(t, d.IsRateLimited("s"))
+
+	// Lock the pause so MaybeClearRateLimit returns false on the next tick.
+	d.rl.stickPaused.Store(true)
+	initialEvents := strings.Count(d.emBuf.String(), `"event.sub.type"`)
+	p.tick(context.Background())
+	// Tick should have returned early after RecordPollTick — no additional
+	// Cornerstone events should fire (no poll.tick emission, no queue calls).
+	require.Equal(t, initialEvents, strings.Count(d.emBuf.String(), `"event.sub.type"`))
+}
+
 func TestPoll_ToSpawnClampedToAvail(t *testing.T) {
 	d := newPollDeps(t)
 	gh, srv := newFakeGitHubClient(t)
