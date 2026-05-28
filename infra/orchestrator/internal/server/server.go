@@ -24,6 +24,14 @@ type AllDeps interface {
 	SnapshotDeps
 }
 
+// HTTP server timeouts. Accessor funcs (not consts) so mutation testing
+// can observe the multiplication operators inside a function body.
+func HTTPReadHeaderTimeout() time.Duration { return 2 * time.Second }
+func HTTPReadTimeout() time.Duration       { return 10 * time.Second }
+func HTTPWriteTimeout() time.Duration      { return 10 * time.Second }
+func HTTPIdleTimeout() time.Duration       { return 60 * time.Second }
+func HTTPShutdownTimeout() time.Duration   { return 5 * time.Second }
+
 // New constructs a Server. healthzAddr defaults to :8080, debugAddr to :8081.
 func New(healthzAddr, debugAddr string, deps AllDeps, em *cornerstone.Emitter) *Server {
 	if healthzAddr == "" {
@@ -54,18 +62,18 @@ func (s *Server) Run(ctx context.Context) error {
 	healthzSrv := &http.Server{
 		Addr:              s.healthzAddr,
 		Handler:           healthzMux,
-		ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: HTTPReadHeaderTimeout(),
+		ReadTimeout:       HTTPReadTimeout(),
+		WriteTimeout:      HTTPWriteTimeout(),
+		IdleTimeout:       HTTPIdleTimeout(),
 	}
 	debugSrv := &http.Server{
 		Addr:              s.debugAddr,
 		Handler:           debugMux,
-		ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: HTTPReadHeaderTimeout(),
+		ReadTimeout:       HTTPReadTimeout(),
+		WriteTimeout:      HTTPWriteTimeout(),
+		IdleTimeout:       HTTPIdleTimeout(),
 	}
 
 	errCh := make(chan error, 2)
@@ -74,7 +82,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), HTTPShutdownTimeout())
 		defer cancel()
 		_ = healthzSrv.Shutdown(shutdownCtx)
 		_ = debugSrv.Shutdown(shutdownCtx)

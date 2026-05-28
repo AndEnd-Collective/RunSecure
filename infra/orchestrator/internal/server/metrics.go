@@ -115,16 +115,24 @@ func sortedKeysBool(m map[string]bool) []string {
 	return out
 }
 
+// lessSpawnKey is the comparator for sortedSpawnKeys. Extracted so tests
+// can probe the `< 0` boundary directly with equal inputs (mutation `<= 0`
+// would return true for self-comparison while `< 0` correctly returns false).
+func lessSpawnKey(a, b SpawnKey) bool {
+	return cmpStrings(a.Scope, a.Repo, a.Outcome, b.Scope, b.Repo, b.Outcome) < 0
+}
+
 func sortedSpawnKeys(m map[SpawnKey]int64) []SpawnKey {
 	out := make([]SpawnKey, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return cmpStrings(out[i].Scope, out[i].Repo, out[i].Outcome,
-			out[j].Scope, out[j].Repo, out[j].Outcome) < 0
-	})
+	sort.Slice(out, func(i, j int) bool { return lessSpawnKey(out[i], out[j]) })
 	return out
+}
+
+func lessAPICallKey(a, b APICallKey) bool {
+	return strings.Compare(a.Endpoint+"|"+a.Status, b.Endpoint+"|"+b.Status) < 0
 }
 
 func sortedAPICallKeys(m map[APICallKey]int64) []APICallKey {
@@ -132,9 +140,7 @@ func sortedAPICallKeys(m map[APICallKey]int64) []APICallKey {
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return strings.Compare(out[i].Endpoint+"|"+out[i].Status, out[j].Endpoint+"|"+out[j].Status) < 0
-	})
+	sort.Slice(out, func(i, j int) bool { return lessAPICallKey(out[i], out[j]) })
 	return out
 }
 

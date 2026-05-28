@@ -85,6 +85,19 @@ func TestApplyOverrides_WildcardElementTypeMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "must be strings")
 }
 
+// Mutation kill: overrides.go:34 — `if len(ents) > 0`. Empty wildcard
+// list must NOT flip AllowWildcards=true.
+func TestApplyOverrides_EmptyWildcardListDoesNotSetFlag(t *testing.T) {
+	merged, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_wildcards"},
+		map[string]any{"allow_wildcards": []any{}},
+	)
+	require.NoError(t, err)
+	require.False(t, merged.AllowWildcards,
+		"empty wildcard list must not flip AllowWildcards=true")
+	require.Empty(t, merged.WildcardEntries)
+}
+
 // Mutation kill: overrides.go:50 — `if len(base.DoHProviders) > 0`.
 // Without the >0 check, setting an empty DoH list would still flip
 // AllowDoH=true. With it, only non-empty lists do.

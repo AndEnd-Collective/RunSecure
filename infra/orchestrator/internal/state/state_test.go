@@ -35,6 +35,17 @@ func TestReleaseSemaphores_Floor(t *testing.T) {
 	require.Equal(t, 0, s.InFlight("o/r"))
 }
 
+// Mutation kill: state.go:105 — `if r.InFlight > 0` clamp on Decrement.
+// Mutation `>=` would let InFlight go negative. The Floor check above passes
+// for ReleaseSemaphores but doesn't directly test DecrementInFlight.
+func TestDecrementInFlight_FloorAtZero(t *testing.T) {
+	s := New()
+	s.DecrementInFlight("o/r") // never incremented; mutated >= would let it go negative
+	require.Equal(t, 0, s.InFlight("o/r"))
+	s.DecrementInFlight("o/r")
+	require.Equal(t, 0, s.InFlight("o/r"))
+}
+
 func TestIncrementDecrement(t *testing.T) {
 	s := New()
 	s.IncrementInFlight("o/r")

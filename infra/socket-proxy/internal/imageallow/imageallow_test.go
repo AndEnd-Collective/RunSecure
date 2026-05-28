@@ -38,6 +38,24 @@ func TestLoad_RejectsTagOnlyEntries(t *testing.T) {
 	require.ErrorContains(t, err, "@sha256:")
 }
 
+// Mutation kill: imageallow.go:33 — `lineNo++`. The bad-line line number
+// must appear correctly in the error. Mutating to `lineNo--` would
+// produce ":-1:" or similar; mutating to no-op would always report ":0:".
+func TestLoad_ErrorReportsCorrectLineNumber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allowed.txt")
+	contents := []byte(
+		"# header comment\n" +
+			"ghcr.io/ok@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+			"\n" +
+			"ghcr.io/bad:latest\n",
+	)
+	require.NoError(t, os.WriteFile(path, contents, 0o644))
+	_, err := Load(path)
+	require.ErrorContains(t, err, ":4:",
+		"bad entry is on line 4; lineNo must increment per scanned line")
+}
+
 func TestLoad_MissingFileErrors(t *testing.T) {
 	_, err := Load("/nonexistent/path")
 	require.Error(t, err)

@@ -105,6 +105,57 @@ func TestRender_HAProxyWriteFails(t *testing.T) {
 }
 
 // Covers generate.go:46 — dnsmasq.conf write fails.
+// Mutation kills for squid.go:29 — the `*.foo` suffix detection.
+// The full line-shape check (with the `dstdomain ` prefix) discriminates
+// "trimmed to suffix" from "preserved as literal" — a bare substring check
+// would pass under either output for inputs like "*.amazonaws.com".
+func TestRenderSquid_WildcardEdgeCases(t *testing.T) {
+	r := &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"api.example.com"}}}
+	policy := security.Defaults("standard") // allows wildcards
+	policy.WildcardEntries = []string{
+		"*.amazonaws.com", // expected to be TRIMMED → "dstdomain .amazonaws.com"
+		"*.",              // 2 chars exactly — must NOT be trimmed (>2 boundary)
+		"foo.com",         // non-wildcard — must NOT be trimmed (w[0] != '*')
+		"*foo",            // missing '.' after '*' — must NOT be trimmed (w[1] != '.')
+	}
+	out := string(RenderSquid(r, policy))
+
+	// Trimmed case (original behavior): line ends with " .amazonaws.com\n"
+	// — note the leading SPACE+DOT, distinguishing from "*.amazonaws.com".
+	require.Contains(t, out, " .amazonaws.com\n",
+		"3-char+ wildcard with .: must emit suffix-trimmed form")
+	require.NotContains(t, out, " *.amazonaws.com\n",
+		"3-char+ wildcard MUST be trimmed (no literal '*.' in output)")
+
+	// Preserved cases: each wildcard appears as a literal in its own ACL line.
+	require.Contains(t, out, " *.\n", "2-char '*.' preserved as literal")
+	require.Contains(t, out, " foo.com\n", "non-wildcard preserved as literal")
+	require.Contains(t, out, " *foo\n", "wildcard without '.' preserved as literal")
+}
+
+// Mutation kill for dnsmasq.go:31 — same wildcard parsing in dnsmasq render.
+func TestRenderDNSMasq_WildcardEdgeCases(t *testing.T) {
+	r := &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"api.example.com"}}}
+	policy := security.Defaults("standard")
+	policy.AllowDNSSuffixMatch = true
+	policy.WildcardEntries = []string{
+		"*.amazonaws.com",
+		"*.",
+		"foo.com",
+		"*foo",
+	}
+	out := string(RenderDNSMasq(r, policy))
+	// Only "*.amazonaws.com" should produce a server=/amazonaws.com/ line.
+	require.Contains(t, out, "server=/amazonaws.com/",
+		"wildcard *.amazonaws.com → suffix-stripped to amazonaws.com")
+	require.NotContains(t, out, "server=//",
+		"2-char '*.' must NOT produce an empty-suffix server line")
+	require.NotContains(t, out, "server=/foo.com/",
+		"non-wildcard must NOT produce a server line")
+	require.NotContains(t, out, "server=/foo/",
+		"'*foo' (no dot) must NOT produce a server line")
+}
+
 func TestRender_DNSMasqWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	g := NewFSGenerator(dir)

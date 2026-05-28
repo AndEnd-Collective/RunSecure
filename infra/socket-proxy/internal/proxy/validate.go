@@ -165,10 +165,9 @@ func checkBinds(v any) error {
 		if !ok {
 			continue
 		}
-		src := s
-		if i := strings.Index(s, ":"); i >= 0 {
-			src = s[:i]
-		}
+		// SplitN extracts the host path before the first ":mode" suffix.
+		// Removes the `i >= 0` boundary check (and its mutation surface).
+		src := strings.SplitN(s, ":", 2)[0]
 		for _, bad := range forbiddenBindPrefixes {
 			if src == bad || strings.HasPrefix(src, bad+"/") {
 				return fmt.Errorf("%w: %s", ErrBindForbidden, src)

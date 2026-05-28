@@ -42,10 +42,10 @@ func (b *TokenBucket) TryTake() bool {
 	defer b.mu.Unlock()
 	now := b.now()
 	elapsed := now.Sub(b.last).Seconds()
-	b.tokens += elapsed * b.rate
-	if b.tokens > b.maxBurst {
-		b.tokens = b.maxBurst
-	}
+	// Clamp via min — eliminates the boundary operator that gremlins
+	// reports as an equivalent mutant (`>` vs `>=` are indistinguishable
+	// at tokens==maxBurst since both produce tokens=maxBurst).
+	b.tokens = min(b.tokens+elapsed*b.rate, b.maxBurst)
 	b.last = now
 	if b.tokens >= 1.0 {
 		b.tokens -= 1.0

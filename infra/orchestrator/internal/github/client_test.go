@@ -85,6 +85,12 @@ func TestClient_PostBodyMarshaled(t *testing.T) {
 	require.Contains(t, string(gotBody), `"k":"v"`)
 }
 
+// Mutation kill: client.go HTTPClientTimeout — `30 * time.Second`.
+// Asserting the exact value kills arithmetic mutations on the operands.
+func TestHTTPClientTimeout(t *testing.T) {
+	require.Equal(t, 30*time.Second, HTTPClientTimeout())
+}
+
 func TestClient_MissingPATFile_Errors(t *testing.T) {
 	_, err := NewClient("http://x", "/nonexistent/pat")
 	require.Error(t, err)
@@ -109,6 +115,27 @@ func TestClient_Do_BadURL(t *testing.T) {
 	require.NoError(t, err)
 	_, err = c.Do(context.Background(), "GET", "/x", nil)
 	require.Error(t, err)
+}
+
+// Mutation kill: client.go:101 — `if bodyReader != nil { Content-Type }`.
+// Mutation `==` would set Content-Type on GET requests that have no body.
+func TestClient_GET_NoContentType(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("p"), 0o400))
+
+	var gotCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, patFile)
+	require.NoError(t, err)
+	resp, err := c.Do(context.Background(), http.MethodGet, "/x", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Empty(t, gotCT, "GET with nil body must not set Content-Type")
 }
 
 func TestClient_Reload_StatFails(t *testing.T) {

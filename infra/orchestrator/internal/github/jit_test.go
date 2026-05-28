@@ -38,6 +38,65 @@ func TestGenerateJITConfig_HappyPath(t *testing.T) {
 	require.Equal(t, "base64-blob", resp.EncodedJITConfig)
 }
 
+// Mutation kill: jit.go:40 — `if req.RunnerGroupID == 0 { = 1 }`.
+// Mutation `!= 0` would overwrite a caller-provided non-zero RunnerGroupID.
+func TestGenerateJITConfig_PreservesCallerRunnerGroupID(t *testing.T) {
+	var gotGroupID float64
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotGroupID, _ = body["runner_group_id"].(float64)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runner": map[string]any{"id": 1},
+			"encoded_jit_config": "x",
+		})
+	})
+	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
+		Name: "n", Labels: []string{"l"}, RunnerGroupID: 7,
+	})
+	require.NoError(t, err)
+	require.Equal(t, float64(7), gotGroupID,
+		"caller-provided RunnerGroupID must be preserved (not overwritten)")
+}
+
+// Mutation kill: jit.go:43 — `if req.WorkFolder == "" { = "_work" }`.
+func TestGenerateJITConfig_PreservesCallerWorkFolder(t *testing.T) {
+	var gotWF string
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotWF, _ = body["work_folder"].(string)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runner": map[string]any{"id": 1},
+			"encoded_jit_config": "x",
+		})
+	})
+	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
+		Name: "n", Labels: []string{"l"}, WorkFolder: "_custom",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "_custom", gotWF,
+		"caller-provided WorkFolder must be preserved")
+}
+
+// Mutation kill: jit.go:59 — `StatusCode != StatusCreated && != StatusOK`.
+// The && right-clause; mutation `==` would reject 200 (and accept everything
+// else). Test that a 200 response is accepted as success.
+func TestGenerateJITConfig_200StatusAccepted(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runner": map[string]any{"id": 99},
+			"encoded_jit_config": "x",
+		})
+	})
+	resp, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
+	require.NoError(t, err)
+	require.Equal(t, int64(99), resp.RunnerID)
+}
+
 func TestGenerateJITConfig_LabelMismatch_Rejected(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)

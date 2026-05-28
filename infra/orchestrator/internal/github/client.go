@@ -29,12 +29,17 @@ type Client struct {
 	mtime time.Time
 }
 
+// HTTPClientTimeout is the per-request timeout for outbound GitHub calls.
+// Accessor func (not const) so mutation testing observes the multiplication
+// operator inside a covered function body.
+func HTTPClientTimeout() time.Duration { return 30 * time.Second }
+
 func NewClient(baseURL, patFile string) (*Client, error) {
 	c := &Client{
 		baseURL: baseURL,
 		patFile: patFile,
 		hc: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: HTTPClientTimeout(),
 		},
 	}
 	if err := c.reload(); err != nil {

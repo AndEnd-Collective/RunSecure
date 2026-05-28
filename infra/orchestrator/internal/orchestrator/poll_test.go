@@ -264,7 +264,9 @@ func TestPoll_RespectsRepoCapMinusInFlight(t *testing.T) {
 	require.Len(t, d.intents, 3, "must spawn exactly repo_cap - in_flight = 3")
 }
 
-// Mutation kill: poll.go:100 — global cap subtraction.
+// Mutation kill: poll.go global-cap subtraction (`GlobalMaxRunners -
+// GlobalInFlight`). GlobalInFlight must be NON-ZERO for the subtraction
+// to be observable — otherwise `+` and `-` are indistinguishable.
 func TestPoll_GlobalCapBindsBeforeRepoCap(t *testing.T) {
 	d := newPollDeps(t)
 	gh, srv := newFakeGitHubClient(t)
@@ -273,12 +275,18 @@ func TestPoll_GlobalCapBindsBeforeRepoCap(t *testing.T) {
 	srv.queuedFor["o/r"] = 10
 	srv.mu.Unlock()
 
+	// Another repo already has 2 in-flight, so GlobalInFlight()=2.
+	d.st.IncrementInFlight("other/repo")
+	d.st.IncrementInFlight("other/repo")
+
 	scope := ScopeRef{
-		Name: "s", GlobalMaxRunners: 2, PollIntervalSec: 5,
+		Name: "s", GlobalMaxRunners: 4, PollIntervalSec: 5,
 		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 10}},
 	}
 	NewPoll(scope, d).tick(context.Background())
-	require.Len(t, d.intents, 2, "global cap (2) must bind below repo cap (10)")
+	require.Len(t, d.intents, 2,
+		"global cap minus in-flight (4-2=2) must bind below repo cap (10); "+
+			"mutating `-` → `+` yields 6 spawns")
 }
 
 // Mutation kill: poll.go:103 — `if avail < 0 { avail = 0 }`.
@@ -370,6 +378,14 @@ func TestPoll_ToSpawnClampedToAvail(t *testing.T) {
 	}
 	NewPoll(scope, d).tick(context.Background())
 	require.Len(t, d.intents, 3, "toSpawn must clamp to min(queued, avail)=3")
+}
+
+// Mutation kill: poll.go pollIntervalDuration — `intervalSec * time.Second`.
+// Exact-value assert kills arithmetic mutations on the multiplication.
+func TestPollIntervalDuration(t *testing.T) {
+	require.Equal(t, 15*time.Second, pollIntervalDuration(15))
+	require.Equal(t, 0*time.Second, pollIntervalDuration(0))
+	require.Equal(t, 60*time.Second, pollIntervalDuration(60))
 }
 
 func TestPoll_PollTickEventFiresEveryCycle(t *testing.T) {

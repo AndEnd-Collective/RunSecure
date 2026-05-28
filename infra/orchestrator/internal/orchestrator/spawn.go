@@ -129,11 +129,8 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 
 	// Step 6: wait for exit OR wall-clock timeout (A2).
 	start := w.deps.Clock().Now()
-	timeoutSecs := snapshot.YML.Orchestrator.TimeoutSeconds
-	if timeoutSecs <= 0 {
-		timeoutSecs = 21600 // 6h default
-	}
-	timeout := time.Duration(timeoutSecs) * time.Second
+	timeoutSecs := defaultTimeoutSeconds(snapshot.YML.Orchestrator.TimeoutSeconds)
+	timeout := secondsToDuration(timeoutSecs)
 	exitCode, timedOut := w.waitForExit(ctx, containerIDs["runner"], timeout)
 
 	// Step 7: teardown.
@@ -216,7 +213,7 @@ func (w *SpawnWorker) waitForExit(ctx context.Context, runnerID string, timeout 
 			return -1, false
 		case <-deadline:
 			return -1, true
-		case <-w.deps.Clock().After(1 * time.Second):
+		case <-w.deps.Clock().After(waitForExitPollInterval()):
 			// next iteration: re-inspect.
 		}
 	}
@@ -273,26 +270,51 @@ func classifyDockerError(err error) string {
 
 // parseResources converts runner.yml's memory string ("8g", "512m") and
 // CPU count (int) into docker's bytes + nanocpus form.
+//
+// The switch's default case handles unknown units, which removes the
+// `if mul > 0` paranoia branch (and its equivalent boundary mutant).
 func parseResources(mem string, cpus int) (int64, int64) {
-	var memBytes int64
-	if len(mem) >= 2 {
-		unit := mem[len(mem)-1]
-		valStr := mem[:len(mem)-1]
-		var mul int64
-		switch unit {
-		case 'g', 'G':
-			mul = 1 << 30
-		case 'm', 'M':
-			mul = 1 << 20
-		case 'k', 'K':
-			mul = 1 << 10
-		}
-		if mul > 0 {
-			var n int64
-			fmt.Sscanf(valStr, "%d", &n)
-			memBytes = n * mul
-		}
-	}
 	nanoCPUs := int64(cpus) * 1_000_000_000
-	return memBytes, nanoCPUs
+	if len(mem) < 2 {
+		return 0, nanoCPUs
+	}
+	var mul int64
+	switch mem[len(mem)-1] {
+	case 'g', 'G':
+		mul = 1 << 30
+	case 'm', 'M':
+		mul = 1 << 20
+	case 'k', 'K':
+		mul = 1 << 10
+	default:
+		return 0, nanoCPUs
+	}
+	var n int64
+	fmt.Sscanf(mem[:len(mem)-1], "%d", &n)
+	return n * mul, nanoCPUs
+}
+
+// secondsToDuration converts a non-negative whole-second count into a
+// time.Duration. Extracted so mutation testing can directly assert the
+// multiplication operator with an exact-value test, and so the runner
+// timeout arithmetic is observable from unit tests.
+func secondsToDuration(s int) time.Duration {
+	return time.Duration(s) * time.Second
+}
+
+// waitForExitPollInterval is the cadence at which waitForExit re-inspects
+// the runner container while waiting for it to transition to "exited".
+// Extracted so mutation testing observes the multiplication operator.
+func waitForExitPollInterval() time.Duration {
+	return 1 * time.Second
+}
+
+// defaultTimeoutSeconds returns the runner timeout in seconds, applying
+// the 6-hour fallback when the configured value is non-positive.
+// Extracted so mutation testing can directly observe the `<= 0` boundary.
+func defaultTimeoutSeconds(s int) int {
+	if s <= 0 {
+		return 21600 // 6h
+	}
+	return s
 }

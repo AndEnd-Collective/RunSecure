@@ -32,20 +32,19 @@ func Reconcile(s *State, listed []docker.Container) (totalDelta int, perRepo []P
 		seen[repo] = true
 		got := dockerCounts[repo]
 		mem := s.InFlight(repo)
-		if got != mem {
-			delta := got - mem
-			perRepo = append(perRepo, PerRepoDelta{Repo: repo, Delta: delta})
-			totalDelta += delta
-			// Apply the correction.
-			if delta > 0 {
-				for i := 0; i < delta; i++ {
-					s.IncrementInFlight(repo)
-				}
-			} else {
-				for i := 0; i < -delta; i++ {
-					s.DecrementInFlight(repo)
-				}
-			}
+		if got == mem {
+			continue
+		}
+		delta := got - mem
+		perRepo = append(perRepo, PerRepoDelta{Repo: repo, Delta: delta})
+		totalDelta += delta
+		// Apply the correction. The outer != guard makes delta non-zero,
+		// so this is one of two branches: pure-positive or pure-negative.
+		for i := 0; i < delta; i++ {
+			s.IncrementInFlight(repo)
+		}
+		for i := 0; i < -delta; i++ {
+			s.DecrementInFlight(repo)
 		}
 	}
 	// Repos in docker but not in memory.

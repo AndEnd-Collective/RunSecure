@@ -33,6 +33,23 @@ func TestReconcile_OverCount_Corrects(t *testing.T) {
 	require.Equal(t, 1, s.InFlight("o/r"))
 }
 
+// Cover drift.go:41 — `for i := 0; i < delta; i++ { Increment }` when
+// a repo already exists in memory but docker has MORE containers than
+// memory recorded. (TestReconcile_UnderCount_AddsMissing hits the other
+// loop where the repo is unknown to memory.)
+func TestReconcile_PositiveDelta_IncrementsForKnownRepo(t *testing.T) {
+	s := New()
+	s.IncrementInFlight("o/r") // memory says 1
+	listed := []docker.Container{
+		{Labels: map[string]string{"runsecure.role": "runner", "runsecure.repo": "o/r"}},
+		{Labels: map[string]string{"runsecure.role": "runner", "runsecure.repo": "o/r"}},
+		{Labels: map[string]string{"runsecure.role": "runner", "runsecure.repo": "o/r"}},
+	}
+	total, _ := Reconcile(s, listed)
+	require.Equal(t, 2, total) // delta = 3 - 1 = 2
+	require.Equal(t, 3, s.InFlight("o/r"))
+}
+
 func TestReconcile_UnderCount_AddsMissing(t *testing.T) {
 	s := New() // memory empty
 	listed := []docker.Container{

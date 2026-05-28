@@ -50,6 +50,19 @@ func TestValidate_PollIntervalFloor(t *testing.T) {
 	require.ErrorContains(t, s.Validate(), "poll_interval_seconds")
 }
 
+// Mutation kill: scope_validate.go:18 — `< 5` boundary. Mutation `<= 5`
+// would also reject 5; mutation `< 4` would accept 4. Cover both ends.
+func TestValidate_PollIntervalExactlyFive_Accepted(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.PollIntervalSeconds = 5 })
+	require.NoError(t, s.Validate(),
+		"poll_interval_seconds=5 is the lower bound and must be accepted")
+}
+
+func TestValidate_PollIntervalFour_Rejected(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.PollIntervalSeconds = 4 })
+	require.Error(t, s.Validate())
+}
+
 func TestValidate_SecurityProfileWhitelist(t *testing.T) {
 	s := makeScope(t, func(s *Scope) { s.SecurityProfile = "yolo" })
 	require.ErrorContains(t, s.Validate(), "security_profile")

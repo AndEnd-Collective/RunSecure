@@ -102,6 +102,16 @@ func TestStartContainer_HappyPath(t *testing.T) {
 	require.NoError(t, c.StartContainer(context.Background(), "abc"))
 }
 
+// Mutation kill: client.go:175 — `resp.StatusCode/100 != 2`. Test with
+// a 200 (success in 2xx but not 204) and verify success. Mutation `/100`
+// → `+100` would compute 200+100=300, 300!=2 → error returned.
+func TestStartContainer_200StatusAccepted(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // 200 — also success, not 204
+	})
+	require.NoError(t, c.StartContainer(context.Background(), "abc"))
+}
+
 func TestStartContainer_Errors(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -189,6 +199,37 @@ func TestDeleteNetwork_500(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	require.Error(t, c.DeleteNetwork(context.Background(), "net-xyz"))
+}
+
+// Mutation kill: client.go:129 — `if body != nil { Content-Type: json }`.
+// Mutation `==` would set Content-Type for nil-body (GET) requests. Verify
+// GETs do NOT carry Content-Type.
+func TestDo_GETWithoutBody_NoContentType(t *testing.T) {
+	var gotCT string
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"State": map[string]any{"Status": "exited"}})
+	})
+	_, err := c.InspectContainer(context.Background(), "abc")
+	require.NoError(t, err)
+	require.Empty(t, gotCT, "GET requests must not include Content-Type")
+}
+
+// Mutation kill: client.go:282 — `if len(cj.Names) > 0`. Mutation `>= 0`
+// would access cj.Names[0] when Names is empty → panic.
+func TestListContainersForScope_EmptyNamesNoPanic(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Container with no Names entry — must not crash the orchestrator.
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"Id": "abc", "Names": []string{}, "Labels": map[string]string{"runsecure.scope": "test"}},
+		})
+	})
+	out, err := c.ListContainersForScope(context.Background(), "test")
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Empty(t, out[0].Name) // no name; safe.
 }
 
 func TestListContainersForScope(t *testing.T) {

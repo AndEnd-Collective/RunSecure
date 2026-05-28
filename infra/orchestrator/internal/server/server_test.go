@@ -186,7 +186,36 @@ func TestCmpStrings_AllBranches(t *testing.T) {
 	require.Equal(t, -1, cmpStrings("a", "b", "c", "a", "b", "d"))
 }
 
-func TestMetrics_MultipleEntries_Sorted(t *testing.T) {
+// Mutation kills: server.go HTTP timeouts. Exposed as accessor funcs (not
+// consts) so the mutated multiplication operators land inside a covered
+// function body. Exact-value asserts kill the ARITHMETIC mutations.
+func TestServerTimeouts(t *testing.T) {
+	require.Equal(t, 2*time.Second, HTTPReadHeaderTimeout())
+	require.Equal(t, 10*time.Second, HTTPReadTimeout())
+	require.Equal(t, 10*time.Second, HTTPWriteTimeout())
+	require.Equal(t, 60*time.Second, HTTPIdleTimeout())
+	require.Equal(t, 5*time.Second, HTTPShutdownTimeout())
+}
+
+// Mutation kill: the `< 0` boundary in the less-than functions. Self-
+// comparison must return false — `< 0` returns false on cmp==0, but the
+// `<= 0` mutation would return true and break sort semantics.
+func TestLessSpawnKey_SelfComparison(t *testing.T) {
+	k := SpawnKey{Scope: "s", Repo: "o/r", Outcome: "success"}
+	require.False(t, lessSpawnKey(k, k),
+		"a key is not less than itself (< 0 returns false on cmp==0)")
+}
+
+func TestLessAPICallKey_SelfComparison(t *testing.T) {
+	k := APICallKey{Endpoint: "jit", Status: "201"}
+	require.False(t, lessAPICallKey(k, k))
+}
+
+// Mutation kill: metrics.go:125 + :136 — sort.Slice less-than functions.
+// Asserts strict ordering across MULTIPLE spawn-key tuples (Scope, Repo,
+// Outcome) AND API-call keys (Endpoint, Status). With these multi-entry
+// expectations, mutation `< 0` → `>= 0` (reverse sort) is observably wrong.
+func TestMetrics_SpawnKeysAndAPICallKeys_Sorted(t *testing.T) {
 	d := newDeps(t)
 	d.snap.PerRepo = map[string]state.RepoState{
 		"z/last":  {InFlight: 1},
@@ -194,12 +223,29 @@ func TestMetrics_MultipleEntries_Sorted(t *testing.T) {
 	}
 	d.spawns[SpawnKey{Scope: "s2", Repo: "o/r", Outcome: "fail"}] = 1
 	d.spawns[SpawnKey{Scope: "s1", Repo: "o/r", Outcome: "success"}] = 3
+	d.spawns[SpawnKey{Scope: "s3", Repo: "o/r", Outcome: "fail"}] = 7
+	d.api[APICallKey{Endpoint: "queue", Status: "200"}] = 100
 	d.api[APICallKey{Endpoint: "jit", Status: "201"}] = 5
+	d.api[APICallKey{Endpoint: "ratelimit", Status: "429"}] = 2
 	m := NewMetrics(d)
 	rr := httpRec()
 	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
 	body := rr.Body.String()
-	aIdx := strings.Index(body, "a/first")
-	zIdx := strings.Index(body, "z/last")
-	require.True(t, aIdx >= 0 && aIdx < zIdx, "a/first must come before z/last in metrics output")
+
+	// Repos: a/first before z/last.
+	require.Less(t, strings.Index(body, "a/first"), strings.Index(body, "z/last"))
+
+	// Spawn keys ordered by scope ascending: s1 < s2 < s3.
+	s1Idx := strings.Index(body, `scope="s1"`)
+	s2Idx := strings.Index(body, `scope="s2"`)
+	s3Idx := strings.Index(body, `scope="s3"`)
+	require.True(t, s1Idx < s2Idx, "s1 must come before s2 (got s1=%d s2=%d)", s1Idx, s2Idx)
+	require.True(t, s2Idx < s3Idx, "s2 must come before s3")
+
+	// API call keys ordered by endpoint ascending: jit < queue < ratelimit.
+	jitIdx := strings.Index(body, `endpoint="jit"`)
+	queueIdx := strings.Index(body, `endpoint="queue"`)
+	rlIdx := strings.Index(body, `endpoint="ratelimit"`)
+	require.True(t, jitIdx < queueIdx, "jit < queue")
+	require.True(t, queueIdx < rlIdx, "queue < ratelimit")
 }

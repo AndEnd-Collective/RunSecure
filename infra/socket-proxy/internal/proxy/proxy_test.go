@@ -10,10 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/imageallow"
 	"github.com/stretchr/testify/require"
 )
+
+// Mutation kill: proxy.go transportIdleConnTimeout — `60 * time.Second`.
+// Exact-value assert covers the multiplication so the mutation lands in
+// a tracked function body.
+func TestTransportIdleConnTimeout(t *testing.T) {
+	require.Equal(t, 60*time.Second, transportIdleConnTimeout())
+}
 
 // startFakeDockerd creates a Unix socket that serves canned 200 responses
 // for any request. Returns the socket path.

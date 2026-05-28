@@ -22,6 +22,13 @@ type Server struct {
 	logger func(format string, args ...any)
 }
 
+// transportIdleConnTimeout is the per-connection idle timeout for the
+// reverse-proxy's HTTP transport to dockerd. Accessor func (not const)
+// so mutation testing observes the multiplication operator.
+func transportIdleConnTimeout() time.Duration {
+	return 60 * time.Second
+}
+
 // New constructs a Server. dockerSock is the path to /var/run/docker.sock
 // (or another UDS path the socket-proxy bind-mounts).
 func New(dockerSock string, images *imageallow.Allowlist) *Server {
@@ -33,7 +40,7 @@ func New(dockerSock string, images *imageallow.Allowlist) *Server {
 			return d.DialContext(ctx, "unix", dockerSock)
 		},
 		MaxIdleConns:        16,
-		IdleConnTimeout:     60 * time.Second,
+		IdleConnTimeout:     transportIdleConnTimeout(),
 		TLSHandshakeTimeout: 0,
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {

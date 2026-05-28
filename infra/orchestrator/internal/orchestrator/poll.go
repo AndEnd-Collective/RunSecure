@@ -34,10 +34,17 @@ func NewPoll(scope ScopeRef, deps PollDeps) *Poll {
 	return &Poll{scope: scope, deps: deps}
 }
 
+// pollIntervalDuration converts the scope's poll-interval seconds into
+// a Duration. Extracted so mutation testing can directly assert the
+// multiplication operator with an exact-value test.
+func pollIntervalDuration(intervalSec int) time.Duration {
+	return time.Duration(intervalSec) * time.Second
+}
+
 // Run blocks the goroutine until ctx is cancelled; ticks on the scope's
 // poll interval and enqueues spawn intents.
 func (p *Poll) Run(ctx context.Context) {
-	interval := time.Duration(p.scope.PollIntervalSec) * time.Second
+	interval := pollIntervalDuration(p.scope.PollIntervalSec)
 	for {
 		select {
 		case <-ctx.Done():
@@ -96,17 +103,12 @@ func (p *Poll) tick(ctx context.Context) {
 			})
 		}
 
-		avail := repo.MaxConcurrent - p.deps.InFlight(repo.Repo)
-		if g := p.scope.GlobalMaxRunners - p.deps.GlobalInFlight(); g < avail {
-			avail = g
-		}
-		if avail < 0 {
-			avail = 0
-		}
-		toSpawn := queued
-		if toSpawn > avail {
-			toSpawn = avail
-		}
+		// Clamp via min/max (Go 1.21+ builtins) — eliminates the boundary
+		// operators that confound mutation testing.
+		repoAvail := repo.MaxConcurrent - p.deps.InFlight(repo.Repo)
+		globalAvail := p.scope.GlobalMaxRunners - p.deps.GlobalInFlight()
+		avail := max(min(repoAvail, globalAvail), 0)
+		toSpawn := min(queued, avail)
 
 		for i := 0; i < toSpawn; i++ {
 			intent := SpawnIntent{

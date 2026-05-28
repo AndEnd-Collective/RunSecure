@@ -287,10 +287,11 @@ type spawnDeps struct {
 	scopeName   string
 	globalCap   int
 	repoCap     int
-	runnerYML    *runneryml.Runner
-	runnerYMLErr error
-	imageDigest  string
-	proxyDigest  string
+	runnerYML        *runneryml.Runner
+	runnerYMLErr     error
+	imageDigest      string // snapshot.ImageDigest
+	fallbackDigest   string // RunnerImageDigestFor(...) — defaults to imageDigest
+	proxyDigest      string
 	breakers     *fakeBreakers
 	bucket       TokenBucket
 }
@@ -311,7 +312,12 @@ func (d *spawnDeps) GlobalMaxRunners() int         { return d.globalCap }
 func (d *spawnDeps) RepoMaxConcurrent(_ string) int { return d.repoCap }
 func (d *spawnDeps) ScopeName() string              { return d.scopeName }
 func (d *spawnDeps) ProxyImageDigest() string       { return d.proxyDigest }
-func (d *spawnDeps) RunnerImageDigestFor(_ string) string { return d.imageDigest }
+func (d *spawnDeps) RunnerImageDigestFor(_ string) string {
+	if d.fallbackDigest != "" {
+		return d.fallbackDigest
+	}
+	return d.imageDigest
+}
 func (d *spawnDeps) SeccompProfileHostPath(_ string) string { return "/seccomp/p.json" }
 func (d *spawnDeps) RateLimiter() TokenBucket      { return d.bucket }
 func (d *spawnDeps) Breakers() BreakerMap          { return d.breakers }

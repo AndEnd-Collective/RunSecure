@@ -82,6 +82,39 @@ func TestBreaker_DefaultsWhenZero(t *testing.T) {
 	require.True(t, b.IsOpen())
 }
 
+// Mutation kill: breaker.go:35 — `if cooldown <= 0 { cooldown = 5 * time.Minute }`.
+// Pass cooldown=0 and verify it doesn't half-open before 5 minutes (the
+// default). If the <= mutation flipped to <, cooldown=0 would persist and
+// MaybeHalfOpen would always transition immediately.
+func TestBreaker_CooldownDefaultWhenZero(t *testing.T) {
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	b := NewBreaker(1, 0, func() time.Time { return now })
+	b.RecordFailure() // → Open
+	require.True(t, b.IsOpen())
+
+	// Advance 1 minute — under default (5 min), no transition yet.
+	now = now.Add(1 * time.Minute)
+	require.False(t, b.MaybeHalfOpen())
+	require.Equal(t, BreakerOpen, b.State())
+
+	// Advance another 5 minutes — total 6 — should now transition.
+	now = now.Add(5 * time.Minute)
+	require.True(t, b.MaybeHalfOpen())
+}
+
+// Mutation kill: breaker.go:64 — `now().Sub(openedAt) >= b.cooldown`.
+// Exactly-at-boundary: elapsed == cooldown must trigger half-open.
+func TestBreaker_HalfOpenAtExactCooldownBoundary(t *testing.T) {
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	b := NewBreaker(1, 30*time.Second, func() time.Time { return now })
+	b.RecordFailure()
+
+	// Advance exactly cooldown duration.
+	now = now.Add(30 * time.Second)
+	require.True(t, b.MaybeHalfOpen(),
+		"exactly-at-boundary must transition (>=, not >)")
+}
+
 // RecordFailure return-value tests — added with bug #1 fix so the
 // transition signal is now observable.
 func TestBreaker_RecordFailure_ReturnsOpenedOnTransition(t *testing.T) {
