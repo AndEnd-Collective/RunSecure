@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/database-context.json",
+  "title": "Database Context",
+  "description": "Database operation details",
+  "type": "object",
+  "properties": {
+    "database.name": {
+      "type": "string",
+      "description": "Database server name"
+    },
+    "instance.name": {
+      "type": "string",
+      "description": "Instance name within the database server"
+    },
+    "is.stored.procedure": {
+      "type": "boolean",
+      "description": "Whether a stored procedure was invoked"
+    },
+    "stored.procedure": {
+      "type": "object",
+      "properties": {
+        "stored.procedure.name": {
+          "type": "string",
+          "description": "Name of the stored procedure"
+        },
+        "stored.procedure.activity": {
+          "type": "string",
+          "enum": ["SELECT", "UPDATE", "DELETE", "INSERT INTO", "ALTER", "CREATE", "DROP", "EXECUTE"],
+          "description": "Type of activity performed by the stored procedure"
+        }
+      },
+      "description": "Stored procedure details (required when is.stored.procedure is true)"
+    },
+    "database.activity": {
+      "type": "object",
+      "properties": {
+        "activity.type": {
+          "type": "string",
+          "enum": ["SELECT", "UPDATE", "DELETE", "INSERT INTO", "ALTER", "CREATE", "DROP", "TRUNCATE"],
+          "description": "Type of database activity"
+        },
+        "query": {
+          "type": "string",
+          "description": "SQL query (use sparingly, avoid sensitive data)"
+        }
+      },
+      "description": "Direct database activity details (required when is.stored.procedure is false)"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "is.stored.procedure": { "const": true }
+        },
+        "required": ["is.stored.procedure"]
+      },
+      "then": {
+        "required": ["stored.procedure"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "is.stored.procedure": { "const": false }
+        },
+        "required": ["is.stored.procedure"]
+      },
+      "then": {
+        "required": ["database.activity"]
+      }
+    }
+  ],
+  "additionalProperties": true
+}

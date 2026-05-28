@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/web-context.json",
+  "title": "Web Context",
+  "description": "HTTP request and response information",
+  "type": "object",
+  "properties": {
+    "api.request": {
+      "type": "boolean",
+      "description": "Whether the call is API-based"
+    },
+    "request.type": {
+      "type": "string",
+      "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT"],
+      "description": "HTTP request method"
+    },
+    "uri": {
+      "type": "string",
+      "format": "uri",
+      "description": "Full URI of the request"
+    },
+    "response": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "HTTP response status code"
+    },
+    "headers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "description": "HTTP headers as array of key-value objects"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Query parameters"
+    },
+    "body": {
+      "type": "string",
+      "description": "HTTP request body (use sparingly, avoid sensitive data)"
+    }
+  },
+  "additionalProperties": true
+}

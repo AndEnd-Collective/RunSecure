@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/cornerstone-manifest.json",
+  "title": "Cornerstone Project Manifest",
+  "description": "Schema for .cornerstone/manifest.yaml — the project-local registry root that declares emission style, defaults, transformations, and lifecycle conventions for a project's Cornerstone events.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "emission", "uuid_strategy"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "cornerstone.cerebras.net/v1",
+      "description": "API version. Bumped when the manifest schema breaks compatibility."
+    },
+    "kind": {
+      "type": "string",
+      "const": "ProjectManifest"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "description": "Project identifier; lowercase kebab-case."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Team or person who owns the events emitted from this project."
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "emission": {
+      "type": "object",
+      "required": ["style", "language"],
+      "description": "How this project emits Cornerstone events. The schema validation pipeline is independent of producer, so any of these styles is valid.",
+      "properties": {
+        "style": {
+          "type": "string",
+          "enum": ["sdk", "otel-direct", "raw-json", "mixed"],
+          "description": "Primary emission style. `sdk` uses cornerstone-sdk / @cerebras/cornerstone-sdk (recommended only for greenfield projects until SDK is GA-proven). `otel-direct` emits via OpenTelemetry's logs API with cornerstone.* attributes (recommended for projects already using OTEL). `raw-json` emits Cornerstone-shaped JSON to stdout/stderr/file (zero-dependency option). `mixed` allows multiple styles in the same project — instrument skill picks per file."
+        },
+        "language": {
+          "type": "string",
+          "enum": ["python", "typescript", "go", "mixed"]
+        },
+        "sdk": {
+          "type": "object",
+          "description": "Configuration when style includes 'sdk'.",
+          "properties": {
+            "package": {
+              "type": "string",
+              "description": "npm or pip package name (e.g. cornerstone-sdk, @cerebras/cornerstone-sdk)."
+            },
+            "logger_module": {
+              "type": "string",
+              "description": "Where the project's shared logger is defined (e.g. my_app.logging)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "otel": {
+          "type": "object",
+          "description": "Configuration when style includes 'otel-direct'.",
+          "properties": {
+            "logger_name": {
+              "type": "string",
+              "default": "cornerstone"
+            },
+            "attribute_prefix": {
+              "type": "string",
+              "default": "cornerstone",
+              "description": "Prefix for cornerstone fields when serialized as OTEL attributes (e.g. cornerstone.event.uuid)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "raw_json": {
+          "type": "object",
+          "description": "Configuration when style includes 'raw-json'.",
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^(stderr|stdout|file:.+)$",
+              "default": "stderr",
+              "description": "Where to write events. `stderr`, `stdout`, or `file:/path/to/events.jsonl`."
+            }
+          },
+          "additionalProperties": false
+        },
+        "mixed": {
+          "type": "object",
+          "description": "Configuration when style is 'mixed'.",
+          "properties": {
+            "preferred": {
+              "type": "string",
+              "enum": ["sdk", "otel-direct", "raw-json"],
+              "description": "Fallback when per-file inference can't decide. The instrument skill prefers the style already used in a given file; this is the tie-breaker."
+            }
+          },
+          "required": ["preferred"],
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"style": {"const": "mixed"}}},
+          "then": {"required": ["mixed"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "uuid_strategy": {
+      "type": "object",
+      "required": ["mode"],
+      "description": "How event UUIDs are minted for this project.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["random", "deterministic"],
+          "description": "`random` (default) uses UUID4 — globally unique but per-project. `deterministic` uses UUID5(namespace, project_name + ':' + sub_type) — same logical event yields the same UUID across forks; useful for shared upstream libraries."
+        },
+        "namespace": {
+          "type": "string",
+          "format": "uuid",
+          "description": "UUID5 namespace; required when mode is 'deterministic'."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "deterministic"}}},
+          "then": {"required": ["namespace"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Values automatically applied to every event emitted from this project (the SDK reads these on Logger init; for otel-direct / raw-json producers, the instrument skill bakes them into the generated code).",
+      "properties": {
+        "signature": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string",
+          "description": "May reference env vars: ${CORNERSTONE_ENV:-production}"
+        },
+        "customer_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "transformations": {
+      "type": "array",
+      "description": "Field-level transformations applied at emit time. The SDK applies them automatically; for otel-direct / raw-json producers, the instrument skill emits the transformation inline.",
+      "items": {
+        "type": "object",
+        "required": ["field", "transform"],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Dot-path to the field, e.g. initiating.user.user.email"
+          },
+          "transform": {
+            "type": "string",
+            "enum": ["sha256", "sha512", "redact", "lowercase", "truncate", "hash-with-salt"],
+            "description": "Built-in transformation. `redact` replaces value with '[REDACTED]'. Hash transforms produce a hex digest."
+          },
+          "salt_env": {
+            "type": "string",
+            "description": "Env var name carrying the salt; required when transform is 'hash-with-salt'."
+          },
+          "max_length": {
+            "type": "integer",
+            "description": "Max length; required when transform is 'truncate'."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "conventions": {
+      "type": "object",
+      "description": "Project-wide rules enforced by `corner-lint registry` and the validator processor.",
+      "properties": {
+        "required_contexts": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Context names that every event in this project must include."
+        },
+        "forbidden_fields": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Dot-path fields that must never be present (defensive: prevent accidental PII leaks)."
+        },
+        "severity_floor": {
+          "type": "string",
+          "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "informational", "debug"],
+          "description": "Lowest severity level allowed in this project. Events at levels below this are rejected at validation."
+        }
+      },
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "description": "Glob patterns telling the skills where the application code lives. The instrument skill only activates inside these globs; the retrofit skill scans only these globs.",
+      "properties": {
+        "python": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "typescript": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "go": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

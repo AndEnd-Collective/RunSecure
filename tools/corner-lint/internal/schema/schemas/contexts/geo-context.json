@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/geo-context.json",
+  "title": "Geo Context",
+  "description": "Geographic location for fraud detection and compliance",
+  "type": "object",
+  "properties": {
+    "geo.country.iso": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$",
+      "description": "ISO 3166-1 alpha-2 country code"
+    },
+    "geo.region": {
+      "type": "string",
+      "description": "State, province, or region"
+    },
+    "geo.city": {
+      "type": "string",
+      "description": "City name"
+    },
+    "geo.postal.code": {
+      "type": "string",
+      "description": "Postal or ZIP code"
+    },
+    "geo.timezone": {
+      "type": "string",
+      "description": "IANA timezone identifier"
+    },
+    "geo.source": {
+      "type": "string",
+      "enum": ["ip-lookup", "gps", "user-provided"],
+      "description": "How location was determined"
+    }
+  },
+  "additionalProperties": true
+}

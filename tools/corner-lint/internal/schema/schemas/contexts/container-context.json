@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/container-context.json",
+  "title": "Container Context",
+  "description": "Container runtime metadata",
+  "type": "object",
+  "properties": {
+    "container.name": {
+      "type": "string",
+      "description": "Container name"
+    },
+    "container.id": {
+      "type": "string",
+      "description": "Container unique identifier"
+    },
+    "container.image.name": {
+      "type": "string",
+      "description": "Container image name with version tag"
+    },
+    "container.image.tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Container image tags"
+    }
+  },
+  "additionalProperties": true
+}

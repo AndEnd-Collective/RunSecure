@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/data-import-context.json",
+  "title": "Data Import Context",
+  "description": "Data ingress operation details",
+  "type": "object",
+  "properties": {
+    "import.type": {
+      "type": "string",
+      "enum": ["raw-data", "configuration"],
+      "description": "Type of data being imported"
+    },
+    "import.method": {
+      "type": "string",
+      "enum": ["web-upload", "api", "local-storage", "remote-storage", "email", "sftp", "streaming"],
+      "description": "Method used for data import"
+    },
+    "automated.import": {
+      "type": "boolean",
+      "description": "Whether the import is automated"
+    }
+  },
+  "additionalProperties": true
+}

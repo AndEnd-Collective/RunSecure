@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/event-details.json",
+  "title": "Event Details",
+  "description": "Container for event details including summary, severity, result, and status",
+  "type": "object",
+  "properties": {
+    "event.code": {
+      "type": "string",
+      "description": "Application-specific event code"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short summary of the event"
+    },
+    "message": {
+      "type": "string",
+      "description": "Detailed event description"
+    },
+    "severity": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 7,
+      "description": "Severity level per RFC 5424 (0=Emergency, 7=Debug)"
+    },
+    "result": {
+      "type": "string",
+      "enum": ["success", "failure"],
+      "description": "Outcome of the event"
+    },
+    "failure.reason": {
+      "type": "string",
+      "description": "Reason for failure (required when result is failure)"
+    },
+    "error.data": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Additional error context as key-value pairs"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "Backlog",
+        "Started",
+        "In Progress",
+        "Stopped",
+        "Completed",
+        "Completed with Errors",
+        "Failed"
+      ],
+      "description": "Status of the operation"
+    },
+    "duration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Duration in milliseconds"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of tags for categorization"
+    }
+  },
+  "required": [
+    "summary",
+    "severity",
+    "result"
+  ],
+  "if": {
+    "properties": {
+      "result": { "const": "failure" }
+    },
+    "required": ["result"]
+  },
+  "then": {
+    "required": ["failure.reason"]
+  },
+  "additionalProperties": true
+}

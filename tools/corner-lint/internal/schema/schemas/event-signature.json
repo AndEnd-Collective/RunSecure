@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/event-signature.json",
+  "title": "Event Signature",
+  "description": "Schema for Cornerstone event signature metadata that pre-declares event structure",
+  "type": "object",
+  "properties": {
+    "event.signature": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique signature identifier"
+    },
+    "schema.version": {
+      "type": "string",
+      "description": "Cornerstone schema version"
+    },
+    "configuration": {
+      "type": "object",
+      "properties": {
+        "time.stamp": {
+          "type": "string",
+          "enum": ["ISO 8601", "epoch"],
+          "description": "Timestamp format"
+        },
+        "event.format": {
+          "type": "string",
+          "enum": ["json", "csv", "syslog"],
+          "description": "Output format"
+        },
+        "event.structure": {
+          "type": "string",
+          "enum": ["full", "variables"],
+          "description": "Whether to output full key-value or values only"
+        },
+        "single.line": {
+          "type": "boolean",
+          "description": "Whether output is single-line"
+        },
+        "delimiter": {
+          "type": "string",
+          "enum": ["comma", "tab", "new-line", "semicolon", "pipe", "slash"],
+          "description": "Delimiter for variables structure"
+        },
+        "multi.tenant": {
+          "type": "boolean",
+          "description": "Whether multi-tenancy is used"
+        },
+        "application": {
+          "type": "string",
+          "description": "Application or service name"
+        },
+        "module": {
+          "type": "string",
+          "description": "Module name"
+        },
+        "version": {
+          "type": "string",
+          "description": "Module version"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Signature tags"
+        },
+        "fields.order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Field order for variables structure"
+        }
+      },
+      "required": [
+        "time.stamp",
+        "event.format",
+        "event.structure",
+        "single.line"
+      ],
+      "if": {
+        "properties": {
+          "event.structure": { "const": "variables" }
+        },
+        "required": ["event.structure"]
+      },
+      "then": {
+        "required": ["delimiter", "fields.order"]
+      }
+    },
+    "pre.population": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "context.name": {
+            "type": "string",
+            "description": "Context name for pre-populated field"
+          },
+          "field.key": {
+            "type": "string",
+            "description": "Field name to pre-populate"
+          },
+          "field.value": {
+            "description": "Value to pre-populate"
+          }
+        },
+        "required": ["context.name", "field.key", "field.value"]
+      },
+      "description": "Fields to pre-populate in events using this signature"
+    }
+  },
+  "required": [
+    "event.signature",
+    "configuration"
+  ],
+  "additionalProperties": true
+}

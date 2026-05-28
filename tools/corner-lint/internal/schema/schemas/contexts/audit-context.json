@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/audit-context.json",
+  "title": "Audit Context",
+  "description": "Change tracking for SOX compliance and forensics",
+  "type": "object",
+  "properties": {
+    "audit.action": {
+      "type": "string",
+      "enum": ["create", "update", "delete", "approve", "reject"],
+      "description": "Type of audit action"
+    },
+    "audit.before": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "State before change"
+    },
+    "audit.after": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "State after change"
+    },
+    "audit.reason": {
+      "type": "string",
+      "description": "Reason for change"
+    },
+    "audit.ticket.id": {
+      "type": "string",
+      "description": "Related ticket or request ID"
+    },
+    "audit.approved.by": {
+      "type": "string",
+      "description": "Approver user ID"
+    }
+  },
+  "additionalProperties": true
+}

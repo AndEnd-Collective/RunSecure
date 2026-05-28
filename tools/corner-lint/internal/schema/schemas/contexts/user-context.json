@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/user-context.json",
+  "title": "User Context",
+  "description": "User information for initiating.user or impacted.user contexts",
+  "type": "object",
+  "properties": {
+    "user.id": {
+      "type": "string",
+      "description": "User identifier within the service"
+    },
+    "user.name": {
+      "type": "string",
+      "description": "Username or email address"
+    },
+    "user.hash": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$",
+      "description": "SHA256 hash of username for privacy-preserving correlation"
+    },
+    "user.assumed.role": {
+      "type": "string",
+      "description": "Role assumed by the user at the time of the event"
+    },
+    "admin.user": {
+      "type": "boolean",
+      "description": "Whether the user has administrative privileges"
+    },
+    "user.type": {
+      "type": "string",
+      "enum": ["service.account", "third.party.application", "human"],
+      "description": "Type of user entity"
+    },
+    "identity.provider": {
+      "type": "string",
+      "description": "Identity provider used (e.g., 'internal', 'okta', 'azure-ad')"
+    },
+    "user.tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "User metadata tags"
+    },
+    "role.context": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role.name": {
+            "type": "string",
+            "description": "Name of the role being modified"
+          },
+          "role.action": {
+            "type": "string",
+            "enum": ["Add", "Remove"],
+            "description": "Action being taken on the role"
+          }
+        }
+      },
+      "description": "Role changes for impacted users"
+    },
+    "permission.context": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "permission.name": {
+            "type": "string",
+            "description": "Name of the permission being modified"
+          },
+          "permission.action": {
+            "type": "string",
+            "enum": ["Add", "Remove"],
+            "description": "Action being taken on the permission"
+          }
+        }
+      },
+      "description": "Permission changes for impacted users"
+    }
+  },
+  "additionalProperties": true
+}

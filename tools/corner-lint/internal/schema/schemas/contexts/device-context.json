@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/device-context.json",
+  "title": "Device Context",
+  "description": "Device information for security analytics and threat detection",
+  "type": "object",
+  "properties": {
+    "device.type": {
+      "type": "string",
+      "enum": ["desktop", "mobile", "tablet", "iot", "server"],
+      "description": "Category of device"
+    },
+    "device.os": {
+      "type": "string",
+      "description": "Operating system name"
+    },
+    "device.os.version": {
+      "type": "string",
+      "description": "Operating system version"
+    },
+    "device.client": {
+      "type": "string",
+      "description": "Browser or application name"
+    },
+    "device.client.version": {
+      "type": "string",
+      "description": "Browser or application version"
+    },
+    "device.id": {
+      "type": "string",
+      "description": "Device fingerprint or identifier (hashed)"
+    }
+  },
+  "additionalProperties": true
+}

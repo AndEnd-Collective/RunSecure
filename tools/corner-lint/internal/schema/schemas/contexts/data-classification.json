@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/data-classification.json",
+  "title": "Data Classification Context",
+  "description": "Sensitive data scanning and handling results",
+  "type": "object",
+  "properties": {
+    "data.scanned": {
+      "type": "boolean",
+      "description": "Whether the data was scanned for sensitive information"
+    },
+    "classified.data.found": {
+      "type": "boolean",
+      "description": "Whether sensitive data was identified"
+    },
+    "sanitization.needed": {
+      "type": "boolean",
+      "description": "Whether sanitization is required"
+    },
+    "sanitization.status": {
+      "type": "string",
+      "enum": ["completed", "completed with errors", "failed", "skipped"],
+      "description": "Status of the sanitization process"
+    },
+    "sanitization.error": {
+      "type": "string",
+      "description": "Error description if sanitization failed"
+    },
+    "data.identified": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "data.type": {
+            "type": "string",
+            "description": "Data classification type (e.g., PII, PCI-DSS, PHI, GDPR)"
+          },
+          "data.sub.type": {
+            "type": "string",
+            "description": "Specific data classification (e.g., SSN, Credit Card, Email)"
+          },
+          "detection.method": {
+            "type": "string",
+            "enum": ["dictionary", "regex", "algorithm", "exact-match", "fuzzy-match", "ml-model"],
+            "description": "Method used to detect the sensitive data"
+          },
+          "detection.count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of matches found"
+          },
+          "confidence.score": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Confidence level of the detection (1-100)"
+          },
+          "sanitization.action": {
+            "type": "string",
+            "enum": ["allow", "mask", "remove", "partially-mask", "supersede", "tokenize", "encrypt"],
+            "description": "Action taken on the detected data"
+          }
+        }
+      },
+      "description": "List of identified sensitive data items"
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/information-context.json",
+  "title": "Information Context",
+  "description": "Reference to sensitive data without logging actual values",
+  "type": "object",
+  "properties": {
+    "data.type": {
+      "type": "string",
+      "description": "Data classification type (e.g., PII, PCI-DSS, PHI)"
+    },
+    "data.sub.type": {
+      "type": "string",
+      "description": "Specific data classification (e.g., First Name, Account Number)"
+    }
+  },
+  "additionalProperties": true
+}

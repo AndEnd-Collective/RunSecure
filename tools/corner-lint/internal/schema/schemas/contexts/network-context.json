@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/network-context.json",
+  "title": "Network Context",
+  "description": "Network-level communication details",
+  "type": "object",
+  "properties": {
+    "service.is.source": {
+      "type": "boolean",
+      "description": "Whether the service is the source (true) or destination (false) of communication"
+    },
+    "source.ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Source IP address"
+    },
+    "source.mac": {
+      "type": "string",
+      "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+      "description": "Source MAC address"
+    },
+    "source.dns.name": {
+      "type": "string",
+      "format": "hostname",
+      "description": "Source fully qualified domain name"
+    },
+    "destination.ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Destination IP address"
+    },
+    "destination.mac": {
+      "type": "string",
+      "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+      "description": "Destination MAC address"
+    },
+    "destination.dns.name": {
+      "type": "string",
+      "format": "hostname",
+      "description": "Destination fully qualified domain name"
+    },
+    "network.port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "Network port number"
+    },
+    "network.protocol": {
+      "type": "string",
+      "description": "Network protocol (TCP, UDP, HTTPS, SFTP, etc.)"
+    },
+    "bytes.in": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bytes received"
+    },
+    "bytes.out": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bytes sent"
+    }
+  },
+  "additionalProperties": true
+}

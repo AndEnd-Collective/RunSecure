@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cerebras.github.io/Cornerstone/schemas/contexts/data-export-context.json",
+  "title": "Data Export Context",
+  "description": "Data egress operation details",
+  "type": "object",
+  "properties": {
+    "export.type": {
+      "type": "string",
+      "enum": ["raw-data", "configuration", "report"],
+      "description": "Type of data being exported"
+    },
+    "export.method": {
+      "type": "string",
+      "enum": ["web-download", "api", "local-storage", "remote-storage", "email", "sftp", "streaming"],
+      "description": "Method used for data export"
+    },
+    "automated.export": {
+      "type": "boolean",
+      "description": "Whether the export is automated"
+    },
+    "export.name": {
+      "type": "string",
+      "description": "Name of the exported data or report"
+    }
+  },
+  "additionalProperties": true
+}
