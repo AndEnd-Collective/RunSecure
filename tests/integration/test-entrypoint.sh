@@ -59,10 +59,13 @@ else
     fail "Exits with code 0 when RUNNER_JIT_CONFIG missing"
 fi
 
-if echo "$OUTPUT" | grep -q "RUNNER_JIT_CONFIG is not set"; then
+# entrypoint.sh now reports "neither RUNNER_JIT_CONFIG_FILE nor
+# RUNNER_JIT_CONFIG is set" since the FILE variant was added; this assert
+# tracks the canonical phrasing.
+if echo "$OUTPUT" | grep -q "neither RUNNER_JIT_CONFIG_FILE nor RUNNER_JIT_CONFIG is set"; then
     pass "Reports that RUNNER_JIT_CONFIG is not set"
 else
-    fail "Does not report missing RUNNER_JIT_CONFIG"
+    fail "Does not report missing RUNNER_JIT_CONFIG (got: $OUTPUT)"
 fi
 
 # ============================================================================

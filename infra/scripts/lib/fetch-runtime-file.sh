@@ -175,7 +175,10 @@ _check_host() {
     local resolver=""
     if command -v getent >/dev/null 2>&1; then
         resolver="getent"
-        resolved_ips=$(getent ahosts "$hostname" 2>/dev/null | awk '{print $1}' | sort -u)
+        # NXDOMAIN makes getent exit 2; with `set -o pipefail` that would
+        # abort the script before the empty-result check below could fire.
+        # Tolerate non-zero — empty $resolved_ips is the legitimate signal.
+        resolved_ips=$(getent ahosts "$hostname" 2>/dev/null | awk '{print $1}' | sort -u || true)
     elif command -v dig >/dev/null 2>&1; then
         resolver="dig"
         resolved_ips=$(dig +short +time=2 +tries=1 "$hostname" 2>/dev/null | grep -E '^[0-9]+\.|:' || true)
