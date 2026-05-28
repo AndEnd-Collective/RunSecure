@@ -71,7 +71,17 @@ jobs:
           # yq into ~/.local/bin via curl (which IS present, needed for
           # github.com pulls through the proxy) and prepend to $PATH.
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL --proto '=https' --tlsv1.2             -o "$HOME/.local/bin/yq"             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          # Pick the right yq binary for the host arch — the workflow runs
+          # on both amd64 (cloud) and arm64 (Apple Silicon dogfood) runners.
+          # Running an amd64 binary on arm64 via QEMU produces flaky stdout.
+          case "$(uname -m)" in
+            x86_64)         YQ_ARCH=amd64 ;;
+            aarch64|arm64)  YQ_ARCH=arm64 ;;
+            *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            -o "$HOME/.local/bin/yq" \
+            "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${YQ_ARCH}"
           chmod 755 "$HOME/.local/bin/yq"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/yq" --version
