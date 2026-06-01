@@ -21,7 +21,7 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS base
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS base
 
 # ---- Build arguments --------------------------------------------------------
 # All pins follow a 48-hour freshness rule: the chosen version must be at
@@ -34,10 +34,10 @@ FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5
 ARG RUNNER_VERSION=2.334.0
 ARG RUNNER_SHA256_ARM64=f44255bd3e80160eb25f71bc83d06ea025f6908748807a584687b3184759f7e4
 ARG RUNNER_SHA256_AMD64=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
-# GH_CLI_VERSION 2.92.0 (2026-04-28) — current latest stable.
-ARG GH_CLI_VERSION=2.92.0
-ARG GH_CLI_SHA256_AMD64=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
-ARG GH_CLI_SHA256_ARM64=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
+# GH_CLI_VERSION 2.93.0 (2026-05-27) — current latest stable.
+ARG GH_CLI_VERSION=2.93.0
+ARG GH_CLI_SHA256_AMD64=5371f77155e5dd81b6e897c379431f734949b99b99ae1f01c5e3ab6d3795cf4d
+ARG GH_CLI_SHA256_ARM64=ac30768545cc31bbef9ffef27d2f2218b2739375019883b8095acf2f734e7b7f
 
 ARG TARGETARCH
 
