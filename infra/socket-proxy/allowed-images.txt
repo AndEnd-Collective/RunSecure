@@ -10,7 +10,6 @@
 # Maintained by .github/workflows/weekly-version-bump.yml — do not hand-edit
 # unless the bump workflow is paused.
 #
-# Initial entries are intentionally absent: until the orchestrator's compose
-# stack publishes its first runner-image digests, the allowlist is empty and
-# every spawn attempt is correctly refused. The bump workflow seeds entries
-# when it runs.
+
+# Auto-refreshed by weekly-version-bump.yml at v1.1.7.
+ghcr.io/andend-collective/runsecure/proxy@sha256:12fbcb0b0996bcc86adc2915a7e9387e42a1687488971836534b6b6481727612
