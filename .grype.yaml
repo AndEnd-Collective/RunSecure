@@ -57,22 +57,20 @@ ignore:
   - vulnerability: GHSA-8qq5-rm4j-mr97  # tar 6.2.1
   - vulnerability: GHSA-83g3-92jg-28cx  # tar 6.2.1
 
-  # --- Go stdlib inside the actions/runner v2.334.0 binary -----------------
-  # actions/runner v2.334.0 (2026-04-21) was compiled with go1.26.2. The Go
-  # team patched the stdlib in go1.25.10 / go1.26.3 (2026-05-01) for the
-  # CVEs below. actions/runner has not yet shipped a release rebuilt against
-  # the patched toolchain — once a v2.335.x lands, bump RUNNER_VERSION in
-  # images/base.Dockerfile and remove these entries.
-  # Tracking: https://github.com/actions/runner/releases
+  # --- docker/cli vendored inside the gh CLI binary ------------------------
+  # The ONLY Go binary in the base image is /usr/bin/gh (the actions/runner is
+  # .NET — it ships no Go binary). gh (GH_CLI_VERSION in images/base.Dockerfile)
+  # vendors github.com/docker/cli; as of gh 2.95.0 the vendored version is
+  # v29.4.3+incompatible, which is ALREADY PAST the v29.2.0+incompatible fix
+  # for GO-2026-4610. Grype flags it anyway because it cannot order Go
+  # "+incompatible" pseudo-versions and so treats 29.4.3 as < 29.2.0. This is
+  # a false positive, not an unpatched dependency.
+  # Re-evaluate when bumping GH_CLI_VERSION: drop this entry if a future gh
+  # release stops vendoring docker/cli, or once Grype orders +incompatible
+  # versions correctly.
   #
-  # Reachability: the runner uses Go only for its own process management
-  # (worker spawning, IPC, log forwarding). The vulnerable code paths
-  # (net/http, crypto/x509, encoding/* in Go stdlib) are not in the runner's
-  # hot path for executing workflow code; impact is limited to the runner's
-  # own control plane, which only talks to api.github.com over a pinned cert.
-  - vulnerability: CVE-2026-33811  # go stdlib
-  - vulnerability: CVE-2026-33814  # go stdlib
-  - vulnerability: CVE-2026-39820  # go stdlib
-  - vulnerability: CVE-2026-39836  # go stdlib
-  - vulnerability: CVE-2026-42499  # go stdlib
-  - vulnerability: CVE-2026-42501  # go stdlib
+  # NOTE: the previous Go-stdlib ignores (CVE-2026-33811/33814/39820/39836/
+  # 42499/42501) were removed — they were attributed to the runner but the
+  # only Go binary is gh, and gh 2.95.0 is built with go1.26.4, which clears
+  # every go-stdlib finding (no go-stdlib entry is needed anymore).
+  - vulnerability: GO-2026-4610  # docker/cli 29.4.3 vendored in gh — already past the 29.2.0 fix; Grype +incompatible mis-order
