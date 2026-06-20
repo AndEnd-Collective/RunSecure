@@ -74,3 +74,44 @@ ignore:
   # only Go binary is gh, and gh 2.95.0 is built with go1.26.4, which clears
   # every go-stdlib finding (no go-stdlib entry is needed anymore).
   - vulnerability: GO-2026-4610  # docker/cli 29.4.3 vendored in gh — already past the 29.2.0 fix; Grype +incompatible mis-order
+
+  # --- undici bundled inside npm in the node image -------------------------
+  # The node image installs Node.js (NODE_VERSION in images/node.Dockerfile)
+  # from NodeSource, whose npm bundles undici transitively
+  # (.../node_modules/npm/node_modules/undici). The node 24 line currently
+  # ships undici 6.25.0; even npm@11.17.0 (latest) only bundles 6.26.0 —
+  # neither reaches the 6.27.0 fix for CVE-2026-12151, so there is nothing
+  # upstream to bump to yet.
+  # Re-evaluate when a NodeSource node-24 release (or a global npm install)
+  # bundles undici >= 6.27.0, then drop this entry.
+  #
+  # Reachability: CVE-2026-12151 is a DoS that requires the client to connect
+  # to a MALICIOUS WebSocket server. npm never opens WebSockets to registries;
+  # the only undici-WebSocket use would be untrusted workflow code, which is
+  # exactly what this runner sandboxes (ephemeral, --pids-limit, --memory,
+  # destroyed after one job).
+  - vulnerability: GHSA-vxpw-j846-p89q  # undici 6.25.0 WebSocket DoS (CVE-2026-12151) — 6.27.0 fix not yet in any npm/node release
+
+  # --- CPython CVEs flagged by Grype on the pinned 3.12 interpreter --------
+  # The python image pins CPython 3.12.13 (PYTHON_VERSION in
+  # images/python.Dockerfile) — the latest 3.12 from astral-sh/
+  # python-build-standalone; there is no 3.12.14. Grype flags these because it
+  # compares 3.12.13 against fixes that exist only in the 3.13/3.14 lines and
+  # cannot reason across CPython minor branches:
+  #   - CVE-2026-7210: affected 3.13.x/3.14.x/3.15 only (per NVD) — 3.12 is
+  #     NOT in the affected range. Cross-branch false positive.
+  #   - CVE-2026-4224: affected <3.10.0 and 3.13.0-3.13.12 / 3.14.0-3.14.3
+  #     (a regression re-introduced in 3.13) — 3.12 is NOT affected. FP.
+  #   - CVE-2026-3644: http.cookies follow-up to CVE-2026-0672; no 3.12 fix
+  #     has shipped (no 3.12.14 exists), so there is nothing to upgrade to.
+  # Re-evaluate when python-build-standalone ships a 3.12.x that Grype marks
+  # fixed, or if the python image's minor is bumped to 3.13/3.14.
+  #
+  # Reachability: all three are DoS / parser issues (expat hash-flooding,
+  # ElementDecl recursion, cookie control-char parsing) that require the
+  # workflow to parse attacker-controlled XML/cookies. The runner executes
+  # untrusted workflow code by design; a DoS of the ephemeral, resource-capped,
+  # single-job container is not an escalation in this threat model.
+  - vulnerability: CVE-2026-7210  # CPython expat hash-flooding DoS — 3.12 not in affected range (Grype cross-branch FP)
+  - vulnerability: CVE-2026-4224  # CPython expat ElementDecl recursion — 3.12 not affected (Grype cross-branch FP)
+  - vulnerability: CVE-2026-3644  # CPython http.cookies control-char parse — no 3.12 fix available to upgrade to
