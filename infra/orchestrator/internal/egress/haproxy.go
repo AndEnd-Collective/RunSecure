@@ -47,7 +47,7 @@ func isHostPortSafe(host, port string) bool {
 		return false
 	}
 	for _, c := range host + port {
-		if c == '\n' || c == '\r' || c == ' ' || c == '#' {
+		if c == '\n' || c == '\r' || c == ' ' || c == '#' || c == '\t' {
 			return false
 		}
 	}

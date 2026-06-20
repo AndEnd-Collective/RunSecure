@@ -1,6 +1,9 @@
 package security
 
-import "fmt"
+import (
+	"fmt"
+	"net"
+)
 
 // ApplyProjectOverrides merges a project's runner.yml security_overrides into
 // the scope's baseline Policy, restricted to the keys listed in
@@ -58,6 +61,24 @@ func ApplyProjectOverrides(base Policy, allowProjectOverrides []string, override
 			if b, ok := raw.(bool); ok {
 				base.AllowKubeAPI = b
 			}
+		case "allow_private_cidrs":
+			arr, ok := raw.([]any)
+			if !ok {
+				return base, fmt.Errorf("security: allow_private_cidrs must be a list of strings")
+			}
+			parsed := make([]*net.IPNet, 0, len(arr))
+			for _, v := range arr {
+				s, ok := v.(string)
+				if !ok {
+					return base, fmt.Errorf("security: allow_private_cidrs entries must be strings")
+				}
+				_, cidr, err := net.ParseCIDR(s)
+				if err != nil {
+					return base, fmt.Errorf("security: allow_private_cidrs: invalid CIDR %q: %w", s, err)
+				}
+				parsed = append(parsed, cidr)
+			}
+			base.AllowedPrivateCIDRs = parsed
 		}
 	}
 	return base, nil

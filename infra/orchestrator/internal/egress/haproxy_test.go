@@ -26,13 +26,14 @@ func TestRenderHAProxy_Empty_NoListeners(t *testing.T) {
 	}
 }
 
-// Attacker: a malicious tcp_egress value must never become a live directive.
-// (Validation rejects it upstream; renderer must also never interpolate raw newlines.)
+// Attacker: a malicious tcp_egress value containing a newline must never produce
+// a live directive — the renderer must strip the entry entirely, not interpolate
+// the embedded newline into the config.
 func TestRenderHAProxy_InjectionInert(t *testing.T) {
-	r := &runneryml.Runner{TCPEgress: []string{"evil:5432"}}
+	r := &runneryml.Runner{TCPEgress: []string{"evil\nacl x:5432"}}
 	out := string(RenderHAProxy(r, security.Policy{}))
-	if strings.Count(out, "frontend tcp_") != 1 {
-		t.Fatalf("expected exactly one frontend:\n%s", out)
+	if strings.Contains(out, "frontend tcp_") {
+		t.Fatalf("malicious entry with embedded newline must produce NO frontend:\n%s", out)
 	}
 }
 
@@ -91,9 +92,11 @@ func TestRenderHAProxy_DangerousChars_Rejected(t *testing.T) {
 		{"carriage return in host", "db\r.com:5432", "reject"},
 		{"space in host", "db .com:5432", "reject"},
 		{"hash in host", "db#.com:5432", "reject"},
+		{"tab in host", "db\t.com:5432", "reject"},
 		{"newline in port", "db.com:543\n2", "reject"},
 		{"space in port", "db.com:543 2", "reject"},
 		{"hash in port", "db.com:543#2", "reject"},
+		{"tab in port", "db.com:543\t2", "reject"},
 	}
 
 	for _, tc := range testCases {

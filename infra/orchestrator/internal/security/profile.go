@@ -7,6 +7,8 @@
 // only handles the policy knobs ABOVE that floor.
 package security
 
+import "net"
+
 // Policy is the resolved policy after applying preset defaults + overrides.
 type Policy struct {
 	AllowWildcards      bool
@@ -17,9 +19,10 @@ type Policy struct {
 	AllowDNSSuffixMatch bool
 
 	// Explicit per-project lists ALWAYS win (spec: "user autonomy"):
-	WildcardEntries []string // explicit *.foo.com entries from runner.yml
-	DoHProviders    []string // explicit DoH domains the project lists
-	IMDSEndpoints   []string // explicit IMDS CIDRs the project lists
+	WildcardEntries    []string     // explicit *.foo.com entries from runner.yml
+	DoHProviders       []string     // explicit DoH domains the project lists
+	IMDSEndpoints      []string     // explicit IMDS CIDRs the project lists
+	AllowedPrivateCIDRs []*net.IPNet // operator opt-in private ranges for literal-IP egress
 }
 
 // Defaults returns the baseline Policy for a preset name.

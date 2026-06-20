@@ -52,10 +52,11 @@ type OrchestratorBlock struct {
 }
 
 type SecurityOverrides struct {
-	AllowWildcards []string `yaml:"allow_wildcards"`
-	AllowDoH       any      `yaml:"allow_doh"` // bool or []string
-	AllowIMDS      bool     `yaml:"allow_imds"`
-	AllowKubeAPI   bool     `yaml:"allow_kube_api"`
+	AllowWildcards   []string `yaml:"allow_wildcards"`
+	AllowDoH         any      `yaml:"allow_doh"` // bool or []string
+	AllowIMDS        bool     `yaml:"allow_imds"`
+	AllowKubeAPI     bool     `yaml:"allow_kube_api"`
+	AllowPrivateCIDRs []string `yaml:"allow_private_cidrs"`
 }
 
 func Parse(path string) (*Runner, error) {

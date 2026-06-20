@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -154,6 +155,48 @@ func TestRenderDNSMasq_WildcardEdgeCases(t *testing.T) {
 		"non-wildcard must NOT produce a server line")
 	require.NotContains(t, out, "server=/foo/",
 		"'*foo' (no dot) must NOT produce a server line")
+}
+
+// TestRender_SSRFGuard_TCPEgress verifies that Render returns an error when
+// tcp_egress contains a literal private IP (10.0.0.5:5432).
+func TestRender_SSRFGuard_TCPEgress(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		TCPEgress: []string{"10.0.0.5:5432"},
+	}
+	_, err := g.Render("spawn-ssrf-tcp", r, security.Defaults("strict"))
+	require.Error(t, err, "literal private IP in tcp_egress must be rejected")
+	require.Contains(t, err.Error(), "security:")
+}
+
+// TestRender_SSRFGuard_HTTPEgress verifies that Render returns an error when
+// http_egress contains a literal private IP (169.254.169.254).
+func TestRender_SSRFGuard_HTTPEgress(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		HTTPEgress: []string{"169.254.169.254"},
+	}
+	_, err := g.Render("spawn-ssrf-http", r, security.Defaults("strict"))
+	require.Error(t, err, "literal cloud metadata IP in http_egress must be rejected")
+	require.Contains(t, err.Error(), "security:")
+}
+
+// TestRender_SSRFGuard_AllowedViaPolicy verifies that a private IP is accepted
+// when the policy's AllowedPrivateCIDRs covers it.
+func TestRender_SSRFGuard_AllowedViaPolicy(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		TCPEgress: []string{"10.0.0.5:5432"},
+	}
+	_, allowedNet, err := net.ParseCIDR("10.0.0.0/8")
+	require.NoError(t, err)
+	p := security.Defaults("strict")
+	p.AllowedPrivateCIDRs = []*net.IPNet{allowedNet}
+	_, err = g.Render("spawn-ssrf-allowed", r, p)
+	require.NoError(t, err, "10.0.0.5 allowed by operator-defined CIDR must not be rejected")
 }
 
 func TestRender_DNSMasqWriteFails(t *testing.T) {
