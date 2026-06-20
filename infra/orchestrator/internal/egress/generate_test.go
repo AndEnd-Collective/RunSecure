@@ -129,10 +129,15 @@ func TestRenderSquid_WildcardEdgeCases(t *testing.T) {
 	require.NotContains(t, out, " *.amazonaws.com\n",
 		"3-char+ wildcard MUST be trimmed (no literal '*.' in output)")
 
-	// Preserved cases: each wildcard appears as a literal in its own ACL line.
-	require.Contains(t, out, " *.\n", "2-char '*.' preserved as literal")
-	require.Contains(t, out, " foo.com\n", "non-wildcard preserved as literal")
-	require.Contains(t, out, " *foo\n", "wildcard without '.' preserved as literal")
+	// Invalid entries (fail sanitizeDomain) must be DROPPED, not emitted.
+	// "*.": not a valid domain — sanitized to "" → dropped.
+	require.NotContains(t, out, " *.\n", "2-char '*.' must be dropped by sanitizer")
+	// "foo.com": a valid domain without the wildcard prefix — sanitizeDomain passes,
+	// so it is emitted as-is (suffix = "foo.com" because the >2-char wildcard check
+	// requires w[0]=='*' && w[1]=='.' — "foo.com" has w[0]=='f', so suffix stays "foo.com").
+	require.Contains(t, out, " foo.com\n", "non-wildcard valid domain must still be emitted")
+	// "*foo": no '.' after '*' — not stripped, suffix = "*foo" → sanitizer rejects → dropped.
+	require.NotContains(t, out, " *foo\n", "wildcard without '.' must be dropped by sanitizer")
 }
 
 // Mutation kill for dnsmasq.go:31 — same wildcard parsing in dnsmasq render.

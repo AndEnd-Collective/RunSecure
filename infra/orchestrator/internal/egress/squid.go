@@ -48,7 +48,11 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 			if len(w) > 2 && w[0] == '*' && w[1] == '.' {
 				suffix = w[1:]
 			}
-			fmt.Fprintf(&b, "acl allowed_domains dstdomain %s\n", suffix)
+			// Sanitize AFTER stripping the "*." prefix so embedded
+			// newlines or metacharacters in the suffix are rejected.
+			if clean := sanitizeDomain(suffix); clean != "" {
+				fmt.Fprintf(&b, "acl allowed_domains dstdomain %s\n", clean)
+			}
 		}
 	}
 
