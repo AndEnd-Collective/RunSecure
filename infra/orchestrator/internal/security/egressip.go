@@ -37,9 +37,10 @@ func init() {
 //
 // Examples:
 //
-//	"10.0.0.5:5432"  → "10.0.0.5"
-//	"[::1]:5432"     → "::1"
+//	"10.0.0.5:5432"   → "10.0.0.5"
+//	"[::1]:5432"      → "::1"
 //	"169.254.169.254" → "169.254.169.254"
+//	"::1"             → "::1"  (bare IPv6, no port)
 func extractHost(hostport string) string {
 	// Handle IPv6 bracket notation: [::1]:port or [::1]
 	if strings.HasPrefix(hostport, "[") {
@@ -48,14 +49,11 @@ func extractHost(hostport string) string {
 			return hostport[1:end]
 		}
 	}
-	// Strip trailing :port for IPv4 / hostname entries.
-	if i := strings.LastIndex(hostport, ":"); i >= 0 {
-		// Verify the part after ':' looks like a port (no colons in it
-		// — a plain IPv6 address like "::1" has no port so skip stripping).
-		after := hostport[i+1:]
-		if !strings.Contains(after, ":") {
-			return hostport[:i]
-		}
+	// net.SplitHostPort handles IPv4:port, [IPv6]:port, hostname:port correctly.
+	// Fall back to returning hostport verbatim if there is no port (bare host or
+	// bare IPv6 like "::1" which SplitHostPort cannot parse without brackets).
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
 	}
 	return hostport
 }

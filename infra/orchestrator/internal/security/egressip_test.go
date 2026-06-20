@@ -58,6 +58,14 @@ func TestCheckEgressIPLiterals_IPv6Loopback(t *testing.T) {
 	require.Contains(t, err.Error(), "security:")
 }
 
+// TestCheckEgressIPLiterals_BareIPv6Loopback verifies that a bare IPv6 loopback
+// address (no brackets, no port) is not silently bypassed.
+func TestCheckEgressIPLiterals_BareIPv6Loopback(t *testing.T) {
+	err := CheckEgressIPLiterals([]string{"::1"}, Policy{})
+	require.Error(t, err, "bare ::1 (IPv6 loopback, no brackets) must be blocked")
+	require.Contains(t, err.Error(), "security:")
+}
+
 // TestCheckEgressIPLiterals_UnspecifiedIPv4 verifies 0.0.0.0 is blocked.
 func TestCheckEgressIPLiterals_UnspecifiedIPv4(t *testing.T) {
 	err := CheckEgressIPLiterals([]string{"0.0.0.0:5432"}, Policy{})
