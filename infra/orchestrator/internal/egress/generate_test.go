@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
@@ -209,4 +210,27 @@ func TestRender_DNSMasqWriteFails(t *testing.T) {
 
 	_, err := g.Render("spawn-2", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x"}}}, security.Defaults("strict"))
 	require.Error(t, err)
+}
+
+// TestRenderSquid_UsesResolvedHTTPEgress verifies that RenderSquid reads from
+// ResolvedHTTPEgress() instead of directly from Egress.AllowDomains.
+func TestRenderSquid_UsesResolvedHTTPEgress(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"api.example.com"}}
+	out := string(RenderSquid(r, security.Policy{}))
+	if !strings.Contains(out, "dstdomain .api.example.com") {
+		t.Fatalf("missing domain in squid config:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access deny all") {
+		t.Fatalf("missing default-deny in squid config:\n%s", out)
+	}
+}
+
+// TestRenderSquid_InjectionEscaped verifies that a domain containing a newline
+// cannot inject a second squid directive.
+func TestRenderSquid_InjectionEscaped(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"evil.com\nhttp_access allow all"}}
+	out := string(RenderSquid(r, security.Policy{}))
+	if strings.Contains(out, "\nhttp_access allow all\n") {
+		t.Fatalf("injection leaked in squid config:\n%s", out)
+	}
 }
