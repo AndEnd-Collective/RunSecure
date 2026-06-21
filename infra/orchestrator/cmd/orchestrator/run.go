@@ -290,6 +290,9 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 		if err != nil {
 			return nil, err
 		}
+		for _, w := range yml.DeprecationWarnings() {
+			fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
+		}
 		return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
 	}
 	return nil, errors.New("unknown repo")

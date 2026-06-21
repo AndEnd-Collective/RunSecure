@@ -83,8 +83,17 @@ _generate_squid_conf() {
         return
     fi
 
-    # Collect domains from http_egress
+    # Collect domains from http_egress; fall back to deprecated egress.allow_domains.
     EGRESS_DOMAINS=$(_yq '(.http_egress // []) | .[]' "$RUNNER_YML")
+
+    if [[ -z "$EGRESS_DOMAINS" ]]; then
+        # Check deprecated key before giving up.
+        LEGACY_DOMAINS=$(_yq '(.egress.allow_domains // []) | .[]' "$RUNNER_YML")
+        if [[ -n "$LEGACY_DOMAINS" ]]; then
+            echo "[generate-egress-conf] WARNING: egress.allow_domains is deprecated; rename the key to http_egress. Backward-compatibility alias will be removed in the next major release." >&2
+            EGRESS_DOMAINS="$LEGACY_DOMAINS"
+        fi
+    fi
 
     if [[ -z "$EGRESS_DOMAINS" ]]; then
         _log "No project-specific HTTP egress — using base squid config."

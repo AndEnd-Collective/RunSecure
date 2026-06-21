@@ -207,7 +207,14 @@ tcp_egress:                            # Raw-TCP allowlist (HAProxy)
   - postgres.example.com:5432          # host:port, ports must be unique
 
 dns:                                   # DNS resolver (default: host DNS)
-  host: false                          # false = run dnsmasq inside the proxy
+  host: false                          # false = run dnsmasq inside the proxy.
+                                       # NOTE: dns.host: false is a no-op on the
+                                       # Go orchestrator path. dnsmasq needs
+                                       # CAP_NET_BIND_SERVICE to bind port 53,
+                                       # which is unavailable when the proxy
+                                       # container runs with cap_drop: ALL.
+                                       # dns.host: false is fully supported by
+                                       # run.sh (the legacy shell path).
   servers: [1.1.1.1]                   # required when host:false
   hosts_file: ./infra/dns/hosts.txt    # optional static map (path or https://)
   whitelist_file: ./allow.txt          # optional strict allowlist (path or https://)

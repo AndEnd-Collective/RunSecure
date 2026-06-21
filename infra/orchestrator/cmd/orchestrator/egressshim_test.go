@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/egress"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
@@ -192,6 +195,90 @@ func TestBuildBasePolicy_MalformedScopeOverride_ReturnsError(t *testing.T) {
 		allKeys,
 	)
 	require.Error(t, err, "malformed scope override must abort startup")
+}
+
+// TestRunnerYML_DeprecationWarning_EmittedToStderr verifies that when a project's
+// runner.yml uses the deprecated egress.allow_domains key, RunnerYML emits a
+// [RunSecure] WARNING to stderr. This exercises the wiring added in run.go that
+// calls yml.DeprecationWarnings() after every successful Parse.
+func TestRunnerYML_DeprecationWarning_EmittedToStderr(t *testing.T) {
+	// Write a runner.yml that uses the deprecated egress.allow_domains key.
+	dir := t.TempDir()
+	ghDir := filepath.Join(dir, ".github")
+	require.NoError(t, os.MkdirAll(ghDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ghDir, "runner.yml"), []byte(`
+runtime: node:24
+egress:
+  allow_domains:
+    - api.github.com
+`), 0o644))
+
+	pd := &productionDeps{
+		scopeRef: &config.Scope{
+			Repos: []config.RepoBlock{
+				{Repo: "owner/repo", ProjectDir: dir},
+			},
+		},
+	}
+
+	// Redirect stderr so we can assert on the warning output.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	snap, parseErr := pd.RunnerYML("owner/repo")
+
+	// Restore stderr before any assertions so test output is not lost.
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+
+	require.NoError(t, parseErr)
+	require.NotNil(t, snap)
+	require.Contains(t, buf.String(), "[RunSecure] WARNING:",
+		"deprecation warning must be emitted to stderr")
+	require.Contains(t, buf.String(), "egress.allow_domains is deprecated",
+		"warning must name the deprecated key")
+}
+
+// TestRunnerYML_NoWarning_WhenHTTPEgressUsed verifies that no deprecation warning
+// is emitted when the current http_egress key is used.
+func TestRunnerYML_NoWarning_WhenHTTPEgressUsed(t *testing.T) {
+	dir := t.TempDir()
+	ghDir := filepath.Join(dir, ".github")
+	require.NoError(t, os.MkdirAll(ghDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ghDir, "runner.yml"), []byte(`
+runtime: node:24
+http_egress:
+  - api.github.com
+`), 0o644))
+
+	pd := &productionDeps{
+		scopeRef: &config.Scope{
+			Repos: []config.RepoBlock{
+				{Repo: "owner/repo", ProjectDir: dir},
+			},
+		},
+	}
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	snap, parseErr := pd.RunnerYML("owner/repo")
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+
+	require.NoError(t, parseErr)
+	require.NotNil(t, snap)
+	require.NotContains(t, buf.String(), "[RunSecure] WARNING:",
+		"no deprecation warning must be emitted when http_egress is used")
 }
 
 // TestAllOverrideKeys_EachKeyRecognized is a drift guard: for every key returned

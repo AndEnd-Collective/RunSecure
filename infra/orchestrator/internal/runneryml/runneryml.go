@@ -76,8 +76,9 @@ func (r *Runner) ResolvedHTTPEgress() []string {
 }
 
 // DeprecationWarnings returns a slice of human-readable deprecation messages
-// for any deprecated fields that are in use. Callers should log each entry at
-// WARNING level. The slice is empty when no deprecated fields are active.
+// for any deprecated fields that are in use. The slice is empty when no
+// deprecated fields are active. The orchestrator emits each entry to stderr
+// via fmt.Fprintln after every Parse call.
 //
 // Current deprecations:
 //   - egress.allow_domains → http_egress (deprecated since 2.0.0; honored as
