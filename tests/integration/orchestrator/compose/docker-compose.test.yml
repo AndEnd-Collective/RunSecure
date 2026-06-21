@@ -42,6 +42,10 @@ services:
       RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
       RUNSECURE_LISTEN_ADDR: ":2375"
       RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
+      # Egress-network gate (Task 7/10): the socket-proxy reads this at startup to
+      # activate the runner→egress isolation gate. Must match the orchestrator's
+      # RUNSECURE_EGRESS_NETWORK so the gate fires on the correct network name.
+      RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
 
   orchestrator:
     image: runsecure-orchestrator:local

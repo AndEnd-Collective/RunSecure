@@ -20,7 +20,8 @@
 #  15. Runs TCP egress tests (Docker — requires HAProxy configured)
 #  16. Runs DNS validation tests (Docker — requires dnsmasq configured)
 #  17. Runs orchestrator egress tests (real proxy: HTTP allow/block, TCP, attacker)
-#  18. Tears down everything, reports results
+#  18. Runs socket-proxy egress-attach isolation gate tests (Task 10)
+#  19. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -40,6 +41,7 @@
 #   ./tests/integration/run-integration-tests.sh --test tcp-egress
 #   ./tests/integration/run-integration-tests.sh --test dns
 #   ./tests/integration/run-integration-tests.sh --test orch-egress
+#   ./tests/integration/run-integration-tests.sh --test socket-proxy-egress
 #
 # Prerequisites:
 #   - Docker running
@@ -74,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -88,7 +90,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$SINGLE_TEST" ]]; then
-    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress"
+    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress"
     if ! echo "$SINGLE_TEST" | grep -qE "^(${valid_tests})$"; then
         echo "ERROR: --test requires a value (${valid_tests})"
         exit 1
@@ -392,6 +394,17 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "orch-egress" ]]; then
         run_orch_compose_test "compose-egress-attacker.sh"
 else
     skip_step "Orchestrator egress tests (real proxy)" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 16: Socket-proxy Egress-Attach Isolation Gate (Task 10)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "socket-proxy-egress" ]]; then
+    echo -e "\n${BOLD}--- Phase 16: Socket-proxy Egress-Attach Isolation Gate ---${NC}"
+    step "Socket-proxy: runner→egress attach denied, proxy→egress allowed" \
+        run_orch_compose_test "compose-egress-attach-deny.sh"
+else
+    skip_step "Socket-proxy egress-attach isolation gate" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================
