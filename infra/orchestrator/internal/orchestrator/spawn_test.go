@@ -596,3 +596,26 @@ func TestExecute_SpawnInput_EnableDNSMasq_False(t *testing.T) {
 	assert.False(t, spawnCalls[0].EnableDNSMasq,
 		"EnableDNSMasq must be false when dns.host is nil")
 }
+
+// TestExecute_TCPEgressPorts_ZeroPort covers the port<=0 skip branch in the
+// tcpEgressPorts parsing loop (spawn.go). Port "0" passes ValidateEgress (it
+// is a valid digit string and is not 80/443) but is rejected by the `port > 0`
+// guard in the loop — only the positive port 5432 must appear in TCPEgressPorts.
+func TestExecute_TCPEgressPorts_ZeroPort(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{
+		"db.example.com:5432", // valid — included
+	}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "tcp-zeroport"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.Equal(t, []int{5432}, spawnCalls[0].TCPEgressPorts,
+		"only port 5432 must appear in TCPEgressPorts")
+}

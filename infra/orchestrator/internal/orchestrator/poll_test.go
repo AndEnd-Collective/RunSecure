@@ -404,3 +404,69 @@ func TestPoll_PollTickEventFiresEveryCycle(t *testing.T) {
 	NewPoll(scope, d).tick(context.Background())
 	d.requireEmitted(t, cornerstone.EventPollTick)
 }
+
+// TestPoll_HandlePollError_Default covers the default branch in handlePollError
+// (poll.go) — a generic error that is neither ErrRateLimited nor ErrAuthFailed.
+// The function must not panic or emit any event; subsequent ticks still run.
+func TestPoll_HandlePollError_Default(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	// Return HTTP 500 — the github client maps this to a generic (non-sentinel) error.
+	srv.mu.Lock()
+	srv.queueErrCode["o/r"] = 500
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	p := NewPoll(scope, d)
+	// Must not panic; rate-limit and auth-degraded events must NOT fire.
+	p.tick(context.Background())
+	require.False(t, d.IsRateLimited("s"),
+		"generic 500 must not mark the scope rate-limited")
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventRatelimitPaused)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventAuthDegraded)
+}
+
+// TestPoll_IntentChannelFull_CtxCancel covers the case <-ctx.Done() branch
+// inside tick's intent-send select (poll.go). When the intent channel is full
+// and ctx is cancelled, tick must return without blocking.
+func TestPoll_IntentChannelFull_CtxCancel(t *testing.T) {
+	d := newPollDeps(t)
+	// Replace the unbuffered/large channel with a zero-capacity (blocking) channel
+	// so that the first intent send blocks immediately.
+	d.intents = make(chan SpawnIntent, 0)
+
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	// Queue more jobs than capacity so tick tries to send at least one intent.
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 5
+	srv.mu.Unlock()
+
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 5}},
+	}
+	p := NewPoll(scope, d)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.tick(ctx)
+		close(done)
+	}()
+
+	// Give tick a moment to reach the blocking select, then cancel ctx.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// tick returned after ctx cancel — correct behaviour
+	case <-time.After(2 * time.Second):
+		t.Fatal("tick did not return after ctx cancellation with a full intent channel")
+	}
+}
