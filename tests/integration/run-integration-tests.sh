@@ -19,7 +19,8 @@
 #  14. Runs DNS config validation tests (host-side, no Docker)
 #  15. Runs TCP egress tests (Docker — requires HAProxy configured)
 #  16. Runs DNS validation tests (Docker — requires dnsmasq configured)
-#  17. Tears down everything, reports results
+#  17. Runs orchestrator egress tests (real proxy: HTTP allow/block, TCP, attacker)
+#  18. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -38,6 +39,7 @@
 #   ./tests/integration/run-integration-tests.sh --test dns-validate
 #   ./tests/integration/run-integration-tests.sh --test tcp-egress
 #   ./tests/integration/run-integration-tests.sh --test dns
+#   ./tests/integration/run-integration-tests.sh --test orch-egress
 #
 # Prerequisites:
 #   - Docker running
@@ -72,7 +74,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -84,6 +86,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$SINGLE_TEST" ]]; then
+    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress"
+    if ! echo "$SINGLE_TEST" | grep -qE "^(${valid_tests})$"; then
+        echo "ERROR: --test requires a value (${valid_tests})"
+        exit 1
+    fi
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -361,6 +371,27 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "dns" ]]; then
         run_compose_test "test-dns-validation.sh" "runner-node:24" "dns"
 else
     skip_step "DNS validation tests (Docker)" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 15: Orchestrator Egress Tests (real runsecure-proxy image)
+# ============================================================================
+ORCH_COMPOSE_DIR="${SCRIPT_DIR}/orchestrator/compose"
+run_orch_compose_test() {
+    local script="$1"
+    bash "${ORCH_COMPOSE_DIR}/${script}"
+}
+
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "orch-egress" ]]; then
+    echo -e "\n${BOLD}--- Phase 15: Orchestrator Egress Tests (real proxy) ---${NC}"
+    step "Orch-egress HTTP: api.github.com allowed, example.com blocked" \
+        run_orch_compose_test "compose-egress-http.sh"
+    step "Orch-egress TCP: HAProxy proxies port 5432, port 6379 refused" \
+        run_orch_compose_test "compose-egress-tcp.sh"
+    step "Orch-egress attacker: five attack vectors all blocked" \
+        run_orch_compose_test "compose-egress-attacker.sh"
+else
+    skip_step "Orchestrator egress tests (real proxy)" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================

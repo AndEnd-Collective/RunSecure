@@ -32,25 +32,33 @@ RUN apt-get update \
          haproxy \
          dnsmasq \
     && rm -rf /var/lib/apt/lists/* \
+    # Create a non-root user UID 1001 that the orchestrator spawns containers
+    # with (User: "1001:0" in docker/spawn.go). The Debian `proxy` user is UID
+    # 13; we add a dedicated `runsecure` user at 1001 so directory ownership
+    # matches the spawn-time user override.
+    && groupadd -g 1001 runsecure \
+    && useradd -u 1001 -g 1001 -s /sbin/nologin -M runsecure \
     && mkdir -p /var/log/squid /var/spool/squid /var/run/squid \
-    && chown -R proxy:proxy /var/log/squid /var/spool/squid /var/run/squid \
+    && chown -R 1001:1001 /var/log/squid /var/spool/squid /var/run/squid \
     && mkdir -p /etc/haproxy /var/lib/haproxy \
-    && chown -R proxy:proxy /etc/haproxy /var/lib/haproxy \
+    && chown -R 1001:1001 /etc/haproxy /var/lib/haproxy \
     && mkdir -p /var/run/dnsmasq \
-    && chown -R proxy:proxy /var/run/dnsmasq
+    && chown -R 1001:1001 /var/run/dnsmasq
 
 COPY base.conf /etc/squid/squid.conf
 COPY haproxy.cfg.tmpl /etc/haproxy/haproxy.cfg.tmpl
 COPY dnsmasq.conf.tmpl /etc/dnsmasq.conf.tmpl
 COPY proxy-entrypoint.sh /usr/local/bin/proxy-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/proxy-entrypoint.sh
+RUN chmod +x /usr/local/bin/proxy-entrypoint.sh \
+    && chown 1001:1001 /etc/squid/squid.conf
 
 # No EXPOSE — the proxy is only accessed via the internal Docker network
 # by name (proxy:3128 / proxy:5432 / proxy:53). Omitting EXPOSE prevents
 # accidental host port binding in compose configs.
 
-# Run as the proxy user
-USER proxy
+# Run as the runsecure user (UID 1001) — matches the User: "1001:0" override
+# applied by the orchestrator in docker/spawn.go.
+USER 1001:1001
 
 CMD ["/usr/local/bin/proxy-entrypoint.sh"]

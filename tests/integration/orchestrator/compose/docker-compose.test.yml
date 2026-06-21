@@ -62,6 +62,10 @@ services:
       # it to testdata/allowed-images.txt before each test.
       RUNSECURE_RUNNER_IMAGE_DEFAULT: "${RUNSECURE_TEST_RUNNER_REF:-runsecure-test-runner:local}"
       RUNSECURE_PROXY_IMAGE: "${RUNSECURE_TEST_PROXY_REF:-runsecure-test-runner:local}"
+      # Egress network for per-spawn proxy containers. Set by stack_up_real_proxy
+      # to "spawn-egress" so the orchestrator attaches the proxy to the network
+      # that carries a test-backend container for TCP egress checks.
+      RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
     volumes:
       - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
       - ./testdata/pat:/run/secrets/runsecure-pat:ro
