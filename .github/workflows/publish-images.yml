@@ -367,3 +367,93 @@ jobs:
         with:
           sarif_file: grype-proxy.sarif
           category: grype-proxy
+
+  # --- Post-publish Grype scan: orchestrator image (distroless Go binary) -----
+  # The orchestrator is a long-running control-plane binary; CVEs in its Go
+  # stdlib/modules (as the gh-stdlib findings showed) must gate the publish.
+  grype-scan-orchestrator:
+    needs: [gate, orchestrator]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Grype scan (orchestrator image) — fail on HIGH/CRITICAL with fix
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary"
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-orchestrator.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
+
+      - name: Upload Grype scan results (orchestrator) to GitHub Security
+        if: always() && hashFiles('grype-orchestrator.sarif') != ''
+        uses: github/codeql-action/upload-sarif@f52b05f4acaaa234e44466e66d29050e135ea9ef # v4.36.0
+        with:
+          sarif_file: grype-orchestrator.sarif
+          category: grype-orchestrator
+
+  # --- Post-publish Grype scan: socket-proxy image (distroless Go binary) -----
+  # socket-proxy is the only component mounting docker.sock; its binary must be
+  # CVE-gated like every other published image.
+  grype-scan-socket-proxy:
+    needs: [gate, socket-proxy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Grype scan (socket-proxy image) — fail on HIGH/CRITICAL with fix
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary"
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file grype-socket-proxy.sarif --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
+
+      - name: Upload Grype scan results (socket-proxy) to GitHub Security
+        if: always() && hashFiles('grype-socket-proxy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@f52b05f4acaaa234e44466e66d29050e135ea9ef # v4.36.0
+        with:
+          sarif_file: grype-socket-proxy.sarif
+          category: grype-socket-proxy
