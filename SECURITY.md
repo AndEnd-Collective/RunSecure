@@ -100,7 +100,7 @@ The Docker network architecture prevents the container from reaching the interne
 
 8. **The egress proxy is fail-closed.** If squid, haproxy, or dnsmasq dies, the container exits and the runner's connections start failing. There is no graceful degradation.
 
-9. **`egress:` field removed.** Replaced by `http_egress:`. Configs still using `egress:` are rejected at orchestrator startup with an "unknown field" error from the strict-schema validator.
+9. **`egress.allow_domains` deprecated (2.0.0).** Renamed to `http_egress`. The old key is honoured as an alias in 2.x — the Go orchestrator and `run.sh` both accept it and emit a `WARNING` to stderr recommending migration. The alias will be removed in 3.0; migrate now by renaming the key. Both paths (orchestrator + `run.sh`) enforce `http_egress` through the Squid allowlist per-spawn.
 
 10. **No UDP egress.** UDP traffic (other than DNS via dnsmasq when `dns.host: false`) is not proxied.
 
@@ -113,6 +113,12 @@ The Docker network architecture prevents the container from reaching the interne
 14. **JIT config exposure via env var (deprecated path).** The orchestrator currently passes the GitHub JIT runner token to the container via `RUNNER_JIT_CONFIG`. While the entrypoint reads it once and `unset`s it, the value is briefly visible to `docker inspect`, container audit logs, and any process inside the container that reads `/proc/1/environ` before the entrypoint clears it. The entrypoint also accepts a file-based path (`RUNNER_JIT_CONFIG_FILE`) which removes those exposure surfaces entirely; the orchestrator switchover to file-mode is a tracked follow-up. Until then, keep gh CLI scopes minimal (see `[RunSecure] WARNING` lines on `run.sh` startup) and do not run RunSecure on shared hosts where unprivileged users can inspect container config.
 
 15. **`gh` CLI scope breadth (M15).** The orchestrator on the host uses `gh auth` to request JIT tokens. If the authenticated user has scopes beyond `repo` + `workflow` (or `admin:org` + `workflow` for org runners), a compromised orchestrator can do more than launch ephemeral runners. `run.sh` now warns at startup when it detects scopes like `delete_repo`, `admin:public_key`, `admin:gpg_key`, `admin:org_hook`, `gist`, or `user`. Re-authenticate with the minimum scope set when this warning appears.
+
+16. **Orchestrator egress enforcement (2.0.0).** The Go orchestrator now enforces the `http_egress` and `tcp_egress` allow-paths per-spawn, not just deny-all. Each spawn creates one combined proxy container (Squid + HAProxy + dnsmasq) that is dual-homed on the internal runner network (DNS alias `proxy`) and a deploy-provisioned `spawn-egress` network with ICC disabled. The runner container receives `HTTP_PROXY=http://proxy:3128` and has no direct internet route. Squid also refuses private-IP destinations (DNS-rebinding defense). Literal private/special-range IPs in `tcp_egress`/`http_egress` are rejected by the orchestrator unless the operator sets `orchestrator.security_overrides.allow_private_cidrs: true` and the scope grants `allow_project_overrides`.
+
+17. **Orchestrator dnsmasq limitation (2.0.x).** The Go orchestrator drops all Linux capabilities (`cap_drop: ALL`) before starting each per-spawn proxy container. `dnsmasq` needs `CAP_NET_BIND_SERVICE` to bind port 53; that capability is unavailable on the orchestrator path, so `dns.host: false` is a no-op when using the orchestrator. `run.sh` still supports `dns.host: false` fully. Remote `hosts_file`/`whitelist_file` fetching via the orchestrator is a tracked 2.0.x follow-up. This is an architectural gap, not a regression — the orchestrator path was deny-all before 2.0.0.
+
+18. **Egress-gate network-name matching.** The socket-proxy gates `spawn-egress` network attachment to containers labelled `runsecure.role=proxy`. The gate matches by network **name**, not by cryptographic ID. A compromised orchestrator that knows the network name could re-attach to it. The network name is derived from the spawn ID and is not predictable from outside the orchestrator process; this is a residual risk documented for transparency.
 
 ### Accepted Risks
 

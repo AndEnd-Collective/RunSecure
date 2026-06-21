@@ -187,10 +187,21 @@ runtime: node:24                       # Required. node:24, node:22,
                                        # python:3.12, python:3.11,
                                        # rust:stable | beta | nightly | 1.X.Y
 
-http_egress:                           # HTTP/HTTPS allowlist (Squid)
-  - .npmjs.org                         # Domain prefix matches all subdomains
-  - api.example.com                    # Bare domain matches exact host
-  - .pypi.org
+http_egress:                           # HTTP/HTTPS allowlist (Squid).
+  - .npmjs.org                         # Domain prefix matches all subdomains.
+  - api.example.com                    # Bare domain matches exact host.
+  - .pypi.org                          # Enforced per-spawn by the Go orchestrator
+                                       # and by run.sh. Private/special-range IPs
+                                       # are rejected unless the operator explicitly
+                                       # opts in via security_overrides.
+
+# DEPRECATED: egress.allow_domains was renamed http_egress in 2.0.0.
+# The old key is still accepted as an alias in 2.x (a WARNING is logged),
+# but will be removed in 3.0. Rename now:
+#   egress:
+#     allow_domains: [.npmjs.org]
+# becomes:
+#   http_egress: [.npmjs.org]
 
 tcp_egress:                            # Raw-TCP allowlist (HAProxy)
   - postgres.example.com:5432          # host:port, ports must be unique
@@ -241,7 +252,14 @@ Validate any `runner.yml` against the schema:
 
 The runner container has **no direct internet route**. Its only network
 peer is the proxy container, which sits on two networks: the
-runner-only internal network and the host-reachable external bridge.
+runner-only internal network (ICC disabled) and the host-reachable external bridge.
+
+**Both the Go orchestrator and `run.sh` enforce the allow-path**, not just
+deny-all. The orchestrator creates one proxy container per spawn (Squid + HAProxy +
+dnsmasq) with `HTTP_PROXY=http://proxy:3128` injected into the runner, and applies
+`http_egress` to Squid and `tcp_egress` to HAProxy. Private/special-range IPs in
+egress entries are rejected by the orchestrator unless the operator explicitly opts
+in (see SECURITY.md §16).
 
 ```
    YOUR JOB                  PROXY CONTAINER             INTERNET

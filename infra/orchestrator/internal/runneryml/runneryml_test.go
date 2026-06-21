@@ -99,6 +99,34 @@ func TestResolvedHTTPEgress_DeprecatedAlias(t *testing.T) {
 	require.Equal(t, "api.github.com", got[0])
 }
 
+func TestDeprecationWarnings(t *testing.T) {
+	t.Run("warns when only egress.allow_domains set", func(t *testing.T) {
+		r := &Runner{Egress: Egress{AllowDomains: []string{"api.github.com"}}}
+		warns := r.DeprecationWarnings()
+		require.Len(t, warns, 1)
+		require.Contains(t, warns[0], "egress.allow_domains is deprecated")
+		require.Contains(t, warns[0], "http_egress")
+	})
+
+	t.Run("no warning when http_egress is set (even alongside allow_domains)", func(t *testing.T) {
+		r := &Runner{
+			HTTPEgress: []string{".npmjs.org"},
+			Egress:     Egress{AllowDomains: []string{"api.github.com"}},
+		}
+		require.Empty(t, r.DeprecationWarnings())
+	})
+
+	t.Run("no warning when neither deprecated nor current field is set", func(t *testing.T) {
+		r := &Runner{}
+		require.Empty(t, r.DeprecationWarnings())
+	})
+
+	t.Run("no warning when only http_egress is set", func(t *testing.T) {
+		r := &Runner{HTTPEgress: []string{".npmjs.org"}}
+		require.Empty(t, r.DeprecationWarnings())
+	})
+}
+
 func TestValidateEgress(t *testing.T) {
 	cases := []struct {
 		name    string

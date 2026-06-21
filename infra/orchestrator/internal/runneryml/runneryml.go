@@ -75,6 +75,23 @@ func (r *Runner) ResolvedHTTPEgress() []string {
 	return r.Egress.AllowDomains
 }
 
+// DeprecationWarnings returns a slice of human-readable deprecation messages
+// for any deprecated fields that are in use. Callers should log each entry at
+// WARNING level. The slice is empty when no deprecated fields are active.
+//
+// Current deprecations:
+//   - egress.allow_domains → http_egress (deprecated since 2.0.0; honored as
+//     an alias for one release cycle).
+func (r *Runner) DeprecationWarnings() []string {
+	if len(r.Egress.AllowDomains) > 0 && len(r.HTTPEgress) == 0 {
+		return []string{
+			"runner.yml: egress.allow_domains is deprecated; rename the key to http_egress. " +
+				"Backward-compatibility alias will be removed in the next major release.",
+		}
+	}
+	return nil
+}
+
 var (
 	reHostPort = regexp.MustCompile(`^[a-zA-Z0-9.-]+:[0-9]{1,5}$`)
 	reDomain   = regexp.MustCompile(`^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
