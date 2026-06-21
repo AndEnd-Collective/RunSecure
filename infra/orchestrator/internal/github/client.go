@@ -1,7 +1,8 @@
-// Package github implements a thin HTTP client to the GitHub REST API,
-// using a fine-grained PAT loaded from a file (mode 0400). The PAT is
-// re-read from disk when its mtime changes — supports PAT rotation
-// without orchestrator restart.
+// Package github implements a thin HTTP client to the GitHub REST API.
+// Authentication is delegated to an auth.Provider, which may be a PAT
+// provider (with mtime-based hot-reload) or a GitHub App provider (with
+// cached installation tokens). Callers obtain a client via NewClient (PAT,
+// backward-compatible) or NewClientWithProvider (any Provider).
 package github
 
 import (
@@ -11,22 +12,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
-	"sync"
 	"time"
+
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/auth"
 )
 
 const DefaultBaseURL = "https://api.github.com"
 
+// Client is a thin HTTP client for the GitHub REST API. It delegates
+// credential management to an auth.Provider; every outbound request carries
+// the token returned by provider.Token(ctx).
 type Client struct {
-	baseURL string
-	patFile string
-	hc      *http.Client
-
-	mu    sync.RWMutex
-	pat   string
-	mtime time.Time
+	baseURL  string
+	provider auth.Provider
+	hc       *http.Client
 }
 
 // HTTPClientTimeout is the per-request timeout for outbound GitHub calls.
@@ -34,58 +33,36 @@ type Client struct {
 // operator inside a covered function body.
 func HTTPClientTimeout() time.Duration { return 30 * time.Second }
 
+// NewClient constructs a Client that authenticates with a PAT stored in
+// patFile (mode 0400 enforced). Backward-compatible with existing callers.
 func NewClient(baseURL, patFile string) (*Client, error) {
-	c := &Client{
-		baseURL: baseURL,
-		patFile: patFile,
+	p, err := auth.NewPATProvider(patFile)
+	if err != nil {
+		return nil, fmt.Errorf("github: %w", err)
+	}
+	return NewClientWithProvider(baseURL, p)
+}
+
+// NewClientWithProvider constructs a Client that uses the given auth.Provider
+// for all requests. p must be non-nil and safe for concurrent use.
+func NewClientWithProvider(baseURL string, p auth.Provider) (*Client, error) {
+	return &Client{
+		baseURL:  baseURL,
+		provider: p,
 		hc: &http.Client{
 			Timeout: HTTPClientTimeout(),
 		},
-	}
-	if err := c.reload(); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// reload reads the PAT file.
-func (c *Client) reload() error {
-	info, err := os.Stat(c.patFile)
-	if err != nil {
-		return fmt.Errorf("github: stat pat: %w", err)
-	}
-	b, err := os.ReadFile(c.patFile)
-	if err != nil {
-		return fmt.Errorf("github: read pat: %w", err)
-	}
-	c.mu.Lock()
-	c.pat = strings.TrimSpace(string(b))
-	c.mtime = info.ModTime()
-	c.mu.Unlock()
-	return nil
-}
-
-// maybeReload re-reads the PAT file iff its mtime has changed.
-func (c *Client) maybeReload() error {
-	info, err := os.Stat(c.patFile)
-	if err != nil {
-		return err
-	}
-	c.mu.RLock()
-	stale := !info.ModTime().Equal(c.mtime)
-	c.mu.RUnlock()
-	if stale {
-		return c.reload()
-	}
-	return nil
+	}, nil
 }
 
 // Do issues a request. The body argument (if non-nil) is JSON-marshaled.
 // Caller is responsible for closing resp.Body.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	if err := c.maybeReload(); err != nil {
-		return nil, err
+	tok, err := c.provider.Token(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github: get token: %w", err)
 	}
+
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -98,9 +75,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if err != nil {
 		return nil, err
 	}
-	c.mu.RLock()
-	req.Header.Set("Authorization", "Bearer "+c.pat)
-	c.mu.RUnlock()
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if bodyReader != nil {

@@ -29,8 +29,11 @@ type Scope struct {
 }
 
 type AuthBlock struct {
-	Type    string `yaml:"type"` // "pat" only in Plan A
-	PATFile string `yaml:"pat_file"`
+	Type           string `yaml:"type"`             // "pat" or "github_app"
+	PATFile        string `yaml:"pat_file"`         // required when type=pat
+	AppID          int64  `yaml:"app_id"`           // required when type=github_app
+	InstallationID int64  `yaml:"installation_id"`  // required when type=github_app
+	PrivateKeyFile string `yaml:"private_key_file"` // required when type=github_app (mode 0400)
 }
 
 type OrchEgressBlock struct {

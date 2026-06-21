@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 // osReadFile is the file-read function used by NewPATProvider. It is a
@@ -12,27 +14,30 @@ import (
 // exercise the ReadFile error branch without OS-level trickery.
 var osReadFile = os.ReadFile
 
+// osStat is the file-stat function used by patProvider for mtime checks.
+// Package-level variable so tests can inject failures.
+var osStat = os.Stat
+
 // patProvider implements Provider using a fine-grained Personal Access Token
 // stored in a file.
 //
 // Read-behavior: the token is read once at construction (NewPATProvider) and
-// cached for the lifetime of the provider. This mirrors the initial load in
-// github.Client.reload() and keeps Token() allocation-free on the hot path.
-// Unlike github.Client — which also watches mtime and reloads on rotation —
-// patProvider intentionally omits hot-reload: the Provider interface is meant
-// to be the single credential source and a restart is an acceptable rotation
-// strategy for the orchestrator process. If hot-reload is needed, wrap with a
-// rotating decorator rather than bloating this type.
+// cached. On each Token() call the file mtime is checked; if it has changed
+// the file is re-read (hot-reload without orchestrator restart). This matches
+// the mtime-reload behavior that github.Client previously implemented directly.
+// Thread-safe via mu.
 type patProvider struct {
-	token string
+	patFile string
+	mu      sync.RWMutex
+	token   string
+	mtime   time.Time
 }
 
 // NewPATProvider constructs a patProvider from the given file path.
 // The file must exist and have mode exactly 0400; any other mode is rejected
-// to prevent accidental credential exposure (mirrors the check in
-// internal/config/scope_validate.go:37).
+// to prevent accidental credential exposure.
 func NewPATProvider(patFile string) (Provider, error) {
-	info, err := os.Stat(patFile)
+	info, err := osStat(patFile)
 	if err != nil {
 		return nil, fmt.Errorf("auth: stat pat file %s: %w", patFile, err)
 	}
@@ -43,11 +48,46 @@ func NewPATProvider(patFile string) (Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: read pat file %s: %w", patFile, err)
 	}
-	return &patProvider{token: strings.TrimSpace(string(b))}, nil
+	return &patProvider{
+		patFile: patFile,
+		token:   strings.TrimSpace(string(b)),
+		mtime:   info.ModTime(),
+	}, nil
 }
 
-// Token returns the cached PAT. ctx is accepted for interface compliance and
-// future cancellation support.
+// Token returns the current PAT, reloading from disk when the file mtime has
+// changed. ctx is accepted for interface compliance and future cancellation.
 func (p *patProvider) Token(_ context.Context) (string, error) {
-	return p.token, nil
+	info, err := osStat(p.patFile)
+	if err != nil {
+		return "", fmt.Errorf("auth: stat pat file %s: %w", p.patFile, err)
+	}
+
+	p.mu.RLock()
+	stale := !info.ModTime().Equal(p.mtime)
+	p.mu.RUnlock()
+
+	if stale {
+		if err := p.reload(info); err != nil {
+			return "", err
+		}
+	}
+
+	p.mu.RLock()
+	tok := p.token
+	p.mu.RUnlock()
+	return tok, nil
+}
+
+// reload re-reads the PAT file and updates the cached token and mtime.
+func (p *patProvider) reload(info os.FileInfo) error {
+	b, err := osReadFile(p.patFile)
+	if err != nil {
+		return fmt.Errorf("auth: read pat file %s: %w", p.patFile, err)
+	}
+	p.mu.Lock()
+	p.token = strings.TrimSpace(string(b))
+	p.mtime = info.ModTime()
+	p.mu.Unlock()
+	return nil
 }

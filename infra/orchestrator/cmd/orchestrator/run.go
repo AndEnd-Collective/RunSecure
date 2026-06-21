@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/auth"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/compose"
 	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
@@ -43,7 +44,11 @@ func Run(ctx context.Context, scopePath string) error {
 	// Bug #3 fix: respect RUNSECURE_GITHUB_BASE_URL for integration tests
 	// (mock-github) and future GitHub Enterprise deployments.
 	baseURL := envOr("RUNSECURE_GITHUB_BASE_URL", github.DefaultBaseURL)
-	gh, err := github.NewClient(baseURL, s.Auth.PATFile)
+	provider, err := buildAuthProvider(s, baseURL)
+	if err != nil {
+		return err
+	}
+	gh, err := github.NewClientWithProvider(baseURL, provider)
 	if err != nil {
 		return err
 	}
@@ -150,6 +155,26 @@ func Run(ctx context.Context, scopePath string) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// buildAuthProvider constructs the appropriate auth.Provider for the scope's
+// configured auth type. It is a package-level function (not inlined in Run) so
+// that the cmd tests can invoke it without instantiating the full Run graph.
+func buildAuthProvider(s *config.Scope, apiBaseURL string) (auth.Provider, error) {
+	switch s.Auth.Type {
+	case "pat":
+		return auth.NewPATProvider(s.Auth.PATFile)
+	case "github_app":
+		return auth.NewGitHubAppProvider(
+			s.Auth.AppID,
+			s.Auth.InstallationID,
+			s.Auth.PrivateKeyFile,
+			apiBaseURL,
+		)
+	default:
+		// Validate() already rejects unknown types; this is a defensive guard.
+		return nil, fmt.Errorf("orchestrator: unknown auth.type %q", s.Auth.Type)
+	}
 }
 
 func envOr(k, fallback string) string {

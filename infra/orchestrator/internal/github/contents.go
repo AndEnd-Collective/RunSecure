@@ -31,8 +31,9 @@ type contentsResponse struct {
 func (c *Client) GetRunnerYML(ctx context.Context, repo, etag string) (body []byte, newETag string, notModified bool, err error) {
 	path := fmt.Sprintf("/repos/%s/contents/.github/runner.yml", repo)
 
-	if err := c.maybeReload(); err != nil {
-		return nil, "", false, err
+	tok, err := c.provider.Token(ctx)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("github: get token: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
@@ -40,9 +41,7 @@ func (c *Client) GetRunnerYML(ctx context.Context, repo, etag string) (body []by
 		return nil, "", false, err
 	}
 
-	c.mu.RLock()
-	req.Header.Set("Authorization", "Bearer "+c.pat)
-	c.mu.RUnlock()
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if etag != "" {

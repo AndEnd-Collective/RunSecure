@@ -73,8 +73,8 @@ func TestValidate_CustomProfileRequiresOverrides(t *testing.T) {
 	require.ErrorContains(t, s.Validate(), "security_overrides")
 }
 
-func TestValidate_AuthTypeMustBePAT(t *testing.T) {
-	s := makeScope(t, func(s *Scope) { s.Auth.Type = "github_app" })
+func TestValidate_AuthTypeInvalid(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Auth.Type = "oauth" })
 	require.ErrorContains(t, s.Validate(), "auth.type")
 }
 
@@ -205,4 +205,84 @@ func TestValidate_Backend_Invalid_Rejected(t *testing.T) {
 func TestValidate_Backend_Invalid_Rejected_Docker(t *testing.T) {
 	s := makeScope(t, func(s *Scope) { s.Backend = "docker" })
 	require.ErrorContains(t, s.Validate(), "backend")
+}
+
+// --- github_app auth type ---
+
+// makeAppScope builds a valid Scope with auth.type=github_app, writing a
+// mode-0400 fake PEM file. The mut function can override any field.
+func makeAppScope(t *testing.T, mut func(*Scope)) *Scope {
+	t.Helper()
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "app.pem")
+	require.NoError(t, os.WriteFile(keyFile, []byte("-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n"), 0o600))
+	require.NoError(t, os.Chmod(keyFile, 0o400))
+
+	projDir := filepath.Join(dir, "proj")
+	require.NoError(t, os.MkdirAll(filepath.Join(projDir, ".github"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projDir, ".github", "runner.yml"), []byte("runtime: node:24\n"), 0o644))
+
+	s := &Scope{
+		APIVersion:          SupportedAPIVersion,
+		Name:                "app-test",
+		GlobalMaxRunners:    4,
+		PollIntervalSeconds: 15,
+		SecurityProfile:     "strict",
+		Auth: AuthBlock{
+			Type:           "github_app",
+			AppID:          12345,
+			InstallationID: 67890,
+			PrivateKeyFile: keyFile,
+		},
+		OrchEgress: OrchEgressBlock{AllowDomains: []string{"api.github.com"}},
+		Repos: []RepoBlock{{
+			Repo: "o/r", ProjectDir: projDir, MaxConcurrent: 2,
+		}},
+	}
+	if mut != nil {
+		mut(s)
+	}
+	return s
+}
+
+// TestValidate_GitHubApp_HappyPath verifies that a correctly configured
+// github_app auth block passes validation.
+func TestValidate_GitHubApp_HappyPath(t *testing.T) {
+	s := makeAppScope(t, nil)
+	require.NoError(t, s.Validate())
+}
+
+// TestValidate_GitHubApp_AppIDRequired verifies that app_id=0 is rejected.
+func TestValidate_GitHubApp_AppIDRequired(t *testing.T) {
+	s := makeAppScope(t, func(s *Scope) { s.Auth.AppID = 0 })
+	require.ErrorContains(t, s.Validate(), "app_id")
+}
+
+// TestValidate_GitHubApp_InstallationIDRequired verifies that installation_id=0
+// is rejected.
+func TestValidate_GitHubApp_InstallationIDRequired(t *testing.T) {
+	s := makeAppScope(t, func(s *Scope) { s.Auth.InstallationID = 0 })
+	require.ErrorContains(t, s.Validate(), "installation_id")
+}
+
+// TestValidate_GitHubApp_PrivateKeyFileRequired verifies that an empty
+// private_key_file is rejected.
+func TestValidate_GitHubApp_PrivateKeyFileRequired(t *testing.T) {
+	s := makeAppScope(t, func(s *Scope) { s.Auth.PrivateKeyFile = "" })
+	require.ErrorContains(t, s.Validate(), "private_key_file")
+}
+
+// TestValidate_GitHubApp_PrivateKeyFileMustExist verifies that a non-existent
+// private_key_file path is rejected.
+func TestValidate_GitHubApp_PrivateKeyFileMustExist(t *testing.T) {
+	s := makeAppScope(t, func(s *Scope) { s.Auth.PrivateKeyFile = "/nonexistent/key.pem" })
+	require.Error(t, s.Validate())
+}
+
+// TestValidate_GitHubApp_PrivateKeyFileMode0400Required verifies that a key
+// file with wrong permissions is rejected.
+func TestValidate_GitHubApp_PrivateKeyFileMode0400Required(t *testing.T) {
+	s := makeAppScope(t, nil)
+	require.NoError(t, os.Chmod(s.Auth.PrivateKeyFile, 0o644))
+	require.ErrorContains(t, s.Validate(), "mode 0400")
 }
