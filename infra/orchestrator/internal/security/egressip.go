@@ -10,26 +10,42 @@ import (
 // blocked by default in egress entries. Built once at package init.
 var blockedRanges []*net.IPNet
 
+// builtinBlockedCIDRs is the canonical list of private/special-use ranges.
+var builtinBlockedCIDRs = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"0.0.0.0/8",
+	"::1/128",
+	"fe80::/10",
+	"fc00::/7",
+	"::/128",
+}
+
+// parseCIDRFn is the CIDR parser used to build blockedRanges. Replaced in
+// tests to exercise the panic path.
+var parseCIDRFn = net.ParseCIDR
+
 func init() {
-	for _, cidr := range []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"0.0.0.0/8",
-		"::1/128",
-		"fe80::/10",
-		"fc00::/7",
-		"::/128",
-	} {
-		_, network, err := net.ParseCIDR(cidr)
+	blockedRanges = mustBuildBlockedRanges(parseCIDRFn, builtinBlockedCIDRs)
+}
+
+// mustBuildBlockedRanges parses cidrs using parseFn and returns the resulting
+// []*net.IPNet slice. Panics on parse failure — all callers pass hard-coded
+// literals so failure must never occur in production.
+func mustBuildBlockedRanges(parseFn func(string) (net.IP, *net.IPNet, error), cidrs []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, network, err := parseFn(cidr)
 		if err != nil {
 			// All entries are hard-coded literals; this must never happen.
 			panic(fmt.Sprintf("security: failed to parse built-in blocked CIDR %q: %v", cidr, err))
 		}
-		blockedRanges = append(blockedRanges, network)
+		out = append(out, network)
 	}
+	return out
 }
 
 // extractHost strips an optional :port suffix and IPv6 bracket notation from

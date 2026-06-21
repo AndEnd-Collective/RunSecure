@@ -92,3 +92,24 @@ func TestEmitter_WriteError_PropagatesAsError(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cornerstone: write")
 }
+
+// TestEmitter_MarshalError covers emit.go's json.Marshal error branch.
+// Passing a channel inside ErrorData (map[string]any) triggers json.Marshal
+// failure because channels are not serialisable.
+func TestEmitter_MarshalError_PropagatesAsError(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, FixedClock("t"), FixedUUID("u"))
+	err := em.Emit(Event{
+		EventSubType: EventPollTick,
+		EventType:    EventTypeActivity,
+		EventDetails: EventDetails{
+			Summary:   "x",
+			Severity:  6,
+			Result:    ResultSuccess,
+			ErrorData: map[string]any{"bad": make(chan int)}, // chan is not JSON-serialisable
+		},
+	})
+	require.Error(t, err, "Emit must return an error when json.Marshal fails")
+	require.Contains(t, err.Error(), "cornerstone: marshal")
+	require.Empty(t, buf.String(), "must not write anything when marshal fails")
+}

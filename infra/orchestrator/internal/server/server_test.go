@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -208,6 +209,53 @@ func TestLessSpawnKey_SelfComparison(t *testing.T) {
 func TestLessAPICallKey_SelfComparison(t *testing.T) {
 	k := APICallKey{Endpoint: "jit", Status: "201"}
 	require.False(t, lessAPICallKey(k, k))
+}
+
+// TestMetrics_BreakerOpen_True covers the `if deps.BreakerOpen()[repo] { v = 1 }`
+// branch in renderMetrics (metrics.go:92). All existing tests only exercise the
+// breaker=false path; this exercises breaker=true and verifies the gauge emits 1.
+func TestMetrics_BreakerOpen_True(t *testing.T) {
+	d := newDeps(t)
+	d.breakers = map[string]bool{"o/r": true}
+	m := NewMetrics(d)
+	rr := httpRec()
+	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `runsecure_orchestrator_breaker_open{repo="o/r"} 1`,
+		"open breaker must emit gauge value 1")
+}
+
+// TestServer_Run_ListenerError covers the `case err := <-errCh` branch in
+// server.Run (server.go:380). Binding both listeners to the same non-zero
+// port causes one ListenAndServe to fail immediately, which triggers the
+// error return path.
+func TestServer_Run_ListenerError(t *testing.T) {
+	d := newDeps(t)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	// Use an explicit port so the second listener conflicts.
+	srv := New("127.0.0.1:0", "127.0.0.1:0", d, em)
+
+	// Start with a background context that we never cancel; the listener error
+	// should cause Run to return on its own via the errCh case.
+	ctx := context.Background()
+
+	// To guarantee a conflict, pre-bind a port and point both listeners at it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	conflictAddr := ln.Addr().String()
+
+	srv2 := New(conflictAddr, conflictAddr, d, em)
+	done := make(chan error, 1)
+	go func() { done <- srv2.Run(ctx) }()
+
+	select {
+	case runErr := <-done:
+		require.Error(t, runErr, "Run must return a non-nil error when both listeners fail")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s on listener conflict")
+	}
+	_ = srv // used above to quiet the linter
 }
 
 // Mutation kill: metrics.go:125 + :136 — sort.Slice less-than functions.

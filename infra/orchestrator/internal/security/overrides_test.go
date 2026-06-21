@@ -143,3 +143,23 @@ func TestApplyOverrides_AllowDoH_InvalidTypeReturnsError(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "allow_doh")
 }
+
+// TestApplyOverrides_AllowPrivateCIDRs_NotAList verifies that passing a
+// non-list value for allow_private_cidrs returns an error.
+func TestApplyOverrides_AllowPrivateCIDRs_NotAList(t *testing.T) {
+	_, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_private_cidrs"},
+		map[string]any{"allow_private_cidrs": "10.0.0.0/8"},
+	)
+	require.ErrorContains(t, err, "allow_private_cidrs")
+}
+
+// TestApplyOverrides_AllowPrivateCIDRs_NonStringEntry verifies that a
+// non-string element inside allow_private_cidrs returns an error.
+func TestApplyOverrides_AllowPrivateCIDRs_NonStringEntry(t *testing.T) {
+	_, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_private_cidrs"},
+		map[string]any{"allow_private_cidrs": []any{42}},
+	)
+	require.ErrorContains(t, err, "allow_private_cidrs")
+}

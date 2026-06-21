@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -99,6 +100,18 @@ func TestCheckEgressIPLiterals_HTTPEgress_NoPort(t *testing.T) {
 func TestCheckEgressIPLiterals_PublicIP(t *testing.T) {
 	err := CheckEgressIPLiterals([]string{"8.8.8.8:53"}, Policy{})
 	require.NoError(t, err, "public IP 8.8.8.8 must not be blocked")
+}
+
+// TestMustBuildBlockedRanges_PanicOnBadCIDR covers the panic branch in
+// mustBuildBlockedRanges (egressip.go init path). The production parseFn is
+// net.ParseCIDR and always succeeds; here we inject an error-returning stub.
+func TestMustBuildBlockedRanges_PanicOnBadCIDR(t *testing.T) {
+	badParseFn := func(s string) (net.IP, *net.IPNet, error) {
+		return nil, nil, errors.New("injected parse failure")
+	}
+	require.Panics(t, func() {
+		mustBuildBlockedRanges(badParseFn, []string{"not-a-cidr"})
+	}, "mustBuildBlockedRanges must panic when parseFn returns an error")
 }
 
 // TestApplyOverrides_AllowPrivateCIDRs verifies that allow_private_cidrs parses

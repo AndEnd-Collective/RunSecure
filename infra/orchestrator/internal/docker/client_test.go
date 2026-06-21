@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -309,6 +310,42 @@ func TestInspectContainer_MalformedResponse(t *testing.T) {
 	})
 	_, err := c.InspectContainer(context.Background(), "x")
 	require.Error(t, err)
+}
+
+// TestDo_MarshalError covers the json.Marshal error branch in do() (client.go:202).
+// We temporarily replace jsonMarshal with a stub that always fails, then restore it.
+func TestDo_MarshalError(t *testing.T) {
+	orig := jsonMarshal
+	jsonMarshal = func(v any) ([]byte, error) {
+		return nil, errors.New("injected marshal failure")
+	}
+	t.Cleanup(func() { jsonMarshal = orig })
+
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Should not be reached.
+		w.WriteHeader(http.StatusOK)
+	})
+	// CreateNetwork passes a non-nil body through do(), triggering jsonMarshal.
+	_, err := c.CreateNetwork(context.Background(), CreateNetworkRequest{Name: "rs-net"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "injected marshal failure")
+}
+
+// TestDo_NewRequestError covers the http.NewRequestWithContext error branch in
+// do() (client.go:208). We replace newHTTPRequest with a stub that fails.
+func TestDo_NewRequestError(t *testing.T) {
+	orig := newHTTPRequest
+	newHTTPRequest = func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+		return nil, errors.New("injected request-creation failure")
+	}
+	t.Cleanup(func() { newHTTPRequest = orig })
+
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	err := c.StartContainer(context.Background(), "abc")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "injected request-creation failure")
 }
 
 func TestCreateContainer_SerializesNetworkingConfig(t *testing.T) {

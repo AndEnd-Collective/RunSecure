@@ -20,6 +20,11 @@ import (
 // (HTTP 403 with a JSON deny body).
 var ErrPolicyDenied = errors.New("docker: socket-proxy policy denied")
 
+// jsonMarshal and newHTTPRequest are injectable seams for testing the error
+// branches inside do() (json.Marshal failure and request-construction failure).
+var jsonMarshal = json.Marshal
+var newHTTPRequest = http.NewRequestWithContext
+
 // Client speaks the Docker Engine API through the socket-proxy.
 type Client interface {
 	CreateContainer(ctx context.Context, req CreateContainerRequest) (id string, err error)
@@ -125,13 +130,13 @@ type httpClient struct {
 func (c *httpClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := jsonMarshal(body)
 		if err != nil {
 			return nil, err
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	req, err := newHTTPRequest(ctx, method, c.base+path, reader)
 	if err != nil {
 		return nil, err
 	}
