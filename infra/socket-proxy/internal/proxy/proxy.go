@@ -22,6 +22,7 @@ type Server struct {
 	images    *imageallow.Allowlist
 	logger    func(format string, args ...any)
 	egressNet string // value of RUNSECURE_EGRESS_NETWORK; "" disables egress gate
+	egressVol string // value of RUNSECURE_EGRESS_VOLUME; "" denies all named-volume mounts
 }
 
 // transportIdleConnTimeout is the per-connection idle timeout for the
@@ -58,6 +59,7 @@ func New(dockerSock string, images *imageallow.Allowlist) *Server {
 		images:    images,
 		logger:    func(string, ...any) {},
 		egressNet: os.Getenv("RUNSECURE_EGRESS_NETWORK"),
+		egressVol: os.Getenv("RUNSECURE_EGRESS_VOLUME"),
 	}
 }
 
@@ -80,7 +82,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = r.Body.Close()
-		if err := ValidateContainerCreate(body, s.images, s.egressNet); err != nil {
+		if err := ValidateContainerCreate(body, s.images, s.egressNet, s.egressVol); err != nil {
 			s.deny(w, "validation_failed", err.Error(), http.StatusForbidden)
 			return
 		}

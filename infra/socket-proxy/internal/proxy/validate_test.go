@@ -53,8 +53,8 @@ func validate(t *testing.T, body map[string]any) error {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
-	// egressNet="" keeps the egress gate inert for all existing validation tests.
-	return ValidateContainerCreate(b, loadAllowAllImages(t), "")
+	// egressNet="" and egressVol="" keep both gates inert for existing tests.
+	return ValidateContainerCreate(b, loadAllowAllImages(t), "", "")
 }
 
 // TestValidateContainerCreate_EgressAttach covers the egress-network gate:
@@ -75,17 +75,17 @@ func TestValidateContainerCreate_EgressAttach(t *testing.T) {
 	}
 
 	// Positive: proxy container is allowed to attach the egress network.
-	if err := ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress"); err != nil {
+	if err := ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress", ""); err != nil {
 		t.Fatalf("proxy->egress should be allowed: %v", err)
 	}
 
 	// Attacker: runner role must be denied.
-	if err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress"); err == nil {
+	if err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress", ""); err == nil {
 		t.Fatal("SECURITY: runner->egress must be denied")
 	}
 
 	// Attacker: unlabeled container must be denied.
-	if err := ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress"); err == nil {
+	if err := ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress", ""); err == nil {
 		t.Fatal("SECURITY: unlabeled->egress must be denied")
 	}
 }
@@ -98,7 +98,7 @@ func TestValidateContainerCreate_EgressGateInertWhenNetEmpty(t *testing.T) {
 		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
 	// With egressNet="" the gate must not fire even if spawn-egress is attached.
-	require.NoError(t, ValidateContainerCreate(body, allowAll(t), ""))
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "", ""))
 }
 
 // TestValidateContainerCreate_NonEgressNetworkUnaffected verifies that
@@ -109,7 +109,7 @@ func TestValidateContainerCreate_NonEgressNetworkUnaffected(t *testing.T) {
 		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"rs-internal":{}}}}`)
 	// runner attaches rs-internal, not spawn-egress → no egress-gate denial.
-	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "spawn-egress"))
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "spawn-egress", ""))
 }
 
 // TestValidateContainerCreate_EgressAttach_ErrorSentinel verifies that the
@@ -119,8 +119,57 @@ func TestValidateContainerCreate_EgressAttach_ErrorSentinel(t *testing.T) {
 		`"Labels":{"runsecure.role":"runner"},` +
 		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
-	err := ValidateContainerCreate(body, allowAll(t), "spawn-egress")
+	err := ValidateContainerCreate(body, allowAll(t), "spawn-egress", "")
 	require.ErrorIs(t, err, ErrEgressAttachDenied)
+}
+
+// TestValidateContainerCreate_EgressVolume covers the egress-volume bind gate.
+// A volume-name bind source (no leading "/") may only be mounted by the
+// designated egress volume on a runsecure.role=proxy container. Every other
+// combination — runner role, a different volume name, or an unset egressVol —
+// must be denied with ErrEgressVolumeDenied.
+func TestValidateContainerCreate_EgressVolume(t *testing.T) {
+	mk := func(role, bind string) []byte {
+		return []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+			`"Labels":{"runsecure.role":"` + role + `"},` +
+			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
+			`"Binds":["` + bind + `"]}}`)
+	}
+
+	t.Run("proxy+egressVol allowed", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "myscope-egress-configs:/mnt/e:ro"),
+			allowAll(t), "", "myscope-egress-configs")
+		require.NoError(t, err)
+	})
+
+	t.Run("runner+egressVol DENIED", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("runner", "myscope-egress-configs:/mnt/e:ro"),
+			allowAll(t), "", "myscope-egress-configs")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
+	t.Run("proxy+other volume DENIED", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "other-volume:/mnt/e:ro"),
+			allowAll(t), "", "myscope-egress-configs")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
+	t.Run("egressVol empty -> any volume name denied", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "any-volume:/mnt/e:ro"),
+			allowAll(t), "", "")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
+	t.Run("host-bind denial intact", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "/var/run:/foo:ro"),
+			allowAll(t), "", "vol")
+		require.ErrorIs(t, err, ErrBindForbidden)
+	})
 }
 
 func TestValidateContainerCreate_Baseline_OK(t *testing.T) {
@@ -252,7 +301,7 @@ func TestValidateContainerCreate_RefusesUntrustedImage(t *testing.T) {
 }
 
 func TestValidateContainerCreate_RefusesMalformedJSON(t *testing.T) {
-	err := ValidateContainerCreate([]byte("{ not json"), loadAllowAllImages(t), "")
+	err := ValidateContainerCreate([]byte("{ not json"), loadAllowAllImages(t), "", "")
 	require.Error(t, err)
 }
 
@@ -304,21 +353,21 @@ func TestValidateContainerCreate_EgressAttach_NetworkMode(t *testing.T) {
 	}
 
 	// Attacker: runner role with NetworkMode=egressNet must be denied.
-	err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress")
+	err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress", "")
 	if err == nil {
 		t.Fatal("SECURITY BYPASS: runner+NetworkMode=egressNet must be denied")
 	}
 	require.ErrorIs(t, err, ErrEgressAttachDenied)
 
 	// Unlabeled container with NetworkMode=egressNet must also be denied.
-	err = ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress")
+	err = ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress", "")
 	if err == nil {
 		t.Fatal("SECURITY BYPASS: unlabeled+NetworkMode=egressNet must be denied")
 	}
 	require.ErrorIs(t, err, ErrEgressAttachDenied)
 
 	// Positive: proxy role with NetworkMode=egressNet is allowed.
-	require.NoError(t, ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress"))
+	require.NoError(t, ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress", ""))
 }
 
 // TestValidateContainerCreate_EgressAttach_NetworkMode_Inert verifies that the
@@ -328,7 +377,7 @@ func TestValidateContainerCreate_EgressAttach_NetworkMode_Inert(t *testing.T) {
 		`"Labels":{"runsecure.role":"runner"},` +
 		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],"NetworkMode":"spawn-egress"}}`)
 	// With egressNet="" the NetworkMode gate must not fire.
-	require.NoError(t, ValidateContainerCreate(body, allowAll(t), ""))
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "", ""))
 }
 
 func TestContainsString_NilSlice(t *testing.T) {

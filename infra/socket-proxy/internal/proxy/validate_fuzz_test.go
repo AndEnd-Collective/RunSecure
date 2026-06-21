@@ -35,8 +35,10 @@ func FuzzValidateContainerCreate(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		// Must never panic — exercise both with and without egress gate.
-		_ = ValidateContainerCreate(body, allow, "")
-		_ = ValidateContainerCreate(body, allow, "spawn-egress")
+		// Must never panic — exercise both with and without egress gate,
+		// and with the egress-volume gate active.
+		_ = ValidateContainerCreate(body, allow, "", "")
+		_ = ValidateContainerCreate(body, allow, "spawn-egress", "")
+		_ = ValidateContainerCreate(body, allow, "spawn-egress", "myscope-egress-configs")
 	})
 }

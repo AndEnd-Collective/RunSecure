@@ -34,6 +34,21 @@ func egressNetworkName() string {
 	return egressNetworkFallback
 }
 
+// egressMountPath is the path the shared egress-configs volume is mounted at
+// inside the proxy container. It is a fixed constant — the volume is always
+// mounted here regardless of scope.
+const egressMountPath = "/var/run/runsecure/egress"
+
+// egressVolumeName returns the name of the shared named Docker volume that
+// carries per-spawn egress configs. It reads RUNSECURE_EGRESS_VOLUME from the
+// environment (set by compose.scope.yml). Unlike egressNetworkName there is no
+// hardcoded fallback: an empty value means the socket-proxy's volume gate is
+// fail-closed and no proxy volume mount will be permitted, surfacing a
+// misconfiguration loudly rather than silently mounting the wrong volume.
+func egressVolumeName() string {
+	return os.Getenv("RUNSECURE_EGRESS_VOLUME")
+}
+
 // SpawnWorker is the per-intent worker. One instance is shared by all
 // goroutines in the spawn-worker pool.
 type SpawnWorker struct {
@@ -143,7 +158,8 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		ResourcesNanoCPUs:  nanoCPUs,
 		ResourcesPIDs:      int64(r.Resources.PIDs),
 		JITConfigB64:       jit.EncodedJITConfig,
-		EgressConfigDir:    egressDir,
+		EgressVolume:       egressVolumeName(),
+		EgressMountPath:    egressMountPath,
 		EnableDNSMasq:      enableDNSMasq,
 	})
 	if err != nil {
@@ -167,7 +183,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	exitCode, timedOut := w.waitForExit(ctx, containerIDs["runner"], timeout)
 
 	// Step 7: teardown.
-	w.tearDown(ctx, containerIDs, netID, timedOut)
+	w.tearDown(ctx, containerIDs, netID, egressDir, timedOut)
 
 	if timedOut {
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
@@ -252,11 +268,17 @@ func (w *SpawnWorker) waitForExit(ctx context.Context, runnerID string, timeout 
 	}
 }
 
-func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID string, force bool) {
+func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID, egressDir string, force bool) {
 	for _, id := range ids {
 		_ = w.deps.Docker().DeleteContainer(ctx, id, force)
 	}
 	_ = w.deps.Docker().DeleteNetwork(ctx, netID)
+	// Remove the per-spawn egress config subdir from the shared volume so it
+	// does not accumulate across spawns. egressDir is the full path on the
+	// volume (<base>/<spawnID>); empty means render never ran.
+	if egressDir != "" {
+		_ = os.RemoveAll(egressDir)
+	}
 }
 
 // recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits

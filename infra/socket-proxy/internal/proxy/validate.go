@@ -31,6 +31,12 @@ var (
 	// label. This is the isolation-bypass gate: only the proxy sidecar may join
 	// the outbound egress network; runner containers must never reach it.
 	ErrEgressAttachDenied = errors.New("attachment to egress network requires runsecure.role=proxy")
+	// ErrEgressVolumeDenied is returned when a container-create request mounts a
+	// named Docker volume (a Bind source with no leading "/") that is not the
+	// designated egress volume, or mounts the designated egress volume without
+	// carrying runsecure.role=proxy. Only the proxy sidecar may mount the egress
+	// configs volume; runner containers must never mount it.
+	ErrEgressVolumeDenied = errors.New("volume mount requires runsecure.role=proxy and must be the designated egress volume")
 )
 
 // Forbidden host-path prefixes for HostConfig.Binds source paths.
@@ -76,8 +82,15 @@ var forbiddenBindSuffixes = []string{
 // disable the egress gate (development / test environments without an egress
 // network).
 //
+// egressVol is the name of the designated egress configs volume (read from
+// RUNSECURE_EGRESS_VOLUME at server init). Any HostConfig.Binds entry whose
+// source is a volume name (no leading "/") must be exactly egressVol AND the
+// request must carry Labels["runsecure.role"]="proxy"; everything else is
+// denied with ErrEgressVolumeDenied. Pass "" to deny ALL named-volume mounts
+// (the gate is fail-closed: an unset egressVol means no volume may be mounted).
+//
 // The function does NOT modify the body; it only validates.
-func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNet string) error {
+func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNet string, egressVol string) error {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return fmt.Errorf("malformed JSON: %w", err)
@@ -133,6 +146,32 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 	}
 	if err := checkBinds(hc["Binds"]); err != nil {
 		return err
+	}
+
+	// Egress-volume gate: any Bind whose source is a named volume (no leading
+	// "/") may only be the designated egress volume on a role=proxy container.
+	// checkBinds already cleared host-path Binds; this handles volume-name Binds
+	// which it deliberately ignores (no leading "/" never matches a forbidden
+	// prefix). Fail-closed: egressVol=="" denies every named-volume mount.
+	{
+		labels, _ := req["Labels"].(map[string]any)
+		role, _ := labels["runsecure.role"].(string)
+		if arr, ok := hc["Binds"].([]any); ok {
+			for _, item := range arr {
+				s, ok := item.(string)
+				if !ok {
+					continue
+				}
+				src := strings.SplitN(s, ":", 2)[0]
+				if strings.HasPrefix(src, "/") {
+					continue // host path — already vetted by checkBinds
+				}
+				// Named-volume source: gate it.
+				if egressVol == "" || src != egressVol || role != "proxy" {
+					return ErrEgressVolumeDenied
+				}
+			}
+		}
 	}
 
 	// Egress-network gate: if RUNSECURE_EGRESS_NETWORK is configured, only

@@ -46,6 +46,9 @@ services:
       # activate the runner→egress isolation gate. Must match the orchestrator's
       # RUNSECURE_EGRESS_NETWORK so the gate fires on the correct network name.
       RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
+      # Egress-volume gate (Task 12): only role=proxy may mount this named volume.
+      # Must match the orchestrator's RUNSECURE_EGRESS_VOLUME.
+      RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
 
   orchestrator:
     image: runsecure-orchestrator:local
@@ -70,15 +73,26 @@ services:
       # to "spawn-egress" so the orchestrator attaches the proxy to the network
       # that carries a test-backend container for TCP egress checks.
       RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
+      # Per-spawn egress configs are written here (onto the shared named volume)
+      # and mounted read-only into each proxy at the same path.
+      RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
+      RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
     volumes:
       - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
       - ./testdata/pat:/run/secrets/runsecure-pat:ro
       - ./testdata/proj:/projects/proj:ro
+      # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
+      # the daemon mounts the same volume read-only into each proxy container.
+      - egress-configs:/var/run/runsecure/egress:rw
     ports:
       - "127.0.0.1:18080:8080"
       - "127.0.0.1:18081:8081"
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
+
+volumes:
+  egress-configs:
+    name: runsecure-egress-configs
 
 networks:
   test-net:

@@ -20,7 +20,8 @@ type SpawnInputs struct {
 	ResourcesNanoCPUs    int64 // 1e9 = 1 CPU
 	ResourcesPIDs        int64
 	JITConfigB64         string
-	EgressConfigDir      string // host path bind-mounted into proxy containers
+	EgressVolume         string   // shared named Docker volume carrying per-spawn egress configs
+	EgressMountPath      string   // path the egress volume is mounted at inside the proxy
 	Labels               []string // additional labels (key=value) merged onto every container
 	EnableDNSMasq        bool     // when true, inject ENABLE_DNSMASQ=true into proxy env
 }
@@ -60,17 +61,29 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	}
 
 	// 1. Combined proxy container (dual-homed: internal net + egress net).
-	proxyEnv := []string{"ENABLE_HAPROXY=true"}
+	//
+	// The egress config files live in a spawn-scoped subdir of the shared
+	// named egress volume (written by the orchestrator). The volume is mounted
+	// read-only; the proxy reads its config paths from SQUID_CFG / HAPROXY_CFG /
+	// DNSMASQ_CFG, which point at <EgressMountPath>/<SpawnID>/<file>.
+	spawnDir := in.EgressMountPath + "/" + in.SpawnID
+	proxyEnv := []string{
+		"ENABLE_HAPROXY=true",
+		"SQUID_CFG=" + spawnDir + "/squid.conf",
+		"HAPROXY_CFG=" + spawnDir + "/haproxy.cfg",
+		"DNSMASQ_CFG=" + spawnDir + "/dnsmasq.conf",
+	}
 	if in.EnableDNSMasq {
 		proxyEnv = append(proxyEnv, "ENABLE_DNSMASQ=true")
 	}
 
 	proxyLabels := merge(commonLabels, map[string]string{"runsecure.role": "proxy"})
 	proxyHC := hcBase
+	// Mount the shared egress volume read-only. Docker accepts a volume name
+	// (no leading "/") as a Bind source; the socket-proxy gates this to the
+	// designated egress volume on role=proxy only.
 	proxyHC.Binds = []string{
-		in.EgressConfigDir + "/squid.conf:/etc/squid/squid.conf:ro",
-		in.EgressConfigDir + "/haproxy.cfg:/etc/haproxy/haproxy.cfg:ro",
-		in.EgressConfigDir + "/dnsmasq.conf:/etc/dnsmasq.conf:ro",
+		in.EgressVolume + ":" + in.EgressMountPath + ":ro",
 	}
 
 	// The proxy is attached to both the internal network (alias "proxy" so

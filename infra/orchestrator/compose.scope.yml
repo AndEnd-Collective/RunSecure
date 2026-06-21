@@ -29,6 +29,8 @@ services:
       RUNSECURE_LISTEN_ADDR: ":2375"
       RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
+      # Egress-volume gate: only role=proxy may mount this named volume.
+      RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
 
   orch-egress:
     image: ${RUNSECURE_PROXY_IMAGE}
@@ -63,9 +65,16 @@ services:
       RUNSECURE_RUNNER_IMAGE_PYTHON: ${RUNSECURE_RUNNER_IMAGE_PYTHON:-}
       RUNSECURE_RUNNER_IMAGE_RUST: ${RUNSECURE_RUNNER_IMAGE_RUST:-}
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
+      # Per-spawn egress configs are written here (onto the shared named volume)
+      # and mounted read-only into each proxy at the same path.
+      RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
+      RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
     volumes:
       - ./scopes/${RUNSECURE_SCOPE}.yml:/etc/runsecure/scope.yml:ro
       - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
+      # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
+      # the daemon mounts the same volume read-only into each proxy container.
+      - egress-configs:/var/run/runsecure/egress:rw
       # Add per-repo project bindings here, e.g.:
       # - /Users/foo/Code/datacentric:/projects/datacentric:ro
     ports:
@@ -74,6 +83,10 @@ services:
       - "127.0.0.1:8081:8081"
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
+
+volumes:
+  egress-configs:
+    name: ${RUNSECURE_SCOPE}-egress-configs
 
 networks:
   orch-internal:

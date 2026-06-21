@@ -115,6 +115,47 @@ func TestSpawn_ProxyDualHomed_RunnerInternalOnly(t *testing.T) {
 	}
 }
 
+// TestSpawn_ProxyGetsEgressVolumeRO_RunnerDoesNot verifies the egress-config
+// delivery design: the proxy mounts the shared named egress volume read-only
+// and reads its per-spawn config files from a spawn-scoped subdirectory; the
+// runner gets NO volume mount whatsoever.
+// SECURITY: the runner must never mount the egress volume.
+func TestSpawn_ProxyGetsEgressVolumeRO_RunnerDoesNot(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		EgressVolume: "myscope-egress-configs", EgressMountPath: "/var/run/runsecure/egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y", EnableDNSMasq: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := fc.created["proxy"]
+	wantBind := "myscope-egress-configs:/var/run/runsecure/egress:ro"
+	foundBind := false
+	for _, b := range proxy.HostConfig.Binds {
+		if b == wantBind {
+			foundBind = true
+		}
+	}
+	if !foundBind {
+		t.Fatalf("proxy Binds must contain %q, got %v", wantBind, proxy.HostConfig.Binds)
+	}
+	for _, kv := range []string{
+		"SQUID_CFG=/var/run/runsecure/egress/s1/squid.conf",
+		"HAPROXY_CFG=/var/run/runsecure/egress/s1/haproxy.cfg",
+		"DNSMASQ_CFG=/var/run/runsecure/egress/s1/dnsmasq.conf",
+	} {
+		if !hasEnv(proxy.Env, kv) {
+			t.Fatalf("proxy env must contain %q, got %v", kv, proxy.Env)
+		}
+	}
+	runner := fc.created["runner"]
+	if len(runner.HostConfig.Binds) != 0 {
+		t.Fatalf("SECURITY: runner must have no Binds, got %v", runner.HostConfig.Binds)
+	}
+}
+
 func TestSpawn_HappyPath(t *testing.T) {
 	createdNames := []string{}
 	started := []string{}
@@ -137,7 +178,7 @@ func TestSpawn_HappyPath(t *testing.T) {
 		Scope: "s", Repo: "o/r", SpawnID: "x1",
 		NetworkID: "net-id", RunnerImage: "img-r@sha256:rr", ProxyImage: "img-p@sha256:pp",
 		ResourcesMemory: 1 << 30, ResourcesNanoCPUs: 2_000_000_000, ResourcesPIDs: 2048,
-		JITConfigB64: "b64", EgressConfigDir: "/tmp/x",
+		JITConfigB64: "b64", EgressVolume: "vol", EgressMountPath: "/mnt/e",
 	})
 	require.NoError(t, err)
 	require.Len(t, ids, 2)
