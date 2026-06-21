@@ -539,6 +539,60 @@ func TestNewClient_HTTPS_WithMTLS(t *testing.T) {
 	require.Equal(t, "client", receivedClientCertCN)
 }
 
+// TestNewClient_TLSEnvError verifies that NewClient propagates the error
+// returned by buildTLSTransport when the TLS env vars are only partially set.
+// This covers the `if err != nil { return nil, err }` branch in NewClient
+// (client.go:108-110) which is not reached by tests that call buildTLSTransport
+// directly.
+func TestNewClient_TLSEnvError(t *testing.T) {
+	// Only CERT is set — _KEY and _CA are empty → buildTLSTransport errors.
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "/tmp/some.crt")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "")
+	_, err := NewClient("tcp://docker-host:2375")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must all be set together")
+}
+
+// TestBuildTLSTransport_MissingCAFile_Errors exercises the os.ReadFile error
+// path (client.go:139-143): cert+key are valid PEM files but the CA path does
+// not exist, so ReadFile returns an error.
+func TestBuildTLSTransport_MissingCAFile_Errors(t *testing.T) {
+	// Generate a minimal self-signed cert+key so LoadX509KeyPair succeeds.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "client.crt")
+	keyFile := filepath.Join(dir, "client.key")
+
+	require.NoError(t, os.WriteFile(certFile,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyFile,
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+
+	// Point CA at a path that does not exist.
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", certFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", keyFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", filepath.Join(dir, "nonexistent-ca.crt"))
+
+	_, err = buildTLSTransport()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "docker: read CA")
+}
+
 func TestNewClient_HTTP_PlaintextUnchanged(t *testing.T) {
 	// Ensure plaintext path is unchanged when TLS env vars are not set
 	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "")
