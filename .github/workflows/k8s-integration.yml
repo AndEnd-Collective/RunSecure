@@ -1,0 +1,102 @@
+# ============================================================================
+# RunSecure — K8s Integration
+# ============================================================================
+# Proves the Kubernetes security model on a REAL kind cluster with Calico CNI:
+#   1. PSS Restricted admission rejects privileged pods
+#   2. NetworkPolicy: runner can ONLY reach its own proxy
+#   3. RBAC: least-privilege SA (scoped to namespace)
+#   4. Helm: chart template renders + dry-run install succeeds
+#
+# Cluster lifecycle is owned by tests/integration/k8s/run-k8s-tests.sh.
+# kind, kubectl, and helm are installed in pre-steps so the skip-guard in
+# the harness never fires; the harness runs for real on every invocation.
+# ============================================================================
+
+name: K8s Integration
+
+on:
+  pull_request:
+    paths:
+      - "infra/orchestrator/**"
+      - "infra/socket-proxy/**"
+      - "charts/**"
+      - "tests/integration/k8s/**"
+      - ".github/workflows/k8s-integration.yml"
+  push:
+    paths:
+      - "infra/orchestrator/**"
+      - "infra/socket-proxy/**"
+      - "charts/**"
+      - "tests/integration/k8s/**"
+      - ".github/workflows/k8s-integration.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  k8s-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: '1.26'
+
+      - name: Install kind v0.31.0
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kind \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
+          echo "eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa  /tmp/kind" | sha256sum -c -
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl v1.32.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubectl \
+            https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl
+          echo "ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f  /tmp/kubectl" | sha256sum -c -
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install helm v3.17.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/helm.tar.gz \
+            https://get.helm.sh/helm-v3.17.3-linux-amd64.tar.gz
+          echo "ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd  /tmp/helm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/helm.tar.gz -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version
+
+      - name: Run k8s integration tests
+        run: |
+          set -euo pipefail
+          bash tests/integration/k8s/run-k8s-tests.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          echo "=== kubectl get pods -A ==="
+          kubectl get pods -A 2>/dev/null || true
+          echo ""
+          echo "=== kubectl describe pods -A ==="
+          kubectl describe pods -A 2>/dev/null || true
+          echo ""
+          echo "=== calico-node logs ==="
+          kubectl logs -n kube-system -l k8s-app=calico-node --tail=100 2>/dev/null || true
+          echo ""
+          echo "=== calico-kube-controllers logs ==="
+          kubectl logs -n kube-system -l k8s-app=calico-kube-controllers --tail=50 2>/dev/null || true
+          echo ""
+          echo "=== kind cluster nodes ==="
+          kubectl get nodes -o wide 2>/dev/null || true
