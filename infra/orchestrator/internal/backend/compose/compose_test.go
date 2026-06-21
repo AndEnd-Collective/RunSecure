@@ -3,6 +3,7 @@ package compose
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,6 +163,11 @@ func TestSpawn_HappyPath(t *testing.T) {
 	}
 	if h.Refs["network"] != fd.networkID {
 		t.Errorf("Handle.Refs['network'] = %q, want %q", h.Refs["network"], fd.networkID)
+	}
+	// Parity: the network NAME (not the opaque ID) must be surfaced for the
+	// runner_created event. Regression guard for the backend refactor.
+	if name := h.Refs["network_name"]; !strings.HasPrefix(name, "rs-net-") {
+		t.Errorf("Handle.Refs['network_name'] = %q, want an 'rs-net-' name", name)
 	}
 }
 

@@ -170,10 +170,10 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	_ = w.deps.Emit().EmitSpawnRunnerCreated(cornerstone.SpawnRunnerCreatedFields{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		ContainerName: containerName, ImageDigest: imageDigest,
-		// NetworkName is derived the same way as before: the compose backend
-		// names it "rs-net-<repo>-<spawnID>" and stores the ID in Refs["network"].
-		// We reconstruct the name (not the ID) here since the event field is a name.
-		NetworkName: h.Refs["network"],
+		// NetworkName must be the human-readable network name (as before the
+		// backend refactor), not the opaque network ID. The compose backend
+		// surfaces it in Refs["network_name"] = "rs-net-<repo>-<spawnID>".
+		NetworkName: h.Refs["network_name"],
 	})
 
 	// Step 6: wait for exit OR wall-clock timeout (A2).

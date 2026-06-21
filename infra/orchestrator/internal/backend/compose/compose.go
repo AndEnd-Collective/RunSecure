@@ -48,9 +48,11 @@ func (b *composeBackend) Name() string { return "compose" }
 //
 // The returned Handle carries:
 //
-//	Refs["proxy"]   → proxy container ID
-//	Refs["runner"]  → runner container ID
-//	Refs["network"] → internal network ID
+//	Refs["proxy"]        → proxy container ID
+//	Refs["runner"]       → runner container ID
+//	Refs["network"]      → internal network ID (for teardown)
+//	Refs["network_name"] → internal network name "rs-net-<repo>-<spawnID>"
+//	                       (the value the runner_created event reports)
 func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend.Handle, error) {
 	netName := fmt.Sprintf("rs-net-%s-%s",
 		strings.ReplaceAll(in.Repo, "/", "_"), in.SpawnID)
@@ -88,7 +90,8 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 	}
 
 	refs := map[string]string{
-		"network": netID,
+		"network":      netID,
+		"network_name": netName,
 	}
 	for role, id := range containerIDs {
 		refs[role] = id
