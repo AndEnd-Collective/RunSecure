@@ -127,6 +127,35 @@ func TestDeprecationWarnings(t *testing.T) {
 	})
 }
 
+// --- ParseBytes ---
+
+func TestParseBytes_ParsesValidYAML(t *testing.T) {
+	input := []byte("runtime: node:24\nlabels: [self-hosted]\n")
+	r, err := ParseBytes(input, "api:o/r")
+	require.NoError(t, err)
+	require.Equal(t, "node:24", r.Runtime)
+	require.Equal(t, []string{"self-hosted"}, r.Labels)
+}
+
+func TestParseBytes_AppliesTimeoutDefault(t *testing.T) {
+	r, err := ParseBytes([]byte("runtime: node:24\n"), "test")
+	require.NoError(t, err)
+	require.Equal(t, DefaultTimeoutSeconds, r.Orchestrator.TimeoutSeconds,
+		"ParseBytes must apply the same timeout default as Parse")
+}
+
+func TestParseBytes_MalformedYAML_Error(t *testing.T) {
+	_, err := ParseBytes([]byte(": : : not yaml"), "api:o/r")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "api:o/r", "error message must include the src label")
+}
+
+func TestParseBytes_PreservesExplicitTimeout(t *testing.T) {
+	r, err := ParseBytes([]byte("runtime: node:24\norchestrator:\n  timeout_seconds: 1800\n"), "test")
+	require.NoError(t, err)
+	require.Equal(t, 1800, r.Orchestrator.TimeoutSeconds)
+}
+
 func TestValidateEgress(t *testing.T) {
 	cases := []struct {
 		name    string

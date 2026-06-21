@@ -153,10 +153,44 @@ func TestValidate_Backend_Compose_Accepted(t *testing.T) {
 }
 
 // TestValidate_Backend_Kube_Accepted verifies that "kube" is a valid backend
-// value (Phase 2 will wire it; validation must accept it now).
+// value and that project_dir is NOT required when the kube backend is selected.
 func TestValidate_Backend_Kube_Accepted(t *testing.T) {
 	s := makeScope(t, func(s *Scope) { s.Backend = "kube" })
 	require.NoError(t, s.Validate())
+}
+
+// TestValidate_Backend_Kube_NoProjectDir verifies that repos without project_dir
+// are valid when backend=="kube" (runner.yml is fetched via the GitHub API).
+func TestValidate_Backend_Kube_NoProjectDir(t *testing.T) {
+	s := makeScope(t, func(s *Scope) {
+		s.Backend = "kube"
+		// Strip the project_dir; kube backend must NOT require it.
+		s.Repos[0].ProjectDir = ""
+	})
+	require.NoError(t, s.Validate(),
+		"kube backend must not require project_dir")
+}
+
+// TestValidate_Backend_Kube_NonexistentProjectDir verifies that a non-existent
+// project_dir is silently ignored for the kube backend (the field is unused).
+func TestValidate_Backend_Kube_NonexistentProjectDir(t *testing.T) {
+	s := makeScope(t, func(s *Scope) {
+		s.Backend = "kube"
+		s.Repos[0].ProjectDir = "/nonexistent/path"
+	})
+	require.NoError(t, s.Validate(),
+		"kube backend must ignore project_dir even if non-existent")
+}
+
+// TestValidate_Backend_Compose_RequiresProjectDir confirms the compose backend
+// still enforces project_dir (unchanged behavior).
+func TestValidate_Backend_Compose_RequiresProjectDir(t *testing.T) {
+	s := makeScope(t, func(s *Scope) {
+		s.Backend = "compose"
+		s.Repos[0].ProjectDir = ""
+	})
+	require.ErrorContains(t, s.Validate(), "project_dir",
+		"compose backend must still require project_dir")
 }
 
 // TestValidate_Backend_Invalid_Rejected verifies that unknown backend values

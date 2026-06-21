@@ -62,15 +62,19 @@ func (s *Scope) Validate() error {
 		if r.MaxConcurrent <= 0 {
 			return fmt.Errorf("config: repos[%d].max_concurrent must be > 0", i)
 		}
-		if r.ProjectDir == "" {
-			return fmt.Errorf("config: repos[%d].project_dir is required (Compose backend)", i)
-		}
-		if info, err := os.Stat(r.ProjectDir); err != nil || !info.IsDir() {
-			return fmt.Errorf("config: repos[%d].project_dir %s: not a directory", i, r.ProjectDir)
-		}
-		runnerYml := filepath.Join(r.ProjectDir, ".github", "runner.yml")
-		if _, err := os.Stat(runnerYml); err != nil {
-			return fmt.Errorf("config: repos[%d]: missing runner.yml at %s", i, runnerYml)
+		// project_dir (bind-mount) is required for the compose backend only;
+		// the kube backend fetches runner.yml via the GitHub API instead.
+		if s.Backend == "compose" {
+			if r.ProjectDir == "" {
+				return fmt.Errorf("config: repos[%d].project_dir is required (Compose backend)", i)
+			}
+			if info, err := os.Stat(r.ProjectDir); err != nil || !info.IsDir() {
+				return fmt.Errorf("config: repos[%d].project_dir %s: not a directory", i, r.ProjectDir)
+			}
+			runnerYml := filepath.Join(r.ProjectDir, ".github", "runner.yml")
+			if _, err := os.Stat(runnerYml); err != nil {
+				return fmt.Errorf("config: repos[%d]: missing runner.yml at %s", i, runnerYml)
+			}
 		}
 	}
 	if s.GlobalMaxRunners <= 0 {

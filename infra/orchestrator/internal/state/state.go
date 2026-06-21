@@ -148,6 +148,24 @@ func (s *State) Snapshot() Snapshot {
 	return snap
 }
 
+// LastETag returns the cached ETag for the given repo's runner.yml.
+// It is used by the kube backend to perform conditional GitHub API requests.
+func (s *State) LastETag(repo string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if r, ok := s.perRepo[repo]; ok {
+		return r.LastETag
+	}
+	return ""
+}
+
+// SetLastETag updates the cached ETag for the given repo's runner.yml.
+func (s *State) SetLastETag(repo, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensure(repo).LastETag = etag
+}
+
 // AllRepos returns the names of repos that have non-zero state recorded.
 // Used by drift reconciliation.
 func (s *State) AllRepos() []string {

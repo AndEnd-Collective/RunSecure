@@ -13,12 +13,14 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/compose"
+	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/clock"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/egress"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/orchestrator"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
@@ -78,10 +80,14 @@ func Run(ctx context.Context, scopePath string) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
 	}
+	be, err := selectBackend(s, dc, productionKubeCtor)
+	if err != nil {
+		return fmt.Errorf("orchestrator: backend init: %w", err)
+	}
 	pdeps := &productionDeps{
 		gh:         gh,
 		dc:         dc,
-		be:         selectBackend(s, dc),
+		be:         be,
 		em:         em,
 		clk:        clk,
 		st:         st,
@@ -297,6 +303,9 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 		if r.Repo != repo {
 			continue
 		}
+		if p.scopeRef.Backend == "kube" {
+			return loadRunnerYMLFromAPI(context.Background(), p.gh, p.st, repo)
+		}
 		yml, err := runneryml.Parse(filepath_join(r.ProjectDir, ".github", "runner.yml"))
 		if err != nil {
 			return nil, err
@@ -310,6 +319,57 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 		return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
 	}
 	return nil, errors.New("unknown repo")
+}
+
+// loadRunnerYMLFromAPI fetches runner.yml via the GitHub Contents API using
+// ETag-based conditional requests (304 → reuse cached snapshot). It is a
+// package-level function (not a method) so tests can inject a stubbed github
+// client without instantiating the full productionDeps graph.
+//
+// The st argument provides ETag storage per repo (state.RepoState.LastETag).
+// On 304 the function returns errNotModified; callers should substitute their
+// cached snapshot. On 200 the snapshot is returned and the ETag is persisted.
+//
+// TODO(k8s_context): once cornerstone defines a k8s_context schema field,
+// thread Backend=="kube" into Cornerstone spawn events here and in spawn.go
+// instead of container_context. Currently container_context is reused as-is
+// for kube (no behavior change; pod names are set via Handle.Refs not ctx).
+func loadRunnerYMLFromAPI(ctx context.Context, gh *github.Client, st etagger, repo string) (*orchestrator.RunnerYMLSnapshot, error) {
+	etag := st.LastETag(repo)
+	body, newETag, notModified, err := gh.GetRunnerYML(ctx, repo, etag)
+	if err != nil {
+		return nil, fmt.Errorf("runner.yml API fetch for %s: %w", repo, err)
+	}
+	if notModified {
+		// Caller must supply a cached snapshot; surface a sentinel so the
+		// caller can distinguish 304 from a real error.
+		return nil, errRunnerYMLNotModified
+	}
+	yml, err := runneryml.ParseBytes(body, "api:"+repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range yml.DeprecationWarnings() {
+		fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
+	}
+	if err := yml.ValidateEgress(); err != nil {
+		return nil, fmt.Errorf("runner.yml egress validation: %w", err)
+	}
+	if newETag != "" {
+		st.SetLastETag(repo, newETag)
+	}
+	return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
+}
+
+// errRunnerYMLNotModified is returned by loadRunnerYMLFromAPI when the server
+// responds 304 Not Modified. The caller must substitute the cached snapshot.
+var errRunnerYMLNotModified = errors.New("runner.yml: not modified (304)")
+
+// etagger is the subset of *state.State used by loadRunnerYMLFromAPI so that
+// tests can inject a lightweight stub without the full state.State.
+type etagger interface {
+	LastETag(repo string) string
+	SetLastETag(repo, etag string)
 }
 
 // PollDeps-only ------------------------------------------------------------
@@ -495,15 +555,29 @@ var seq atomic.Int64
 
 func nextSeq() int64 { return seq.Add(1) }
 
+// productionKubeCtor is the kubeCtor used in the binary. It calls
+// kube.NewInCluster() (requires in-cluster service-account credentials) and
+// wraps the resulting client in the kube backend.
+func productionKubeCtor() (backend.Backend, error) {
+	c, err := kube.NewInCluster()
+	if err != nil {
+		return nil, fmt.Errorf("kube: in-cluster init: %w", err)
+	}
+	return backendkube.New(c), nil
+}
+
 // selectBackend constructs the spawn backend indicated by scope.Backend.
-// Currently only "compose" (the default) is wired. Phase 2 adds "kube":
+// The kubeCtor parameter is injectable so unit tests can verify the selection
+// logic without a real Kubernetes cluster.
 //
-//	if s.Backend == "kube" { return kube.New(...) }
-//
-// The helper is intentionally a top-level function so Phase 2 can add the
-// kube branch with a one-line change and without touching the rest of Run().
-func selectBackend(s *config.Scope, dc docker.Client) backend.Backend {
-	// "kube" is accepted by validation but not wired yet (Phase 2).
-	// Fall through to compose for both "" (validated to "compose") and "compose".
-	return compose.New(dc)
+// Selection rules:
+//   - "kube"    → kubeCtor() (error propagated to caller)
+//   - "compose" → compose.New(dc)
+//   - ""        → normalised to "compose" by config.Validate before this is
+//     called, so the empty-string arm is defensive only.
+func selectBackend(s *config.Scope, dc docker.Client, kubeCtor func() (backend.Backend, error)) (backend.Backend, error) {
+	if s.Backend == "kube" {
+		return kubeCtor()
+	}
+	return compose.New(dc), nil
 }

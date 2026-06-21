@@ -86,6 +86,37 @@ func TestAllRepos(t *testing.T) {
 	require.Len(t, repos, 2)
 }
 
+// --- ETag caching (kube backend runner.yml source) ---
+
+func TestLastETag_UnknownRepo_ReturnsEmpty(t *testing.T) {
+	s := New()
+	require.Empty(t, s.LastETag("o/r"),
+		"LastETag on an unknown repo must return an empty string")
+}
+
+func TestSetLastETag_StoresAndRetrieves(t *testing.T) {
+	s := New()
+	s.SetLastETag("o/r", `"abc123"`)
+	require.Equal(t, `"abc123"`, s.LastETag("o/r"))
+}
+
+func TestSetLastETag_Overwrites(t *testing.T) {
+	s := New()
+	s.SetLastETag("o/r", `"v1"`)
+	s.SetLastETag("o/r", `"v2"`)
+	require.Equal(t, `"v2"`, s.LastETag("o/r"),
+		"second SetLastETag must overwrite the first")
+}
+
+func TestLastETag_IsolatedPerRepo(t *testing.T) {
+	s := New()
+	s.SetLastETag("o/a", `"etag-a"`)
+	s.SetLastETag("o/b", `"etag-b"`)
+	require.Equal(t, `"etag-a"`, s.LastETag("o/a"))
+	require.Equal(t, `"etag-b"`, s.LastETag("o/b"))
+	require.Empty(t, s.LastETag("o/c"))
+}
+
 func TestConcurrentAcquireRelease(t *testing.T) {
 	s := New()
 	var wg sync.WaitGroup

@@ -56,9 +56,16 @@ func Parse(path string) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("runneryml: read %s: %w", path, err)
 	}
+	return ParseBytes(b, path)
+}
+
+// ParseBytes parses a runner.yml from an in-memory byte slice. The src
+// argument is used only in error messages (e.g. "api:<repo>" for API-fetched
+// files).
+func ParseBytes(b []byte, src string) (*Runner, error) {
 	var r Runner
 	if err := yaml.Unmarshal(b, &r); err != nil {
-		return nil, fmt.Errorf("runneryml: parse %s: %w", path, err)
+		return nil, fmt.Errorf("runneryml: parse %s: %w", src, err)
 	}
 	if r.Orchestrator.TimeoutSeconds <= 0 {
 		r.Orchestrator.TimeoutSeconds = DefaultTimeoutSeconds
