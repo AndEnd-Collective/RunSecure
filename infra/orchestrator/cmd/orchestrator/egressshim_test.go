@@ -193,3 +193,36 @@ func TestBuildBasePolicy_MalformedScopeOverride_ReturnsError(t *testing.T) {
 	)
 	require.Error(t, err, "malformed scope override must abort startup")
 }
+
+// TestAllOverrideKeys_EachKeyRecognized is a drift guard: for every key returned
+// by allOverrideKeys(), we supply a minimal valid value and assert that
+// ApplyProjectOverrides accepts it without error. A silent drop (key in the list
+// but not handled by the switch) would still return no error but leave the policy
+// unchanged — the test accepts that as OK per the spec, since the gate contract
+// is that the key is *recognized* (not silently rejected). The real protection is
+// Fix 1: invalid types now return errors, so any future key that is gated but
+// unhandled will be caught at the type-mismatch layer before it can slip through.
+func TestAllOverrideKeys_EachKeyRecognized(t *testing.T) {
+	minimalValues := map[string]any{
+		"allow_wildcards":    []any{"*.example.com"},
+		"allow_doh":          true,
+		"allow_imds":         true,
+		"allow_kube_api":     true,
+		"allow_private_cidrs": []any{"10.0.0.0/8"},
+	}
+
+	keys := allOverrideKeys()
+	for _, key := range keys {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			val, ok := minimalValues[key]
+			require.True(t, ok,
+				"key %q is in allOverrideKeys() but has no minimal valid value in the drift-guard table — update the table", key)
+
+			base := security.Defaults("strict")
+			_, err := security.ApplyProjectOverrides(base, []string{key}, map[string]any{key: val})
+			require.NoError(t, err,
+				"key %q with minimal valid value must be accepted by ApplyProjectOverrides", key)
+		})
+	}
+}

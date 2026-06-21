@@ -39,27 +39,33 @@ func ApplyProjectOverrides(base Policy, allowProjectOverrides []string, override
 			}
 		case "allow_doh":
 			arr, ok := raw.([]any)
-			if !ok {
-				if b, ok := raw.(bool); ok && b {
+			if ok {
+				for _, v := range arr {
+					if s, ok := v.(string); ok {
+						base.DoHProviders = append(base.DoHProviders, s)
+					}
+				}
+				if len(base.DoHProviders) > 0 {
 					base.AllowDoH = true
 				}
-				continue
-			}
-			for _, v := range arr {
-				if s, ok := v.(string); ok {
-					base.DoHProviders = append(base.DoHProviders, s)
+			} else if b, ok := raw.(bool); ok {
+				if b {
+					base.AllowDoH = true
 				}
-			}
-			if len(base.DoHProviders) > 0 {
-				base.AllowDoH = true
+			} else {
+				return base, fmt.Errorf("security: allow_doh must be a bool or list of strings")
 			}
 		case "allow_imds":
 			if b, ok := raw.(bool); ok {
 				base.AllowIMDS = b
+			} else {
+				return base, fmt.Errorf("security: allow_imds must be a bool")
 			}
 		case "allow_kube_api":
 			if b, ok := raw.(bool); ok {
 				base.AllowKubeAPI = b
+			} else {
+				return base, fmt.Errorf("security: allow_kube_api must be a bool")
 			}
 		case "allow_private_cidrs":
 			arr, ok := raw.([]any)
