@@ -13,3 +13,6 @@
 
 # Auto-refreshed by weekly-version-bump.yml at v2.0.0.
 ghcr.io/andend-collective/runsecure/proxy@sha256:c2f97a06ff2142b2c328413794229f923b14adb9fc822962850debc20bcc4d11
+
+# Auto-refreshed by weekly-version-bump.yml at v2.1.0.
+ghcr.io/andend-collective/runsecure/proxy@sha256:31dd3f37d84680927c0cf9393ac99e040852a7dc722be9c790818710c000f246
