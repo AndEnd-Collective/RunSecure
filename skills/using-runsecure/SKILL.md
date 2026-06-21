@@ -15,11 +15,22 @@ This skill guides adopting RunSecure in a target project. RunSecure itself is a 
 - **Egress is whitelist-only.** If a build needs to reach a host, it must be in `runner.yml` (`http_egress` for HTTP/HTTPS domains, `tcp_egress` for raw TCP `host:port`). Default-deny otherwise. Literal private/special-range IPs are rejected unless the operator opts the range in (`orchestrator.security_overrides.allow_private_cidrs`, gated by scope).
 - **One job per runner**, then exit. Never reuse a runner across jobs.
 
+## Deployment backends
+
+RunSecure supports two orchestration backends, selected by `scope.backend` in your scope config:
+
+- **Compose (default):** the orchestrator runs on a Docker host and spawns per-job stacks via the Compose backend. Install path: `infra/scripts/run.sh` (single job) or the orchestrator stack (persistent pool). No Kubernetes required.
+- **Kubernetes (`backend: kube`):** the orchestrator deploys via the Helm chart (`charts/runsecure-orchestrator/`) into a namespace on a cluster with a NetworkPolicy-enforcing CNI (e.g. Calico). Each spawn creates a runner Pod, proxy Pod, ClusterIP Service, per-spawn NetworkPolicies, and a GC-owner Secret. See [`install-kubernetes.md`](../../../install-kubernetes.md) for full setup.
+
+The orchestrator can authenticate to GitHub as a **PAT** (default) or as a **GitHub App** (set `auth.type: github_app` in the Helm values or scope config with `app_id`, `installation_id`, and a mode-0400 PEM private key). GitHub App auth avoids long-lived PAT rotation and grants scoped installation tokens.
+
+The runner.yml egress schema (`http_egress`/`tcp_egress`/`dns`) is identical regardless of backend — consumer projects don't need to know which backend is running.
+
 ## Adoption workflow
 
 ### 1. Author `.github/runner.yml` in the target project
 
-Only `runtime:` is required. Full 2.0.0 schema (see RunSecure `README.md` § "`runner.yml` — the full schema" and `skeleton/runner.yml`):
+Only `runtime:` is required. For the full runner.yml egress schema (`http_egress`/`tcp_egress`/`dns`) see RunSecure `README.md` § "`runner.yml` — the full schema" and `skeleton/runner.yml`.
 
 ```yaml
 runtime: node:24                     # node:24 | node:22 | python:3.12 | rust:stable

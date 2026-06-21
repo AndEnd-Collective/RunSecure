@@ -1,6 +1,6 @@
 {
   "name": "runsecure",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Adopt, operate, and contribute to RunSecure — hardened, ephemeral, egress-controlled GitHub Actions self-hosted runners. Provides skills + agents for setting RunSecure up in a project and for working on the RunSecure codebase itself.",
   "author": {
     "name": "AndEnd Collective"
@@ -16,6 +16,10 @@
     "ssrf",
     "docker",
     "ci",
-    "hardening"
+    "hardening",
+    "kubernetes",
+    "helm",
+    "github-app",
+    "mtls"
   ]
 }
