@@ -119,3 +119,27 @@ func TestApplyOverrides_UnknownKeyIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, merged.AllowWildcards)
 }
+
+func TestApplyOverrides_AllowIMDS_NonBoolReturnsError(t *testing.T) {
+	_, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_imds"},
+		map[string]any{"allow_imds": "yes"},
+	)
+	require.ErrorContains(t, err, "allow_imds")
+}
+
+func TestApplyOverrides_AllowKubeAPI_NonBoolReturnsError(t *testing.T) {
+	_, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_kube_api"},
+		map[string]any{"allow_kube_api": 42},
+	)
+	require.ErrorContains(t, err, "allow_kube_api")
+}
+
+func TestApplyOverrides_AllowDoH_InvalidTypeReturnsError(t *testing.T) {
+	_, err := ApplyProjectOverrides(Defaults("strict"),
+		[]string{"allow_doh"},
+		map[string]any{"allow_doh": 99},
+	)
+	require.ErrorContains(t, err, "allow_doh")
+}

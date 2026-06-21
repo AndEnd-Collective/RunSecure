@@ -119,6 +119,32 @@ assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*http_proxy
 assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*HTTPS_PROXY=' "M13: prod runner has HTTPS_PROXY (uppercase)"
 assert_in_service "$PROD_COMPOSE" "runner" '^[[:space:]]*-[[:space:]]*https_proxy=' "M13: prod runner has https_proxy (lowercase)"
 
+# --- Task 8: spawn-egress network in compose.scope.yml ----------------------
+SCOPE_COMPOSE="${RUNSECURE_ROOT}/infra/orchestrator/compose.scope.yml"
+
+# The spawn-egress network must disable inter-container communication so that
+# proxies from different spawns cannot reach each other directly.
+if grep -q 'enable_icc.*false' "${SCOPE_COMPOSE}"; then
+    pass "T8: spawn-egress disables ICC (enable_icc: false) in compose.scope.yml"
+else
+    fail "T8: spawn-egress must set enable_icc: \"false\" in compose.scope.yml"
+fi
+
+# The network must not be internal: true — it must have outbound host access.
+if ! grep -A5 'spawn-egress:' "${SCOPE_COMPOSE}" | grep -q 'internal: true'; then
+    pass "T8: spawn-egress is not internal (has outbound access)"
+else
+    fail "T8: spawn-egress must NOT be internal: true — it provides outbound internet access"
+fi
+
+# Both orchestrator and socket-proxy must receive RUNSECURE_EGRESS_NETWORK.
+assert_in_service "${SCOPE_COMPOSE}" "orchestrator" \
+    'RUNSECURE_EGRESS_NETWORK' \
+    "T8: orchestrator service has RUNSECURE_EGRESS_NETWORK env"
+assert_in_service "${SCOPE_COMPOSE}" "socket-proxy" \
+    'RUNSECURE_EGRESS_NETWORK' \
+    "T8: socket-proxy service has RUNSECURE_EGRESS_NETWORK env"
+
 # --- Print results -----------------------------------------------------------
 echo ""
 echo "=== Compose Hardening Assertions ==="

@@ -19,7 +19,9 @@
 #  14. Runs DNS config validation tests (host-side, no Docker)
 #  15. Runs TCP egress tests (Docker — requires HAProxy configured)
 #  16. Runs DNS validation tests (Docker — requires dnsmasq configured)
-#  17. Tears down everything, reports results
+#  17. Runs orchestrator egress tests (real proxy: HTTP allow/block, TCP, attacker)
+#  18. Runs socket-proxy egress-attach isolation gate tests (Task 10)
+#  19. Tears down everything, reports results
 #
 # Usage:
 #   ./tests/integration/run-integration-tests.sh
@@ -38,6 +40,8 @@
 #   ./tests/integration/run-integration-tests.sh --test dns-validate
 #   ./tests/integration/run-integration-tests.sh --test tcp-egress
 #   ./tests/integration/run-integration-tests.sh --test dns
+#   ./tests/integration/run-integration-tests.sh --test orch-egress
+#   ./tests/integration/run-integration-tests.sh --test socket-proxy-egress
 #
 # Prerequisites:
 #   - Docker running
@@ -72,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress|egress-spawn-e2e)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -84,6 +88,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$SINGLE_TEST" ]]; then
+    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress|egress-spawn-e2e"
+    if ! echo "$SINGLE_TEST" | grep -qE "^(${valid_tests})$"; then
+        echo "ERROR: --test requires a value (${valid_tests})"
+        exit 1
+    fi
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -361,6 +373,49 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "dns" ]]; then
         run_compose_test "test-dns-validation.sh" "runner-node:24" "dns"
 else
     skip_step "DNS validation tests (Docker)" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 15: Orchestrator Egress Tests (real runsecure-proxy image)
+# ============================================================================
+ORCH_COMPOSE_DIR="${SCRIPT_DIR}/orchestrator/compose"
+run_orch_compose_test() {
+    local script="$1"
+    bash "${ORCH_COMPOSE_DIR}/${script}"
+}
+
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "orch-egress" ]]; then
+    echo -e "\n${BOLD}--- Phase 15: Orchestrator Egress Tests (real proxy) ---${NC}"
+    step "Orch-egress HTTP: api.github.com allowed, example.com blocked" \
+        run_orch_compose_test "compose-egress-http.sh"
+    step "Orch-egress TCP: HAProxy proxies port 5432, port 6379 refused" \
+        run_orch_compose_test "compose-egress-tcp.sh"
+    step "Orch-egress attacker: five attack vectors all blocked" \
+        run_orch_compose_test "compose-egress-attacker.sh"
+else
+    skip_step "Orchestrator egress tests (real proxy)" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 16: Socket-proxy Egress-Attach Isolation Gate (Task 10)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "socket-proxy-egress" ]]; then
+    echo -e "\n${BOLD}--- Phase 16: Socket-proxy Egress-Attach Isolation Gate ---${NC}"
+    step "Socket-proxy: runner→egress attach denied, proxy→egress allowed" \
+        run_orch_compose_test "compose-egress-attach-deny.sh"
+else
+    skip_step "Socket-proxy egress-attach isolation gate" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 17: Orchestrator Spawn-Path Egress Delivery E2E (Task 12 / 2.0.0 gate)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "egress-spawn-e2e" ]]; then
+    echo -e "\n${BOLD}--- Phase 17: Orchestrator Spawn-Path Egress Delivery E2E ---${NC}"
+    step "Egress spawn e2e: real orchestrator spawn delivers configs via volume + enforces egress" \
+        run_orch_compose_test "compose-egress-spawn-e2e.sh"
+else
+    skip_step "Orchestrator spawn-path egress delivery e2e" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================

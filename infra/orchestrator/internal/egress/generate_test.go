@@ -1,8 +1,10 @@
 package egress
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
@@ -127,10 +129,15 @@ func TestRenderSquid_WildcardEdgeCases(t *testing.T) {
 	require.NotContains(t, out, " *.amazonaws.com\n",
 		"3-char+ wildcard MUST be trimmed (no literal '*.' in output)")
 
-	// Preserved cases: each wildcard appears as a literal in its own ACL line.
-	require.Contains(t, out, " *.\n", "2-char '*.' preserved as literal")
-	require.Contains(t, out, " foo.com\n", "non-wildcard preserved as literal")
-	require.Contains(t, out, " *foo\n", "wildcard without '.' preserved as literal")
+	// Invalid entries (fail sanitizeDomain) must be DROPPED, not emitted.
+	// "*.": not a valid domain — sanitized to "" → dropped.
+	require.NotContains(t, out, " *.\n", "2-char '*.' must be dropped by sanitizer")
+	// "foo.com": a valid domain without the wildcard prefix — sanitizeDomain passes,
+	// so it is emitted as-is (suffix = "foo.com" because the >2-char wildcard check
+	// requires w[0]=='*' && w[1]=='.' — "foo.com" has w[0]=='f', so suffix stays "foo.com").
+	require.Contains(t, out, " foo.com\n", "non-wildcard valid domain must still be emitted")
+	// "*foo": no '.' after '*' — not stripped, suffix = "*foo" → sanitizer rejects → dropped.
+	require.NotContains(t, out, " *foo\n", "wildcard without '.' must be dropped by sanitizer")
 }
 
 // Mutation kill for dnsmasq.go:31 — same wildcard parsing in dnsmasq render.
@@ -156,6 +163,48 @@ func TestRenderDNSMasq_WildcardEdgeCases(t *testing.T) {
 		"'*foo' (no dot) must NOT produce a server line")
 }
 
+// TestRender_SSRFGuard_TCPEgress verifies that Render returns an error when
+// tcp_egress contains a literal private IP (10.0.0.5:5432).
+func TestRender_SSRFGuard_TCPEgress(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		TCPEgress: []string{"10.0.0.5:5432"},
+	}
+	_, err := g.Render("spawn-ssrf-tcp", r, security.Defaults("strict"))
+	require.Error(t, err, "literal private IP in tcp_egress must be rejected")
+	require.Contains(t, err.Error(), "security:")
+}
+
+// TestRender_SSRFGuard_HTTPEgress verifies that Render returns an error when
+// http_egress contains a literal private IP (169.254.169.254).
+func TestRender_SSRFGuard_HTTPEgress(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		HTTPEgress: []string{"169.254.169.254"},
+	}
+	_, err := g.Render("spawn-ssrf-http", r, security.Defaults("strict"))
+	require.Error(t, err, "literal cloud metadata IP in http_egress must be rejected")
+	require.Contains(t, err.Error(), "security:")
+}
+
+// TestRender_SSRFGuard_AllowedViaPolicy verifies that a private IP is accepted
+// when the policy's AllowedPrivateCIDRs covers it.
+func TestRender_SSRFGuard_AllowedViaPolicy(t *testing.T) {
+	dir := t.TempDir()
+	g := NewFSGenerator(dir)
+	r := &runneryml.Runner{
+		TCPEgress: []string{"10.0.0.5:5432"},
+	}
+	_, allowedNet, err := net.ParseCIDR("10.0.0.0/8")
+	require.NoError(t, err)
+	p := security.Defaults("strict")
+	p.AllowedPrivateCIDRs = []*net.IPNet{allowedNet}
+	_, err = g.Render("spawn-ssrf-allowed", r, p)
+	require.NoError(t, err, "10.0.0.5 allowed by operator-defined CIDR must not be rejected")
+}
+
 func TestRender_DNSMasqWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	g := NewFSGenerator(dir)
@@ -166,4 +215,27 @@ func TestRender_DNSMasqWriteFails(t *testing.T) {
 
 	_, err := g.Render("spawn-2", &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"x"}}}, security.Defaults("strict"))
 	require.Error(t, err)
+}
+
+// TestRenderSquid_UsesResolvedHTTPEgress verifies that RenderSquid reads from
+// ResolvedHTTPEgress() instead of directly from Egress.AllowDomains.
+func TestRenderSquid_UsesResolvedHTTPEgress(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"api.example.com"}}
+	out := string(RenderSquid(r, security.Policy{}))
+	if !strings.Contains(out, "dstdomain .api.example.com") {
+		t.Fatalf("missing domain in squid config:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access deny all") {
+		t.Fatalf("missing default-deny in squid config:\n%s", out)
+	}
+}
+
+// TestRenderSquid_InjectionEscaped verifies that a domain containing a newline
+// cannot inject a second squid directive.
+func TestRenderSquid_InjectionEscaped(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"evil.com\nhttp_access allow all"}}
+	out := string(RenderSquid(r, security.Policy{}))
+	if strings.Contains(out, "\nhttp_access allow all\n") {
+		t.Fatalf("injection leaked in squid config:\n%s", out)
+	}
 }

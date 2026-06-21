@@ -187,16 +187,34 @@ runtime: node:24                       # Required. node:24, node:22,
                                        # python:3.12, python:3.11,
                                        # rust:stable | beta | nightly | 1.X.Y
 
-http_egress:                           # HTTP/HTTPS allowlist (Squid)
-  - .npmjs.org                         # Domain prefix matches all subdomains
-  - api.example.com                    # Bare domain matches exact host
-  - .pypi.org
+http_egress:                           # HTTP/HTTPS allowlist (Squid).
+  - .npmjs.org                         # Domain prefix matches all subdomains.
+  - api.example.com                    # Bare domain matches exact host.
+  - .pypi.org                          # Enforced per-spawn by the Go orchestrator
+                                       # and by run.sh. Private/special-range IPs
+                                       # are rejected unless the operator explicitly
+                                       # opts in via security_overrides.
+
+# DEPRECATED: egress.allow_domains was renamed http_egress in 2.0.0.
+# The old key is still accepted as an alias in 2.x (a WARNING is logged),
+# but will be removed in 3.0. Rename now:
+#   egress:
+#     allow_domains: [.npmjs.org]
+# becomes:
+#   http_egress: [.npmjs.org]
 
 tcp_egress:                            # Raw-TCP allowlist (HAProxy)
   - postgres.example.com:5432          # host:port, ports must be unique
 
 dns:                                   # DNS resolver (default: host DNS)
-  host: false                          # false = run dnsmasq inside the proxy
+  host: false                          # false = run dnsmasq inside the proxy.
+                                       # NOTE: dns.host: false is a no-op on the
+                                       # Go orchestrator path. dnsmasq needs
+                                       # CAP_NET_BIND_SERVICE to bind port 53,
+                                       # which is unavailable when the proxy
+                                       # container runs with cap_drop: ALL.
+                                       # dns.host: false is fully supported by
+                                       # run.sh (the legacy shell path).
   servers: [1.1.1.1]                   # required when host:false
   hosts_file: ./infra/dns/hosts.txt    # optional static map (path or https://)
   whitelist_file: ./allow.txt          # optional strict allowlist (path or https://)
@@ -241,7 +259,14 @@ Validate any `runner.yml` against the schema:
 
 The runner container has **no direct internet route**. Its only network
 peer is the proxy container, which sits on two networks: the
-runner-only internal network and the host-reachable external bridge.
+runner-only internal network (ICC disabled) and the host-reachable external bridge.
+
+**Both the Go orchestrator and `run.sh` enforce the allow-path**, not just
+deny-all. The orchestrator creates one proxy container per spawn (Squid + HAProxy +
+dnsmasq) with `HTTP_PROXY=http://proxy:3128` injected into the runner, and applies
+`http_egress` to Squid and `tcp_egress` to HAProxy. Private/special-range IPs in
+egress entries are rejected by the orchestrator unless the operator explicitly opts
+in (see SECURITY.md §16).
 
 ```
    YOUR JOB                  PROXY CONTAINER             INTERNET
@@ -624,6 +649,15 @@ SECURITY.md              # Threat model + known limitations
 ```
 
 ---
+
+## AI agent integration (Claude Code / Codex)
+
+RunSecure ships agent tooling so AI agents can both **adopt** it in a project and **work on** it:
+
+- **Claude Code plugin** (`.claude-plugin/plugin.json`): install this repo as a plugin to get two skills — `using-runsecure` (set RunSecure up in a project) and `developing-runsecure` (work on the codebase) — and two agents (`runsecure-adopter`, `runsecure-maintainer`) under `agents/`.
+- **Codex** (`codex/`): copy `codex/prompts/*.md` to `~/.codex/prompts/` for `/use-runsecure` and `/develop-runsecure`; Codex also reads `AGENTS.md` automatically. See `codex/README.md`.
+- **`AGENTS.md`** (repo root): operating principles + anti-patterns for working on RunSecure (read by Claude, Codex, and humans).
+- **Consumer `AGENTS.md` template** (`skills/using-runsecure/AGENTS-template.md`): drop into a project that adopts RunSecure so agents respect the egress/hardening rules there.
 
 ## Contributing
 

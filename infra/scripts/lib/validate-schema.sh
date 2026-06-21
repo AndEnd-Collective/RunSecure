@@ -54,6 +54,10 @@ while IFS= read -r key; do
         version|runtime|tools|apt|http_egress|tcp_egress|dns|hardening|labels|resources|jobs)
             # Known key — ok
             ;;
+        egress)
+            # Deprecated since 2.0.0 — accepted as alias for backward compatibility.
+            _warn "egress.allow_domains is deprecated; rename the key to http_egress. Backward-compatibility alias will be removed in the next major release."
+            ;;
         *)
             _err "runner.yml contains unknown field \"${key}\" — your RunSecure version may be older than this config requires"
             ;;

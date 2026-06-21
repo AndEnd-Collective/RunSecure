@@ -28,6 +28,9 @@ services:
       RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
       RUNSECURE_LISTEN_ADDR: ":2375"
       RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
+      RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
+      # Egress-volume gate: only role=proxy may mount this named volume.
+      RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
 
   orch-egress:
     image: ${RUNSECURE_PROXY_IMAGE}
@@ -40,6 +43,23 @@ services:
       orch-internal:
       orch-external:
 
+  egress-init:
+    # One-shot container that sets the ownership of the shared egress-configs
+    # volume root to UID 65532 (the orchestrator's non-root user). Docker
+    # always creates named volume roots as root:root 755; without this step
+    # the orchestrator cannot create per-spawn subdirs and every spawn fails
+    # with egress_render / "permission denied".
+    # CAP_CHOWN is required to change file ownership; it is dropped after
+    # this service exits and is never present in the long-running services.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-orch-${RUNSECURE_SCOPE}-egress-init
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["chown", "65532:65532", "/data"]
+    volumes:
+      - egress-configs:/data
+    security_opt: ["no-new-privileges:true"]
+
   orchestrator:
     image: ${RUNSECURE_ORCHESTRATOR_IMAGE}
     container_name: rs-orch-${RUNSECURE_SCOPE}
@@ -49,7 +69,13 @@ services:
     security_opt: ["no-new-privileges:true"]
     user: "65532:65532"
     networks: [orch-internal]
-    depends_on: [socket-proxy, orch-egress]
+    depends_on:
+      socket-proxy:
+        condition: service_started
+      orch-egress:
+        condition: service_started
+      egress-init:
+        condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
       DOCKER_HOST: "tcp://socket-proxy:2375"
@@ -61,9 +87,17 @@ services:
       RUNSECURE_RUNNER_IMAGE_NODE: ${RUNSECURE_RUNNER_IMAGE_NODE:-}
       RUNSECURE_RUNNER_IMAGE_PYTHON: ${RUNSECURE_RUNNER_IMAGE_PYTHON:-}
       RUNSECURE_RUNNER_IMAGE_RUST: ${RUNSECURE_RUNNER_IMAGE_RUST:-}
+      RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
+      # Per-spawn egress configs are written here (onto the shared named volume)
+      # and mounted read-only into each proxy at the same path.
+      RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
+      RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
     volumes:
       - ./scopes/${RUNSECURE_SCOPE}.yml:/etc/runsecure/scope.yml:ro
       - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
+      # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
+      # the daemon mounts the same volume read-only into each proxy container.
+      - egress-configs:/var/run/runsecure/egress:rw
       # Add per-repo project bindings here, e.g.:
       # - /Users/foo/Code/datacentric:/projects/datacentric:ro
     ports:
@@ -73,9 +107,22 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
 
+volumes:
+  egress-configs:
+    name: ${RUNSECURE_SCOPE}-egress-configs
+
 networks:
   orch-internal:
     driver: bridge
     internal: true       # orchestrator + socket-proxy have NO host egress
   orch-external:
     driver: bridge       # orch-egress's external interface (host-routable)
+  spawn-egress:
+    name: ${RUNSECURE_SCOPE}-spawn-egress
+    driver: bridge
+    driver_opts:
+      # Disable inter-container communication so that proxy containers from
+      # different spawns cannot reach each other — only the gateway is reachable.
+      com.docker.network.bridge.enable_icc: "false"
+    # NOT internal: this network provides outbound internet access for the
+    # per-spawn proxy containers.

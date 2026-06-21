@@ -26,6 +26,17 @@ var (
 	ErrBindForbidden                = errors.New("HostConfig.Binds contains a forbidden host path")
 	ErrUserRequired                 = errors.New("User field is required and must be non-root")
 	ErrImageNotAllowed              = errors.New("Image not in digest allowlist")
+	// ErrEgressAttachDenied is returned when a container-create request attaches
+	// the designated egress network without carrying the runsecure.role=proxy
+	// label. This is the isolation-bypass gate: only the proxy sidecar may join
+	// the outbound egress network; runner containers must never reach it.
+	ErrEgressAttachDenied = errors.New("attachment to egress network requires runsecure.role=proxy")
+	// ErrEgressVolumeDenied is returned when a container-create request mounts a
+	// named Docker volume (a Bind source with no leading "/") that is not the
+	// designated egress volume, or mounts the designated egress volume without
+	// carrying runsecure.role=proxy. Only the proxy sidecar may mount the egress
+	// configs volume; runner containers must never mount it.
+	ErrEgressVolumeDenied = errors.New("volume mount requires runsecure.role=proxy and must be the designated egress volume")
 )
 
 // Forbidden host-path prefixes for HostConfig.Binds source paths.
@@ -63,8 +74,23 @@ var forbiddenBindSuffixes = []string{
 // ValidateContainerCreate parses body as Docker's containers/create request
 // and refuses it if any spec §7.2 rule fails.
 //
+// egressNet is the name of the designated egress network (read from
+// RUNSECURE_EGRESS_NETWORK at server init). When non-empty, any request that
+// attaches this network via NetworkingConfig.EndpointsConfig must carry
+// Labels["runsecure.role"]="proxy"; all other values, including the empty
+// string and "runner", are denied with ErrEgressAttachDenied. Pass "" to
+// disable the egress gate (development / test environments without an egress
+// network).
+//
+// egressVol is the name of the designated egress configs volume (read from
+// RUNSECURE_EGRESS_VOLUME at server init). Any HostConfig.Binds entry whose
+// source is a volume name (no leading "/") must be exactly egressVol AND the
+// request must carry Labels["runsecure.role"]="proxy"; everything else is
+// denied with ErrEgressVolumeDenied. Pass "" to deny ALL named-volume mounts
+// (the gate is fail-closed: an unset egressVol means no volume may be mounted).
+//
 // The function does NOT modify the body; it only validates.
-func ValidateContainerCreate(body []byte, images *imageallow.Allowlist) error {
+func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNet string, egressVol string) error {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return fmt.Errorf("malformed JSON: %w", err)
@@ -121,6 +147,73 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist) error {
 	if err := checkBinds(hc["Binds"]); err != nil {
 		return err
 	}
+
+	// Egress-volume gate: any Bind whose source is a named volume (no leading
+	// "/") may only be the designated egress volume on a role=proxy container.
+	// checkBinds already cleared host-path Binds; this handles volume-name Binds
+	// which it deliberately ignores (no leading "/" never matches a forbidden
+	// prefix). Fail-closed: egressVol=="" denies every named-volume mount.
+	{
+		labels, _ := req["Labels"].(map[string]any)
+		role, _ := labels["runsecure.role"].(string)
+		if arr, ok := hc["Binds"].([]any); ok {
+			for _, item := range arr {
+				s, ok := item.(string)
+				if !ok {
+					continue
+				}
+				parts := strings.SplitN(s, ":", 3)
+				src := parts[0]
+				if strings.HasPrefix(src, "/") {
+					continue // host path — already vetted by checkBinds
+				}
+				// Named-volume source: gate it.
+				if egressVol == "" || src != egressVol || role != "proxy" {
+					return ErrEgressVolumeDenied
+				}
+				// Mode check: must be explicitly ro.
+				mode := ""
+				if len(parts) == 3 {
+					mode = parts[2]
+				}
+				if !strings.Contains(mode, "ro") {
+					return ErrEgressVolumeDenied
+				}
+			}
+		}
+	}
+
+	// Egress-network gate: if RUNSECURE_EGRESS_NETWORK is configured, only
+	// containers with runsecure.role=proxy may attach it. Two attach paths
+	// exist in the Docker API and both must be gated:
+	//
+	//   1. NetworkingConfig.EndpointsConfig[egressNet] — the explicit endpoint
+	//      map used at container-create time.
+	//   2. HostConfig.NetworkMode=<egressNet> — the alternate form Docker uses
+	//      when the primary network is named directly via NetworkMode rather
+	//      than EndpointsConfig (Bypass 1 in the Task 7 fix brief).
+	//
+	// Default-deny: absent label, empty label, or any role that is not exactly
+	// "proxy" (including "runner") are all denied.
+	if egressNet != "" {
+		labels, _ := req["Labels"].(map[string]any)
+		role, _ := labels["runsecure.role"].(string)
+
+		nc, _ := req["NetworkingConfig"].(map[string]any)
+		eps, _ := nc["EndpointsConfig"].(map[string]any)
+		if _, attaches := eps[egressNet]; attaches {
+			if role != "proxy" {
+				return ErrEgressAttachDenied
+			}
+		}
+
+		if nm, _ := hc["NetworkMode"].(string); nm == egressNet {
+			if role != "proxy" {
+				return ErrEgressAttachDenied
+			}
+		}
+	}
+
 	return nil
 }
 

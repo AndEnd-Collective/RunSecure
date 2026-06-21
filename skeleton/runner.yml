@@ -34,14 +34,24 @@ runtime: node:24
 # OPTIONAL: Extra HTTP/HTTPS domains allowed through the egress proxy.
 # The base allowlist (GitHub, npm, PyPI, crates.io) is always included.
 # Use ".domain.com" to allow all subdomains.
+# Enforced by: the Go orchestrator (Squid allowlist per-spawn) and run.sh.
 # http_egress:
 #   - ".neon.tech"
 #   - "api.vercel.com"
 #   - ".amazonaws.com"
+#
+# DEPRECATED: egress.allow_domains (renamed to http_egress in 2.0.0).
+# If you have:
+#   egress:
+#     allow_domains: [...]
+# rename it to:
+#   http_egress: [...]
+# The old key is honored as an alias in 2.x but will be removed in 3.0.
 
 # OPTIONAL: Raw TCP egress for database clients and other TCP-only protocols.
 # Each entry is host:port. Each port must be unique (HAProxy frontend per port).
 # Ports 80 and 443 are reserved for HTTP/HTTPS — use http_egress instead.
+# Enforced by: the Go orchestrator (HAProxy frontend per-spawn) and run.sh.
 # tcp_egress:
 #   - ep-foo.neon.tech:5432       # Neon Postgres
 #   - redis.internal.company.com:6379
@@ -52,6 +62,13 @@ runtime: node:24
 # container. This prevents DNS-based leakage to the host resolver.
 #
 # When host: false, you must provide either 'servers' or 'hosts_file'.
+#
+# Orchestrator limitation (2.0.x): the Go orchestrator path drops all
+# Linux capabilities (cap_drop: ALL) before starting the proxy container.
+# dnsmasq needs CAP_NET_BIND_SERVICE to bind port 53; on the orchestrator
+# path this capability is absent, so dns.host: false is a no-op when using
+# the orchestrator. It works correctly on the run.sh path. Remote
+# hosts_file/whitelist_file fetching via the orchestrator is tracked for 2.0.x.
 # dns:
 #   host: false
 #   servers:

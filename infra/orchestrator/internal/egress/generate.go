@@ -33,6 +33,17 @@ func NewFSGenerator(baseDir string) *FSGenerator {
 
 // Render creates baseDir/<spawnID>/{squid.conf,haproxy.cfg,dnsmasq.conf}.
 func (g *FSGenerator) Render(spawnID string, r *runneryml.Runner, policy security.Policy) (string, error) {
+	// Extract all egress hosts (TCP host parts + HTTP egress entries) and
+	// run the literal-IP SSRF guard before writing any files.
+	hosts := make([]string, 0, len(r.TCPEgress)+len(r.ResolvedHTTPEgress()))
+	for _, e := range r.TCPEgress {
+		hosts = append(hosts, e) // CheckEgressIPLiterals strips :port internally
+	}
+	hosts = append(hosts, r.ResolvedHTTPEgress()...)
+	if err := security.CheckEgressIPLiterals(hosts, policy); err != nil {
+		return "", err
+	}
+
 	dir := filepath.Join(g.BaseDir, spawnID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("egress: mkdir %s: %w", dir, err)

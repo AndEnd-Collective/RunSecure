@@ -42,6 +42,55 @@ services:
       RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
       RUNSECURE_LISTEN_ADDR: ":2375"
       RUNSECURE_ALLOWED_IMAGES_FILE: /etc/runsecure/socket-proxy/allowed-images.txt
+      # Egress-network gate (Task 7/10): the socket-proxy reads this at startup to
+      # activate the runner→egress isolation gate. Must match the orchestrator's
+      # RUNSECURE_EGRESS_NETWORK so the gate fires on the correct network name.
+      RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
+      # Egress-volume gate (Task 12): only role=proxy may mount this named volume.
+      # Must match the orchestrator's RUNSECURE_EGRESS_VOLUME.
+      RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
+
+  egress-init:
+    # One-shot container that sets the ownership of the shared egress-configs
+    # volume root to UID 65532 (the orchestrator's non-root user). Docker
+    # always creates named volume roots as root:root 755; without this step
+    # the orchestrator cannot create per-spawn subdirs and every spawn fails
+    # with egress_render / "permission denied".
+    # CAP_CHOWN is required to change file ownership; it is dropped after
+    # this service exits and is never present in the long-running services.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-test-egress-init
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["chown", "65532:65532", "/data"]
+    volumes:
+      - egress-configs:/data
+    security_opt: ["no-new-privileges:true"]
+
+  pat-init:
+    # One-shot container that copies the test PAT from the host bind-mount into
+    # a named volume and sets ownership to UID 65532 at mode 0400. This is
+    # required because on native-Linux CI, a host file owned by the CI user at
+    # mode 0400 is unreadable by UID 65532 (distroless nonroot inside the
+    # orchestrator). Named-volume delivery avoids the host-ownership problem:
+    # the init runs as root and writes the secret into the volume with the
+    # correct uid/mode before the orchestrator starts.
+    # CAP_CHOWN is required to change file ownership; dropped when this exits.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-test-pat-init
+    restart: "no"
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        cp /host-pat /secret/runsecure-pat
+        chown 65532:65532 /secret/runsecure-pat
+        chmod 400 /secret/runsecure-pat
+    volumes:
+      - ./testdata/pat:/host-pat:ro
+      - pat-secret:/secret
+    security_opt: ["no-new-privileges:true"]
 
   orchestrator:
     image: runsecure-orchestrator:local
@@ -51,7 +100,15 @@ services:
     security_opt: ["no-new-privileges:true"]
     user: "65532:65532"
     networks: [test-net]
-    depends_on: [mock-github, socket-proxy]
+    depends_on:
+      mock-github:
+        condition: service_started
+      socket-proxy:
+        condition: service_started
+      egress-init:
+        condition: service_completed_successfully
+      pat-init:
+        condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
       DOCKER_HOST: "tcp://socket-proxy:2375"
@@ -62,15 +119,34 @@ services:
       # it to testdata/allowed-images.txt before each test.
       RUNSECURE_RUNNER_IMAGE_DEFAULT: "${RUNSECURE_TEST_RUNNER_REF:-runsecure-test-runner:local}"
       RUNSECURE_PROXY_IMAGE: "${RUNSECURE_TEST_PROXY_REF:-runsecure-test-runner:local}"
+      # Egress network for per-spawn proxy containers. Set by stack_up_real_proxy
+      # to "spawn-egress" so the orchestrator attaches the proxy to the network
+      # that carries a test-backend container for TCP egress checks.
+      RUNSECURE_EGRESS_NETWORK: "${RUNSECURE_EGRESS_NETWORK:-runsecure-egress}"
+      # Per-spawn egress configs are written here (onto the shared named volume)
+      # and mounted read-only into each proxy at the same path.
+      RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
+      RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
     volumes:
       - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
-      - ./testdata/pat:/run/secrets/runsecure-pat:ro
+      # PAT delivered via named volume (owned 65532:65532, mode 0400).
+      # See pat-init service above; named volume works on both native-Linux CI
+      # and Colima/Docker Desktop without host uid-remapping dependency.
+      - pat-secret:/run/secrets:ro
       - ./testdata/proj:/projects/proj:ro
+      # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
+      # the daemon mounts the same volume read-only into each proxy container.
+      - egress-configs:/var/run/runsecure/egress:rw
     ports:
       - "127.0.0.1:18080:8080"
       - "127.0.0.1:18081:8081"
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
+
+volumes:
+  egress-configs:
+    name: runsecure-egress-configs
+  pat-secret:
 
 networks:
   test-net:

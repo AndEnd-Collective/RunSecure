@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,44 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 )
+
+// egressNetworkFallback is the fallback egress network name used when
+// RUNSECURE_EGRESS_NETWORK is not set in the environment. The compose stack
+// sets RUNSECURE_EGRESS_NETWORK to "${RUNSECURE_SCOPE}-spawn-egress"; this
+// constant covers bare docker / integration-test environments that do not run
+// through compose.
+const egressNetworkFallback = "runsecure-egress"
+
+// egressNetworkName returns the Docker network name the proxy container is
+// attached to for outbound internet access. It reads RUNSECURE_EGRESS_NETWORK
+// from the environment (set by compose.scope.yml) and falls back to the
+// well-known constant for non-compose deployments.
+//
+// The runner is never attached to this network — it reaches the internet only
+// through the proxy on the internal network.
+func egressNetworkName() string {
+	if v := os.Getenv("RUNSECURE_EGRESS_NETWORK"); v != "" {
+		return v
+	}
+	return egressNetworkFallback
+}
+
+// EgressMountPath is the path the shared egress-configs volume is mounted at
+// inside the proxy container. It is a fixed constant — the volume is always
+// mounted here regardless of scope. Exported so that run.go can use it as the
+// default value for RUNSECURE_EGRESS_BASE_DIR, ensuring the FSGenerator writes
+// to the same path the proxy container reads.
+const EgressMountPath = "/var/run/runsecure/egress"
+
+// egressVolumeName returns the name of the shared named Docker volume that
+// carries per-spawn egress configs. It reads RUNSECURE_EGRESS_VOLUME from the
+// environment (set by compose.scope.yml). Unlike egressNetworkName there is no
+// hardcoded fallback: an empty value means the socket-proxy's volume gate is
+// fail-closed and no proxy volume mount will be permitted, surfacing a
+// misconfiguration loudly rather than silently mounting the wrong volume.
+func egressVolumeName() string {
+	return os.Getenv("RUNSECURE_EGRESS_VOLUME")
+}
 
 // SpawnWorker is the per-intent worker. One instance is shared by all
 // goroutines in the spawn-worker pool.
@@ -56,6 +95,9 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	if err != nil {
 		return w.fail(intent, containerName, "runner_yml_parse", err)
 	}
+	if err := snapshot.YML.ValidateEgress(); err != nil {
+		return w.fail(intent, containerName, "runner_yml_parse", err)
+	}
 	imageDigest := snapshot.ImageDigest
 	if imageDigest == "" {
 		// Fall back to the deps lookup keyed on runtime string.
@@ -99,19 +141,28 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
-	// Step 4+5: create+start the four containers.
+	// Step 4+5: create+start the two containers (proxy + runner).
+	// The proxy is dual-homed on the internal net and the egress net.
+	// The runner is internal-only — it never touches the egress net.
 	memBytes, nanoCPUs := parseResources(snapshot.YML.Resources.Memory, snapshot.YML.Resources.CPUs)
+	r := snapshot.YML
+	// EnableDNSMasq when dns.host is explicitly set to false, meaning the
+	// project wants the proxy to resolve DNS rather than using the host resolver.
+	enableDNSMasq := r.DNS.Host != nil && !*r.DNS.Host
 	containerIDs, err := docker.Spawn(ctx, w.deps.Docker(), docker.SpawnInputs{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		NetworkID:          netID,
+		EgressNetwork:      egressNetworkName(),
 		RunnerImage:        imageDigest,
 		ProxyImage:         w.deps.ProxyImageDigest(),
-		SeccompProfilePath: w.deps.SeccompProfileHostPath(snapshot.YML.Orchestrator.SeccompProfile),
+		SeccompProfilePath: w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
 		ResourcesMemory:    memBytes,
 		ResourcesNanoCPUs:  nanoCPUs,
-		ResourcesPIDs:      int64(snapshot.YML.Resources.PIDs),
+		ResourcesPIDs:      int64(r.Resources.PIDs),
 		JITConfigB64:       jit.EncodedJITConfig,
-		EgressConfigDir:    egressDir,
+		EgressVolume:       egressVolumeName(),
+		EgressMountPath:    EgressMountPath,
+		EnableDNSMasq:      enableDNSMasq,
 	})
 	if err != nil {
 		_ = w.deps.Docker().DeleteNetwork(ctx, netID)
@@ -134,7 +185,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	exitCode, timedOut := w.waitForExit(ctx, containerIDs["runner"], timeout)
 
 	// Step 7: teardown.
-	w.tearDown(ctx, containerIDs, netID, timedOut)
+	w.tearDown(ctx, containerIDs, netID, egressDir, timedOut)
 
 	if timedOut {
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
@@ -219,11 +270,17 @@ func (w *SpawnWorker) waitForExit(ctx context.Context, runnerID string, timeout 
 	}
 }
 
-func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID string, force bool) {
+func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID, egressDir string, force bool) {
 	for _, id := range ids {
 		_ = w.deps.Docker().DeleteContainer(ctx, id, force)
 	}
 	_ = w.deps.Docker().DeleteNetwork(ctx, netID)
+	// Remove the per-spawn egress config subdir from the shared volume so it
+	// does not accumulate across spawns. egressDir is the full path on the
+	// volume (<base>/<spawnID>); empty means render never ran.
+	if egressDir != "" {
+		_ = os.RemoveAll(egressDir)
+	}
 }
 
 // recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits

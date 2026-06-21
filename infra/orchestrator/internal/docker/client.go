@@ -32,13 +32,22 @@ type Client interface {
 }
 
 type CreateContainerRequest struct {
-	Name       string         `json:"-"`
-	Image      string         `json:"Image"`
-	User       string         `json:"User"`
-	Env        []string       `json:"Env,omitempty"`
-	Cmd        []string       `json:"Cmd,omitempty"`
-	Labels     map[string]string `json:"Labels,omitempty"`
-	HostConfig HostConfig     `json:"HostConfig"`
+	Name              string              `json:"-"`
+	Image             string              `json:"Image"`
+	User              string              `json:"User"`
+	Env               []string            `json:"Env,omitempty"`
+	Cmd               []string            `json:"Cmd,omitempty"`
+	Labels            map[string]string   `json:"Labels,omitempty"`
+	HostConfig        HostConfig          `json:"HostConfig"`
+	NetworkingConfig  *NetworkingConfig   `json:"NetworkingConfig,omitempty"`
+}
+
+type NetworkingConfig struct {
+	EndpointsConfig map[string]EndpointConfig `json:"EndpointsConfig"`
+}
+
+type EndpointConfig struct {
+	Aliases []string `json:"Aliases,omitempty"`
 }
 
 type HostConfig struct {

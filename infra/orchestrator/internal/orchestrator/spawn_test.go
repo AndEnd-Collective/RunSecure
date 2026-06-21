@@ -34,9 +34,7 @@ func TestSpawn_HappyPath(t *testing.T) {
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"}))
 
 	require.True(t, d.dc.created["runner"], "runner container created")
-	require.True(t, d.dc.created["squid"], "squid container created")
-	require.True(t, d.dc.created["haproxy"], "haproxy container created")
-	require.True(t, d.dc.created["dnsmasq"], "dnsmasq container created")
+	require.True(t, d.dc.created["proxy"], "proxy container created")
 	require.Equal(t, 0, d.st.InFlight("o/r"), "in-flight decremented after teardown")
 
 	d.requireEmitted(t,
@@ -61,7 +59,7 @@ func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
 func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Make all docker.Spawn container creates fail to trigger A1 leak path.
-	d.dc.createErr["squid"] = errors.New("simulated docker error after JIT")
+	d.dc.createErr["proxy"] = errors.New("simulated docker error after JIT")
 	w := NewSpawnWorker(d)
 
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
@@ -119,7 +117,7 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 // to Open. Previously the return values from RecordFailure were dropped.
 func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["squid"] = errors.New("force failure")
+	d.dc.createErr["proxy"] = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
@@ -131,18 +129,42 @@ func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 
 func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["squid"] = errors.New("force failure")
+	d.dc.createErr["proxy"] = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
 			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
 		})
 	}
-	delete(d.dc.createErr, "squid")
+	delete(d.dc.createErr, "proxy")
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "ok",
 	}))
 	d.requireEmitted(t, cornerstone.EventBreakerClosed)
+}
+
+// --- Task 8: egressNetworkName env lookup + fallback -------------------------
+
+// TestEgressNetworkName_EnvSet verifies that RUNSECURE_EGRESS_NETWORK overrides
+// the hardcoded fallback. This keeps compose.scope.yml and the orchestrator in
+// sync: compose sets RUNSECURE_EGRESS_NETWORK=${RUNSECURE_SCOPE}-spawn-egress,
+// and the orchestrator reads it here.
+func TestEgressNetworkName_EnvSet(t *testing.T) {
+	t.Setenv("RUNSECURE_EGRESS_NETWORK", "myscope-spawn-egress")
+	require.Equal(t, "myscope-spawn-egress", egressNetworkName())
+}
+
+// TestEgressNetworkName_EnvEmpty_UsesFallback verifies the fallback constant is
+// returned when RUNSECURE_EGRESS_NETWORK is absent (e.g. bare-docker / tests).
+func TestEgressNetworkName_EnvEmpty_UsesFallback(t *testing.T) {
+	t.Setenv("RUNSECURE_EGRESS_NETWORK", "") // ensure env is clear for this test
+	require.Equal(t, egressNetworkFallback, egressNetworkName())
+}
+
+// TestEgressNetworkName_FallbackValue asserts the constant matches the legacy
+// bare-docker name so that any rename must update this test explicitly.
+func TestEgressNetworkName_FallbackValue(t *testing.T) {
+	require.Equal(t, "runsecure-egress", egressNetworkFallback)
 }
 
 type denyingBucket struct{}
@@ -189,7 +211,7 @@ func TestSpawn_FailAndLeak_OnlyCallsDeleteForValidID(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Force step-3 failure (network create) AFTER JIT success → triggers
 	// failAndLeak. The fake mock-github default returns runnerID=42.
-	d.dc.createErr["squid"] = errors.New("force post-JIT failure")
+	d.dc.createErr["proxy"] = errors.New("force post-JIT failure")
 	w := NewSpawnWorker(d)
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	// runner.leak_cleaned MUST have been emitted.
@@ -481,4 +503,27 @@ func TestFailAndLeak_NonZeroRunnerID_CallsDelete(t *testing.T) {
 	_ = w.failAndLeak(context.Background(), intent, "cn", "test_reason", errors.New("x"), 99)
 	require.Equal(t, int64(1), deleteCalls.Load(),
 		"runnerID>0 must trigger DeleteRunner once")
+}
+
+// Test A: spawn rejects tcp_egress entry with reserved port 443.
+// ValidateEgress must be called inside Execute so fakes also validate.
+func TestSpawn_RunnerYML_InvalidTCPEgress_FailsSpawn(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db.example.com:443"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}
+
+// Test B: spawn rejects duplicate tcp_egress ports.
+func TestSpawn_RunnerYML_DuplicateTCPPort_FailsSpawn(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db1.example.com:5432", "db2.example.com:5432"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
 }

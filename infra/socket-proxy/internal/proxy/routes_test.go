@@ -22,10 +22,10 @@ func TestRouteAllowed_ContainersAndNetworks(t *testing.T) {
 		{http.MethodDelete, "/v1.43/containers/abc", true},
 		{http.MethodPost, "/v1.43/networks/create", true},
 		{http.MethodDelete, "/v1.43/networks/xyz", true},
-		{http.MethodPost, "/v1.43/networks/xyz/connect", true},
 		{http.MethodGet, "/v1.44/info", true},
 
 		// blocked
+		{http.MethodPost, "/v1.43/networks/xyz/connect", false}, // removed: unused + egress bypass risk
 		{http.MethodPost, "/v1.43/containers/abc/exec", false},
 		{http.MethodPost, "/v1.43/containers/abc/attach", false},
 		{http.MethodPost, "/v1.43/build", false},
@@ -44,4 +44,16 @@ func TestRouteAllowed_ContainersAndNetworks(t *testing.T) {
 func TestRouteAllowed_VersionOnlyPath_FallsThroughToRoot(t *testing.T) {
 	// /v1.43 alone becomes "/" after stripping; no allowlist rule matches "/" → false.
 	require.False(t, RouteAllowed(http.MethodGet, "/v1.43"))
+}
+
+// TestRouteAllowed_NetworksConnect_Denied covers Bypass 2:
+// POST /networks/{id}/connect is NOT used by the orchestrator (the docker client
+// only exposes CreateNetwork/DeleteNetwork) and must therefore be REMOVED from
+// the allowlist so it is denied at the route layer (route_not_allowed).
+func TestRouteAllowed_NetworksConnect_Denied(t *testing.T) {
+	// Must be denied — this route is unused by the orchestrator and is a
+	// second path an attacker could use to attach a runner to the egress network.
+	require.False(t, RouteAllowed(http.MethodPost, "/v1.43/networks/spawn-egress/connect"),
+		"SECURITY: POST /networks/{id}/connect must be removed from the allowlist")
+	require.False(t, RouteAllowed(http.MethodPost, "/networks/spawn-egress/connect"))
 }
