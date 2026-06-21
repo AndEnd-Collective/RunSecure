@@ -1,0 +1,46 @@
+{{/*
+ConfigMap carrying the scope configuration. The orchestrator reads this at
+startup to determine repos, runner limits, poll cadence, and security profile.
+Mirrors the structure of infra/orchestrator/scopes/example.yml.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "runsecure-orchestrator.fullname" . }}-scope
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+data:
+  scope.yml: |
+    apiVersion: runsecure.io/v1alpha1
+    name: {{ .Values.scope.name | quote }}
+    description: {{ .Values.scope.description | quote }}
+    global_max_runners: {{ .Values.scope.globalMaxRunners }}
+    poll_interval_seconds: {{ .Values.scope.pollIntervalSeconds }}
+    security_profile: {{ .Values.scope.securityProfile | quote }}
+    allow_project_overrides:
+    {{- range .Values.scope.allowProjectOverrides }}
+      - {{ . | quote }}
+    {{- end }}
+    auth:
+      type: {{ .Values.auth.type | quote }}
+      {{- if eq .Values.auth.type "pat" }}
+      pat_file: /run/secrets/runsecure-pat/pat
+      {{- else if eq .Values.auth.type "github_app" }}
+      app_id: {{ .Values.auth.app.appId | quote }}
+      installation_id: {{ .Values.auth.app.installationId | quote }}
+      private_key_file: /run/secrets/runsecure-app-key/private-key
+      {{- end }}
+    backend: {{ .Values.scope.backend | quote }}
+    orch_egress:
+      allow_domains:
+      {{- range .Values.scope.orchEgress.allowDomains }}
+        - {{ . | quote }}
+      {{- end }}
+    repos:
+    {{- range .Values.scope.repos }}
+      - repo: {{ .repo | quote }}
+        {{- if .maxConcurrent }}
+        max_concurrent: {{ .maxConcurrent }}
+        {{- end }}
+    {{- end }}

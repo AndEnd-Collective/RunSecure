@@ -1,0 +1,85 @@
+{{/*
+Default-deny NetworkPolicy for the orchestrator namespace.
+
+Denies ALL ingress and egress to/from every pod in the namespace, then two
+additional allow policies carve out only what the orchestrator actually needs:
+
+1. default-deny-all    — catch-all deny (this file)
+2. orchestrator-egress — allows orchestrator → kube-apiserver (6443/TCP),
+                         kube-dns (53/UDP+TCP), and orch_egress domains (any
+                         port, gated by the proxy at L7 via Squid).
+
+Mirrors the pattern from infra/orchestrator/internal/kube/objects.go
+DefaultDenyNetworkPolicy().
+*/}}
+---
+# Default-deny: deny all ingress and egress for every pod in the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+spec:
+  # Empty podSelector selects ALL pods in the namespace.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress or egress rules — all traffic denied.
+---
+# Allow the orchestrator pod egress to:
+#   - kube-apiserver (TCP 6443 — standard port; adjust if your cluster differs)
+#   - kube-dns (UDP+TCP 53 on the well-known 10.96.0.10/32 cluster IP)
+#   - External orchestrator egress domains (any port via 0.0.0.0/0 minus
+#     RFC1918; the Squid L7 allow-list is the authoritative control).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-allow-egress
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "runsecure-orchestrator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # kube-apiserver (TCP 6443).
+    - ports:
+        - protocol: TCP
+          port: 6443
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+    # kube-dns (well-known cluster IP 10.96.0.10/32).
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      to:
+        - ipBlock:
+            cidr: 10.96.0.10/32
+    # Orchestrator egress — reaches GitHub API and other allow-listed domains
+    # via the configured Squid proxy. The L7 allow-list is the primary control;
+    # this rule provides network-layer reachability for HTTPS (443/TCP).
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16

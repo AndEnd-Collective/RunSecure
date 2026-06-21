@@ -1,0 +1,22 @@
+{{/*
+Orchestrator management namespace: runsecure-<scope>.
+Pre-creates the namespace so the orchestrator SA's Role and RoleBinding can
+reference it — eliminating the need for the orchestrator to have namespace-
+create rights.
+
+Pod Security Standards "Restricted" labels are applied so Kubernetes
+admission enforces PSS Restricted on every Pod in this namespace.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+    # Pod Security Standards — Restricted profile enforced, audited, and warned.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

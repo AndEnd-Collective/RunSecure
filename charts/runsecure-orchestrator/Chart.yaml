@@ -1,0 +1,19 @@
+apiVersion: v2
+name: runsecure-orchestrator
+description: >
+  Hardened, ephemeral Kubernetes runner orchestrator for GitHub Actions
+  self-hosted runners. One Helm release = one scope. Deploys the orchestrator
+  with namespace-scoped RBAC, default-deny NetworkPolicies, and Pod Security
+  Standards "Restricted" on every namespace.
+type: application
+version: 0.1.0
+appVersion: "2.1.0"
+kubeVersion: ">=1.26.0"
+keywords:
+  - github-actions
+  - self-hosted-runner
+  - security
+  - kubernetes
+maintainers:
+  - name: RunSecure
+    url: https://github.com/AndEnd-Collective/runsecure

@@ -1,0 +1,52 @@
+{{/*
+Namespace-scoped Role + RoleBinding for the orchestrator ServiceAccount.
+
+Verbs granted per infra/orchestrator/internal/kube/objects.go requirements:
+  pods        : create, get, list, watch, delete
+  services    : create, get, list, watch, delete
+  secrets     : create, get, list, watch, delete
+  networkpolicies : create, get, list, watch, delete
+
+NO ClusterRole or ClusterRoleBinding is created. The chart pre-creates the
+scope namespace, so the orchestrator needs no namespace-create verb.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "runsecure-orchestrator.fullname" . }}-role
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+rules:
+  # Runner and proxy Pod lifecycle management.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Proxy ClusterIP Service for runner → proxy routing.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Per-spawn Secret (JIT config + egress configs).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Default-deny + per-spawn NetworkPolicy management.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "runsecure-orchestrator.fullname" . }}-rolebinding
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "runsecure-orchestrator.serviceAccountName" . }}
+    namespace: {{ include "runsecure-orchestrator.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "runsecure-orchestrator.fullname" . }}-role
