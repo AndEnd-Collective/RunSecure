@@ -42,5 +42,16 @@ func run() error {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+
+	tlsCfg, err := cfg.BuildTLSConfig()
+	if err != nil {
+		return err
+	}
+	if tlsCfg != nil {
+		httpSrv.TLSConfig = tlsCfg
+		httpSrv.Addr = cfg.TLSListenAddr
+		log.Printf("socket-proxy: TLS listener on %s", cfg.TLSListenAddr)
+		return httpSrv.ListenAndServeTLS("", "")
+	}
 	return httpSrv.ListenAndServe()
 }
