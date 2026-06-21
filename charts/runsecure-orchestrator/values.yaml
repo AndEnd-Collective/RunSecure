@@ -12,17 +12,17 @@ image:
   orchestrator:
     repository: ghcr.io/andend-collective/runsecure/orchestrator
     tag: "2.1.0"
-    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    digest: "sha256:5f88ad8608510c089dc5011e3a2fbe014f2e6256cdcfdfda938c3b676cb969ab"
     pullPolicy: Always
   proxy:
     repository: ghcr.io/andend-collective/runsecure/proxy
     tag: "2.1.0"
-    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    digest: "sha256:8d6eab73932cd6e13cc1f25bfa250ecb0aad6cc891754018d1be9266a0f11c32"
     pullPolicy: Always
   socketProxy:
     repository: ghcr.io/andend-collective/runsecure/socket-proxy
     tag: "2.1.0"
-    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    digest: "sha256:44b5d07f0ef7f2c7e6121110a392d23288ec7676ee106779c32af98d67d5d866"
     pullPolicy: Always
 
 # ---------------------------------------------------------------------------
