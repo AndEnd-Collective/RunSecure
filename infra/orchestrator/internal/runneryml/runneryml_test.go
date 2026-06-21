@@ -50,7 +50,7 @@ orchestrator:
 	require.Equal(t, 2048, r.Resources.PIDs)
 	require.Equal(t, []string{"registry.npmjs.org", "api.github.com"}, r.Egress.AllowDomains)
 	require.Equal(t, 7200, r.Orchestrator.TimeoutSeconds)
-	require.Equal(t, []string{"*.npmjs.org"}, r.Orchestrator.SecurityOverrides.AllowWildcards)
+	require.Equal(t, []any{"*.npmjs.org"}, r.Orchestrator.SecurityOverrides["allow_wildcards"])
 	require.Equal(t, "node-runner.json", r.Orchestrator.SeccompProfile)
 }
 

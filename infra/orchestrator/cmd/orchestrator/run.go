@@ -72,7 +72,10 @@ func Run(ctx context.Context, scopePath string) error {
 	rl := state.NewTokenBucket(5, 10, time.Now)
 	brks := newBreakerMap()
 	eg := egress.NewFSGenerator(envOr("RUNSECURE_EGRESS_BASE_DIR", "/tmp/runsecure/egress"))
-	resolvedPolicy := security.Defaults(s.SecurityProfile)
+	basePolicy, err := buildBasePolicy(s.SecurityProfile, s.SecurityOverrides, allOverrideKeys())
+	if err != nil {
+		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
+	}
 	pdeps := &productionDeps{
 		gh:         gh,
 		dc:         dc,
@@ -80,7 +83,8 @@ func Run(ctx context.Context, scopePath string) error {
 		clk:        clk,
 		st:         st,
 		eg:         eg,
-		policy:     resolvedPolicy,
+		basePolicy: basePolicy,
+		allowKeys:  s.AllowProjectOverrides,
 		bucket:     rl,
 		brks:       brks,
 		intents:    intentCh,
@@ -252,7 +256,8 @@ type productionDeps struct {
 	clk        clock.Clock
 	st         *state.State
 	eg         egress.Generator
-	policy     security.Policy
+	basePolicy security.Policy
+	allowKeys  []string
 	bucket     *state.TokenBucket
 	brks       *breakerMap
 	intents    chan orchestrator.SpawnIntent
@@ -272,7 +277,7 @@ func (p *productionDeps) Docker() docker.Client           { return p.dc }
 func (p *productionDeps) Emit() *cornerstone.Emitter      { return p.em }
 func (p *productionDeps) Clock() orchestrator.ClockLike   { return p.clk }
 func (p *productionDeps) Egress() orchestrator.EgressGenerator {
-	return egressShim{g: p.eg, policy: p.policy}
+	return egressShim{g: p.eg, base: p.basePolicy, allowKeys: p.allowKeys}
 }
 func (p *productionDeps) State() orchestrator.StateLike    { return p.st }
 
@@ -391,13 +396,48 @@ func (p *productionDeps) Breakers() orchestrator.BreakerMap     { return p.brks 
 
 // ------------- small adapters --------------------------------------------
 
+// egressShim adapts egress.Generator (which needs a resolved security.Policy)
+// to the orchestrator.EgressGenerator interface (which only has spawnID + Runner).
+//
+// Policy resolution happens per-spawn in Render:
+//  1. Start from the operator-level base policy (scope Defaults + scope overrides).
+//  2. Apply the project's runner.yml security_overrides, gated to the keys the
+//     scope permits via AllowProjectOverrides. Disallowed keys are ignored.
+//  3. Fail the spawn on any type-mismatch in the project's override values.
 type egressShim struct {
-	g      egress.Generator
-	policy security.Policy
+	g         egress.Generator
+	base      security.Policy
+	allowKeys []string
 }
 
 func (e egressShim) Render(spawnID string, r *runneryml.Runner) (string, error) {
-	return e.g.Render(spawnID, r, e.policy)
+	policy, err := security.ApplyProjectOverrides(e.base, e.allowKeys, r.Orchestrator.SecurityOverrides)
+	if err != nil {
+		return "", fmt.Errorf("security: project override invalid: %w", err)
+	}
+	return e.g.Render(spawnID, r, policy)
+}
+
+// buildBasePolicy constructs the operator-level base policy:
+//  1. Defaults(profile) — preset floor.
+//  2. Apply scope-level security_overrides (unrestricted — operator controls the scope).
+//
+// allKeys is the full set of keys ApplyProjectOverrides handles; passing it
+// here gives the operator unrestricted access to all override knobs.
+func buildBasePolicy(profile string, scopeOverrides map[string]any, allKeys []string) (security.Policy, error) {
+	return security.ApplyProjectOverrides(security.Defaults(profile), allKeys, scopeOverrides)
+}
+
+// allOverrideKeys returns the full set of keys that ApplyProjectOverrides
+// handles. Used when applying operator-level (unrestricted) scope overrides.
+func allOverrideKeys() []string {
+	return []string{
+		"allow_wildcards",
+		"allow_doh",
+		"allow_imds",
+		"allow_kube_api",
+		"allow_private_cidrs",
+	}
 }
 
 type tokenBucketAdapter struct{ b *state.TokenBucket }
