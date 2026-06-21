@@ -191,9 +191,9 @@ dns:
 EOF
 )"
 
-# --- egress: is no longer recognized — must produce unknown-field error ------
-check "egress key rejected as unknown field" 1 \
-    'runner.yml contains unknown field "egress" — your RunSecure version may be older than this config requires' \
+# --- egress: deprecated but accepted as alias for http_egress (warns, exit 0) --
+check_warn "egress key accepted as deprecated alias" \
+    "WARNING: egress.allow_domains is deprecated; rename the key to http_egress. Backward-compatibility alias will be removed in the next major release." \
     "$(cat <<'EOF'
 runtime: node:24
 egress:
