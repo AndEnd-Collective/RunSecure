@@ -187,3 +187,42 @@ jobs:
             --title "chore(socket-proxy): refresh allowed-images for $NEXT_VERSION" \
             --body "Automated refresh of infra/socket-proxy/allowed-images.txt; the socket-proxy rebuild on this PR will bake in the updated digests." \
             --base main --head "bot/allowed-images-${NEXT_VERSION}" || true
+
+      # ----------------------------------------------------------------------
+      # Refresh Go module dependencies weekly so they never go stale between
+      # releases. Without this, a freshly-published CVE in a transitive dep
+      # (e.g. golang.org/x/net pulled by client-go) only surfaces at the
+      # post-publish Grype gate and blocks the release. This opens a PR that is
+      # gated by CI (including the per-image Grype scans) and merged before the
+      # next bump, keeping the released binaries current.
+      # ----------------------------------------------------------------------
+      - name: Set up Go
+        if: github.event.inputs.dry_run != 'true'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: '1.26'
+
+      - name: Refresh Go module dependencies
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for mod in infra/orchestrator infra/socket-proxy; do
+            ( cd "$mod" && go get -u ./... && go mod tidy )
+          done
+          if git diff --quiet -- infra/orchestrator/go.mod infra/orchestrator/go.sum \
+                                  infra/socket-proxy/go.mod infra/socket-proxy/go.sum; then
+            echo "no Go dependency changes; skipping PR"
+            exit 0
+          fi
+          BRANCH="bot/go-deps-${NEXT_VERSION}"
+          git add infra/orchestrator/go.mod infra/orchestrator/go.sum \
+                  infra/socket-proxy/go.mod infra/socket-proxy/go.sum
+          git commit -m "chore(deps): weekly go get -u for $NEXT_VERSION"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          gh pr create \
+            --title "chore(deps): weekly Go dependency refresh for $NEXT_VERSION" \
+            --body "Automated 'go get -u ./... && go mod tidy' on both Go modules so dependencies never go stale between releases. CI — including the per-image Grype scans — gates this PR." \
+            --base main --head "$BRANCH" || true
