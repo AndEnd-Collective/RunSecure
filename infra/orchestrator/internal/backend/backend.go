@@ -26,6 +26,13 @@ type SpawnInput struct {
 	EgressNetwork, EgressVolume                       string // Compose-specific; kube ignores
 	EnableDNSMasq                                     bool
 	Labels                                            []string
+
+	// TCPEgressPorts is the set of TCP ports the proxy must expose beyond the
+	// default Squid port (3128). Used by the kube backend to configure the
+	// ProxyService and RunnerEgressNetworkPolicy; compose ignores this field
+	// because Docker networking handles port routing dynamically and the HAProxy
+	// config (rendered by internal/egress) already lists the ports explicitly.
+	TCPEgressPorts []int
 }
 
 // Handle is a backend-opaque reference to a live spawn.
