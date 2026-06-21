@@ -286,6 +286,36 @@ func TestSpawn_ProxyCreateFails_RollsBack(t *testing.T) {
 	require.Contains(t, err.Error(), "create proxy")
 }
 
+// TestSpawn_ProxyTmpfsHasNoexecNosuid verifies that every tmpfs mount on the
+// proxy container carries noexec and nosuid. Without these flags a process
+// running as the proxy user could drop and execute a binary from /tmp or
+// exploit a setuid binary that happened to land on the mount, undermining the
+// cap_drop:ALL + no-new-privileges hardening.
+// nodev is also required: device nodes are never needed in runtime dirs and
+// creating one would otherwise allow bypassing block/char device access rules.
+func TestSpawn_ProxyTmpfsHasNoexecNosuid(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := fc.created["proxy"]
+	if len(proxy.HostConfig.Tmpfs) == 0 {
+		t.Fatal("proxy must have tmpfs mounts")
+	}
+	required := []string{"noexec", "nosuid", "nodev"}
+	for path, opts := range proxy.HostConfig.Tmpfs {
+		for _, flag := range required {
+			if !strings.Contains(opts, flag) {
+				t.Errorf("proxy tmpfs %s: missing %s (opts=%q)", path, flag, opts)
+			}
+		}
+	}
+}
+
 func TestSpawn_StartFails_RollsBack(t *testing.T) {
 	var deleteCount int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

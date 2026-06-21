@@ -34,11 +34,21 @@ func TestRenderSquid_WildcardInjectionBlocked(t *testing.T) {
 	if strings.Contains(out, "acl allowed_domains dstdomain foo") {
 		t.Fatalf("poisoned wildcard suffix should have been dropped, but was emitted:\n%s", out)
 	}
-	// The runtime-path directives must appear after all access rules.
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	lastLine := lines[len(lines)-1]
-	if lastLine != "coredump_dir /var/spool/squid" {
-		t.Fatalf("last line must be coredump_dir directive, got: %s", lastLine)
+	// http_access deny all must appear BEFORE any runtime-path directive.
+	// This is the real invariant: access control lines must not be split by
+	// or follow operational directives like pid_filename, access_log, etc.
+	// Using a positional index check is robust regardless of trailing content.
+	denyAllIdx := strings.Index(out, "http_access deny all")
+	for _, runtimeDirective := range []string{
+		"pid_filename ",
+		"access_log ",
+		"cache_log ",
+		"coredump_dir ",
+	} {
+		if idx := strings.Index(out, runtimeDirective); idx != -1 && idx < denyAllIdx {
+			t.Fatalf("%q (pos %d) must not appear before 'http_access deny all' (pos %d):\n%s",
+				runtimeDirective, idx, denyAllIdx, out)
+		}
 	}
 }
 

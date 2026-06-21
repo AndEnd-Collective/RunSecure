@@ -51,7 +51,7 @@ services:
     # with egress_render / "permission denied".
     # CAP_CHOWN is required to change file ownership; it is dropped after
     # this service exits and is never present in the long-running services.
-    image: alpine:3.22
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
     container_name: rs-orch-${RUNSECURE_SCOPE}-egress-init
     restart: "no"
     user: "0:0"
