@@ -1,0 +1,43 @@
+{{/*
+cert-manager Certificate for the orchestrator's TLS surface.
+Rendered ONLY when tls.enabled=true.
+
+When tls.selfSigned=true, the issuerRef points to the self-signed Issuer
+from issuer-selfsigned.yaml. When false, it points to the user-provided
+Issuer/ClusterIssuer (tls.issuerName / tls.issuerKind).
+
+The generated Secret (tls.secretName) is mounted into the orchestrator
+Deployment by any downstream consumer — this chart does NOT mount it by
+default since the orchestrator may or may not expose a TLS endpoint
+depending on the deployment topology. Add a volumeMount via extraEnv
+or a subchart overlay if needed.
+*/}}
+{{- if .Values.tls.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "runsecure-orchestrator.fullname" . }}-cert
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.tls.secretName | quote }}
+  issuerRef:
+    name: {{ include "runsecure-orchestrator.issuerName" . }}
+    kind: {{ .Values.tls.issuerKind }}
+  {{- if .Values.tls.dnsNames }}
+  dnsNames:
+    {{- range .Values.tls.dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- else }}
+  dnsNames:
+    - {{ include "runsecure-orchestrator.fullname" . }}.{{ include "runsecure-orchestrator.namespace" . }}.svc.cluster.local
+    - {{ include "runsecure-orchestrator.fullname" . }}.{{ include "runsecure-orchestrator.namespace" . }}.svc
+  {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  duration: 2160h   # 90 days
+  renewBefore: 360h # Renew 15 days before expiry
+{{- end }}
