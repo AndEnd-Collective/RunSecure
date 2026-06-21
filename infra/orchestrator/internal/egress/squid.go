@@ -19,6 +19,29 @@ var reDomain = regexp.MustCompile(`^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`
 // any other character that could inject a second squid directive.
 var reCIDR = regexp.MustCompile(`^[0-9a-fA-F:.]+/[0-9]{1,3}$`)
 
+// GitHubCoreDomains is the set of domains the GitHub Actions control-plane
+// requires for every runner — regardless of what runner.yml http_egress
+// contains. Without these domains a JIT runner registers with GitHub but
+// cannot reach the broker / VSTOKEN endpoint and immediately goes offline
+// without picking up any queued job.
+//
+// MUST be kept in sync with the github_core ACL in
+// infra/squid/base.conf (the one-shot run.sh path). When either list
+// changes, update both files.
+var GitHubCoreDomains = []string{
+	".github.com",
+	"api.github.com",
+	".githubusercontent.com",
+	".actions.githubusercontent.com",
+	".objects.githubusercontent.com",
+	".github.githubassets.com",
+	".ghcr.io",
+	".pkg.github.com",
+	".pipelines.actions.githubusercontent.com",
+	".results-receiver.actions.githubusercontent.com",
+	".vstoken.actions.githubusercontent.com",
+}
+
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
@@ -89,6 +112,27 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	}
 
 	b.WriteString("http_access deny rs_private_dst\n")
+
+	// GitHub Actions control-plane baseline (unconditional — every runner
+	// needs these domains to register, receive the VSTOKEN, stream logs, and
+	// report job results regardless of what runner.yml http_egress contains).
+	//
+	// Placed AFTER the private-IP deny (which is dst-IP based) so that a
+	// GitHub hostname that DNS-resolves to a private IP is still blocked by
+	// the dst-IP rule above before this allow is evaluated — maintaining the
+	// DNS-rebinding defense. GitHubCoreDomains are dstdomain ACLs, so Squid
+	// applies them on the CONNECT hostname, not the resolved IP; the ordering
+	// matters only for dst (IP) ACLs, not dstdomain ones, but we keep
+	// private-deny first as defence-in-depth.
+	//
+	// Sync: infra/squid/base.conf's github_core ACL must list the same
+	// domains (the one-shot run.sh path). See GitHubCoreDomains constant.
+	for _, d := range GitHubCoreDomains {
+		if clean := sanitizeDomain(d); clean != "" {
+			fmt.Fprintf(&b, "acl rs_github_core dstdomain %s\n", clean)
+		}
+	}
+	b.WriteString("http_access allow rs_github_core\n")
 
 	// Collect all permitted domains first, then emit the ACL and allow rule
 	// only when there are entries. An empty "acl allowed_domains dstdomain"
