@@ -11,12 +11,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/auth"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/compose"
+	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/clock"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/egress"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/orchestrator"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
@@ -39,7 +44,11 @@ func Run(ctx context.Context, scopePath string) error {
 	// Bug #3 fix: respect RUNSECURE_GITHUB_BASE_URL for integration tests
 	// (mock-github) and future GitHub Enterprise deployments.
 	baseURL := envOr("RUNSECURE_GITHUB_BASE_URL", github.DefaultBaseURL)
-	gh, err := github.NewClient(baseURL, s.Auth.PATFile)
+	provider, err := buildAuthProvider(s, baseURL)
+	if err != nil {
+		return err
+	}
+	gh, err := github.NewClientWithProvider(baseURL, provider)
 	if err != nil {
 		return err
 	}
@@ -76,9 +85,14 @@ func Run(ctx context.Context, scopePath string) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
 	}
+	be, err := selectBackend(s, dc, productionKubeCtor)
+	if err != nil {
+		return fmt.Errorf("orchestrator: backend init: %w", err)
+	}
 	pdeps := &productionDeps{
 		gh:         gh,
 		dc:         dc,
+		be:         be,
 		em:         em,
 		clk:        clk,
 		st:         st,
@@ -141,6 +155,26 @@ func Run(ctx context.Context, scopePath string) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// buildAuthProvider constructs the appropriate auth.Provider for the scope's
+// configured auth type. It is a package-level function (not inlined in Run) so
+// that the cmd tests can invoke it without instantiating the full Run graph.
+func buildAuthProvider(s *config.Scope, apiBaseURL string) (auth.Provider, error) {
+	switch s.Auth.Type {
+	case "pat":
+		return auth.NewPATProvider(s.Auth.PATFile)
+	case "github_app":
+		return auth.NewGitHubAppProvider(
+			s.Auth.AppID,
+			s.Auth.InstallationID,
+			s.Auth.PrivateKeyFile,
+			apiBaseURL,
+		)
+	default:
+		// Validate() already rejects unknown types; this is a defensive guard.
+		return nil, fmt.Errorf("orchestrator: unknown auth.type %q", s.Auth.Type)
+	}
 }
 
 func envOr(k, fallback string) string {
@@ -219,7 +253,13 @@ func newServerDeps(st *state.State, clk clock.Clock, intervalS int) *serverDeps 
 	return d
 }
 
-func (d *serverDeps) LastPollAt() time.Time         { p := d.lastPoll.Load(); if p == nil { return time.Time{} }; return *p }
+func (d *serverDeps) LastPollAt() time.Time {
+	p := d.lastPoll.Load()
+	if p == nil {
+		return time.Time{}
+	}
+	return *p
+}
 func (d *serverDeps) Now() time.Time                { return d.clk.Now() }
 func (d *serverDeps) PollIntervalSeconds() int      { return d.intervalS }
 func (d *serverDeps) StateSnapshot() state.Snapshot { return d.st.Snapshot() }
@@ -252,6 +292,7 @@ func (d *serverDeps) BreakerOpen() map[string]bool {
 type productionDeps struct {
 	gh         *github.Client
 	dc         docker.Client
+	be         backend.Backend
 	em         *cornerstone.Emitter
 	clk        clock.Clock
 	st         *state.State
@@ -265,26 +306,30 @@ type productionDeps struct {
 	serverDeps *serverDeps
 
 	// rate-limit state
-	rlMu      sync.Mutex
-	rlPaused  bool
-	rlReset   time.Time
+	rlMu     sync.Mutex
+	rlPaused bool
+	rlReset  time.Time
 }
 
 // PollDeps and SpawnDeps shared methods.
 
-func (p *productionDeps) GitHub() *github.Client          { return p.gh }
-func (p *productionDeps) Docker() docker.Client           { return p.dc }
-func (p *productionDeps) Emit() *cornerstone.Emitter      { return p.em }
-func (p *productionDeps) Clock() orchestrator.ClockLike   { return p.clk }
+func (p *productionDeps) GitHub() *github.Client        { return p.gh }
+func (p *productionDeps) Docker() docker.Client         { return p.dc }
+func (p *productionDeps) Backend() backend.Backend      { return p.be }
+func (p *productionDeps) Emit() *cornerstone.Emitter    { return p.em }
+func (p *productionDeps) Clock() orchestrator.ClockLike { return p.clk }
 func (p *productionDeps) Egress() orchestrator.EgressGenerator {
 	return egressShim{g: p.eg, base: p.basePolicy, allowKeys: p.allowKeys}
 }
-func (p *productionDeps) State() orchestrator.StateLike    { return p.st }
+func (p *productionDeps) State() orchestrator.StateLike { return p.st }
 
 func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot, error) {
 	for _, r := range p.scopeRef.Repos {
 		if r.Repo != repo {
 			continue
+		}
+		if p.scopeRef.Backend == "kube" {
+			return loadRunnerYMLFromAPI(context.Background(), p.gh, p.st, repo)
 		}
 		yml, err := runneryml.Parse(filepath_join(r.ProjectDir, ".github", "runner.yml"))
 		if err != nil {
@@ -301,11 +346,62 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 	return nil, errors.New("unknown repo")
 }
 
+// loadRunnerYMLFromAPI fetches runner.yml via the GitHub Contents API using
+// ETag-based conditional requests (304 → reuse cached snapshot). It is a
+// package-level function (not a method) so tests can inject a stubbed github
+// client without instantiating the full productionDeps graph.
+//
+// The st argument provides ETag storage per repo (state.RepoState.LastETag).
+// On 304 the function returns errNotModified; callers should substitute their
+// cached snapshot. On 200 the snapshot is returned and the ETag is persisted.
+//
+// TODO(k8s_context): once cornerstone defines a k8s_context schema field,
+// thread Backend=="kube" into Cornerstone spawn events here and in spawn.go
+// instead of container_context. Currently container_context is reused as-is
+// for kube (no behavior change; pod names are set via Handle.Refs not ctx).
+func loadRunnerYMLFromAPI(ctx context.Context, gh *github.Client, st etagger, repo string) (*orchestrator.RunnerYMLSnapshot, error) {
+	etag := st.LastETag(repo)
+	body, newETag, notModified, err := gh.GetRunnerYML(ctx, repo, etag)
+	if err != nil {
+		return nil, fmt.Errorf("runner.yml API fetch for %s: %w", repo, err)
+	}
+	if notModified {
+		// Caller must supply a cached snapshot; surface a sentinel so the
+		// caller can distinguish 304 from a real error.
+		return nil, errRunnerYMLNotModified
+	}
+	yml, err := runneryml.ParseBytes(body, "api:"+repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range yml.DeprecationWarnings() {
+		fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
+	}
+	if err := yml.ValidateEgress(); err != nil {
+		return nil, fmt.Errorf("runner.yml egress validation: %w", err)
+	}
+	if newETag != "" {
+		st.SetLastETag(repo, newETag)
+	}
+	return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
+}
+
+// errRunnerYMLNotModified is returned by loadRunnerYMLFromAPI when the server
+// responds 304 Not Modified. The caller must substitute the cached snapshot.
+var errRunnerYMLNotModified = errors.New("runner.yml: not modified (304)")
+
+// etagger is the subset of *state.State used by loadRunnerYMLFromAPI so that
+// tests can inject a lightweight stub without the full state.State.
+type etagger interface {
+	LastETag(repo string) string
+	SetLastETag(repo, etag string)
+}
+
 // PollDeps-only ------------------------------------------------------------
 
-func (p *productionDeps) InFlight(repo string) int         { return p.st.InFlight(repo) }
-func (p *productionDeps) GlobalInFlight() int              { return p.st.GlobalInFlight() }
-func (p *productionDeps) BreakerIsOpen(repo string) bool   { return p.brks.IsOpen(repo) }
+func (p *productionDeps) InFlight(repo string) int       { return p.st.InFlight(repo) }
+func (p *productionDeps) GlobalInFlight() int            { return p.st.GlobalInFlight() }
+func (p *productionDeps) BreakerIsOpen(repo string) bool { return p.brks.IsOpen(repo) }
 func (p *productionDeps) BreakerMaybeHalfOpen(repo string) bool {
 	return p.brks.MaybeHalfOpen(repo)
 }
@@ -358,7 +454,7 @@ func (p *productionDeps) RecordPollTick() {
 
 // SpawnDeps-only --------------------------------------------------------
 
-func (p *productionDeps) GlobalMaxRunners() int        { return p.scopeRef.GlobalMaxRunners }
+func (p *productionDeps) GlobalMaxRunners() int { return p.scopeRef.GlobalMaxRunners }
 func (p *productionDeps) RepoMaxConcurrent(repo string) int {
 	for _, r := range p.scopeRef.Repos {
 		if r.Repo == repo {
@@ -367,8 +463,8 @@ func (p *productionDeps) RepoMaxConcurrent(repo string) int {
 	}
 	return 1
 }
-func (p *productionDeps) ScopeName() string                       { return p.scopeRef.Name }
-func (p *productionDeps) ProxyImageDigest() string                { return os.Getenv("RUNSECURE_PROXY_IMAGE") }
+func (p *productionDeps) ScopeName() string        { return p.scopeRef.Name }
+func (p *productionDeps) ProxyImageDigest() string { return os.Getenv("RUNSECURE_PROXY_IMAGE") }
 func (p *productionDeps) RunnerImageDigestFor(runtime string) string {
 	// Convention: env var RUNSECURE_RUNNER_IMAGE_<RUNTIME_UPPERCASE> →
 	// "ghcr.io/.../runner-<lang>:<ver>@sha256:..." Caller has bounded
@@ -397,8 +493,10 @@ func (p *productionDeps) SeccompProfileHostPath(name string) string {
 	}
 	return "/host/seccomp/" + name
 }
-func (p *productionDeps) RateLimiter() orchestrator.TokenBucket { return tokenBucketAdapter{b: p.bucket} }
-func (p *productionDeps) Breakers() orchestrator.BreakerMap     { return p.brks }
+func (p *productionDeps) RateLimiter() orchestrator.TokenBucket {
+	return tokenBucketAdapter{b: p.bucket}
+}
+func (p *productionDeps) Breakers() orchestrator.BreakerMap { return p.brks }
 
 // ------------- small adapters --------------------------------------------
 
@@ -416,12 +514,21 @@ type egressShim struct {
 	allowKeys []string
 }
 
-func (e egressShim) Render(spawnID string, r *runneryml.Runner) (string, error) {
+func (e egressShim) Render(spawnID string, r *runneryml.Runner) (string, []string, error) {
 	policy, err := security.ApplyProjectOverrides(e.base, e.allowKeys, r.Orchestrator.SecurityOverrides)
 	if err != nil {
-		return "", fmt.Errorf("security: project override invalid: %w", err)
+		return "", nil, fmt.Errorf("security: project override invalid: %w", err)
 	}
-	return e.g.Render(spawnID, r, policy)
+	dir, err := e.g.Render(spawnID, r, policy)
+	if err != nil {
+		return "", nil, err
+	}
+	// Stringify the resolved *net.IPNet CIDRs for transport to the kube backend.
+	var cidrs []string
+	for _, ipnet := range policy.AllowedPrivateCIDRs {
+		cidrs = append(cidrs, ipnet.String())
+	}
+	return dir, cidrs, nil
 }
 
 // buildBasePolicy constructs the operator-level base policy:
@@ -481,3 +588,30 @@ func upperRuntime(rt string) string {
 var seq atomic.Int64
 
 func nextSeq() int64 { return seq.Add(1) }
+
+// productionKubeCtor is the kubeCtor used in the binary. It calls
+// kube.NewInCluster() (requires in-cluster service-account credentials) and
+// wraps the resulting client in the kube backend.
+func productionKubeCtor() (backend.Backend, error) {
+	c, err := kube.NewInCluster()
+	if err != nil {
+		return nil, fmt.Errorf("kube: in-cluster init: %w", err)
+	}
+	return backendkube.New(c), nil
+}
+
+// selectBackend constructs the spawn backend indicated by scope.Backend.
+// The kubeCtor parameter is injectable so unit tests can verify the selection
+// logic without a real Kubernetes cluster.
+//
+// Selection rules:
+//   - "kube"    → kubeCtor() (error propagated to caller)
+//   - "compose" → compose.New(dc)
+//   - ""        → normalised to "compose" by config.Validate before this is
+//     called, so the empty-string arm is defensive only.
+func selectBackend(s *config.Scope, dc docker.Client, kubeCtor func() (backend.Backend, error)) (backend.Backend, error) {
+	if s.Backend == "kube" {
+		return kubeCtor()
+	}
+	return compose.New(dc), nil
+}

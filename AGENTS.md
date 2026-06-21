@@ -15,6 +15,12 @@ If you're an LLM proposing changes to this project, read this file first. The ru
 - **`apt-get upgrade -y` in every Dockerfile is load-bearing.** Without it, grype flags HIGH CVEs in unpatched debian:bookworm-slim packages even on a fresh digest. Don't remove it for "build speed."
 - **Python comes from `astral-sh/python-build-standalone`, not Debian.** Debian Bookworm's `python3` is 3.11.2; we ship 3.12. Pinned to a specific release tag + SHA256s per architecture. Adding a new minor version means one new case branch in `images/python.Dockerfile` plus the publish matrix entry.
 
+## Kubernetes backend (2.1.0) — decisions that are NOT up for re-litigation
+
+- **The Kubernetes backend exists (`charts/runsecure-orchestrator/`, `internal/backend/kube/`, `internal/kube/`).** It is not a future plan — it ships in 2.1.0 and is exercised by `tests/integration/k8s/run-k8s-tests.sh`.
+- **Runner Pod isolation depends on a NetworkPolicy-enforcing CNI.** Per-spawn `RunnerEgressNetworkPolicy`, `ProxyEgressNetworkPolicy`, and `ProxyIngressNetworkPolicy` are all three created on every spawn. Under kindnet/flannel they are created but silently ignored — the runner can reach the internet directly. Never test security properties on a cluster whose CNI does not enforce NetworkPolicy. The harness uses kind + Calico specifically to avoid this.
+- **`ProxyIngressNetworkPolicy` is load-bearing.** Under the namespace default-deny, the runner's `RunnerEgressNetworkPolicy` (egress: allow → proxy:3128) is not enough — the proxy Pod also needs an explicit ingress rule. Without `ProxyIngressNetworkPolicy`, a real CNI blocks runner→proxy:3128. This was a real bug caught during development; do not remove or merge this policy into another one.
+
 ## Egress allow-path (2.0.0) — decisions that are NOT up for re-litigation
 
 - **Schema is `http_egress` / `tcp_egress` / `dns`.** `egress.allow_domains` is a deprecated alias (WARNs on both the orchestrator and `run.sh` paths; removed in 3.0). Don't reintroduce it as a primary field. `tcp_egress` ports must be unique and not 80/443; entries are validated (`runneryml.ValidateEgress`, wired into the spawn path).

@@ -1,0 +1,19 @@
+{{/*
+Self-signed cert-manager Issuer.
+Rendered ONLY when tls.enabled=true AND tls.selfSigned=true.
+
+This Issuer generates a self-signed CA used by the Certificate template.
+For production clusters, set tls.selfSigned=false and provide a real
+Issuer or ClusterIssuer via tls.issuerName.
+*/}}
+{{- if and .Values.tls.enabled .Values.tls.selfSigned }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "runsecure-orchestrator.selfSignedIssuerName" . }}
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}

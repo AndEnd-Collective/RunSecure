@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunSecure Orchestrator Helm Values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope", "auth", "image"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["orchestrator", "proxy", "socketProxy"],
+      "properties": {
+        "orchestrator": { "$ref": "#/$defs/imageSpec" },
+        "proxy":        { "$ref": "#/$defs/imageSpec" },
+        "socketProxy":  { "$ref": "#/$defs/imageSpec" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "description": "Short lowercase name used for namespace and labels"
+        },
+        "description":           { "type": "string" },
+        "backend":               { "type": "string", "enum": ["kube", "compose"] },
+        "globalMaxRunners":      { "type": "integer", "minimum": 1 },
+        "pollIntervalSeconds":   { "type": "integer", "minimum": 5 },
+        "securityProfile":       { "type": "string", "enum": ["strict", "standard", "permissive", "custom"] },
+        "allowProjectOverrides": { "type": "array", "items": { "type": "string" } },
+        "orchEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allowDomains": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repo"],
+            "properties": {
+              "repo":          { "type": "string" },
+              "maxConcurrent": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["pat", "github_app"] },
+        "pat": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value":              { "type": "string" },
+            "existingSecretName": { "type": "string" }
+          }
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "appId":                { "type": "string" },
+            "installationId":       { "type": "string" },
+            "privateKeySecretName": { "type": "string" }
+          }
+        }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":    { "type": "boolean" },
+        "selfSigned": { "type": "boolean" },
+        "issuerName": { "type": "string" },
+        "issuerKind": { "type": "string", "enum": ["Issuer", "ClusterIssuer"] },
+        "secretName": { "type": "string" },
+        "dnsNames":   { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name":        { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "podSecurityContext": { "type": "object" },
+    "securityContext":    { "type": "object" },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "type": "object" },
+        "limits":   { "type": "object" }
+      }
+    },
+    "livenessProbe":  { "type": "object" },
+    "readinessProbe": { "type": "object" },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "port": { "type": "integer" }
+      }
+    },
+    "extraEnv":       { "type": "array" },
+    "nodeSelector":   { "type": "object" },
+    "tolerations":    { "type": "array" },
+    "affinity":       { "type": "object" },
+    "podAnnotations": { "type": "object" }
+  },
+  "$defs": {
+    "imageSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest"],
+      "properties": {
+        "repository":  { "type": "string" },
+        "tag":         { "type": "string" },
+        "digest":      { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "pullPolicy":  { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    }
+  }
+}

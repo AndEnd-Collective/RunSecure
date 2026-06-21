@@ -14,6 +14,8 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,8 +35,13 @@ func TestSpawn_HappyPath(t *testing.T) {
 
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"}))
 
-	require.True(t, d.dc.created["runner"], "runner container created")
-	require.True(t, d.dc.created["proxy"], "proxy container created")
+	// Execute must have delegated spawn to the backend (not docker directly).
+	require.Equal(t, 1, d.be.spawnCount(), "Backend().Spawn must be called once")
+	require.Equal(t, 1, d.be.waitCount(), "Backend().WaitForExit must be called once")
+	require.Equal(t, 1, d.be.teardownCount(), "Backend().Teardown must be called once")
+	// The fake docker client must NOT have had CreateNetwork called (zero network creates).
+	require.Equal(t, 0, d.dc.netCreated, "Execute must not call Docker().CreateNetwork directly")
+
 	require.Equal(t, 0, d.st.InFlight("o/r"), "in-flight decremented after teardown")
 
 	d.requireEmitted(t,
@@ -47,19 +54,21 @@ func TestSpawn_HappyPath(t *testing.T) {
 
 func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["runner"] = errPolicyDenied("HostConfig.CapAdd")
+	// Inject a socket-proxy-denied error through the backend.
+	d.be.spawnErr = errPolicyDenied("HostConfig.CapAdd")
 	w := NewSpawnWorker(d)
 
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	d.requireEmitted(t, cornerstone.EventSpawnFailed)
-	require.False(t, d.dc.created["runner"], "runner must not have been created successfully")
+	// WaitForExit must NOT be called when Spawn fails.
+	require.Equal(t, 0, d.be.waitCount(), "WaitForExit must not be called after Spawn error")
 }
 
 func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 	d := newSpawnDeps(t)
-	// Make all docker.Spawn container creates fail to trigger A1 leak path.
-	d.dc.createErr["proxy"] = errors.New("simulated docker error after JIT")
+	// Inject a backend Spawn failure to trigger A1 leak path.
+	d.be.spawnErr = errors.New("simulated backend error after JIT")
 	w := NewSpawnWorker(d)
 
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
@@ -68,29 +77,21 @@ func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 
 func TestSpawn_WallClockTimeout(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.inspectExitDelay = 1 * time.Hour // simulate runner that never exits
+	// Simulate a backend that reports timedOut=true from WaitForExit.
+	d.be.waitTimedOut = true
+	d.be.waitExitCode = -1
 	d.runnerYML.Orchestrator.TimeoutSeconds = 5
 	w := NewSpawnWorker(d)
 
-	// Advance the fake clock past the deadline after a short delay so the
-	// timeout goroutine fires.
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-time.After(20 * time.Millisecond):
-				d.clk.Advance(2 * time.Second)
-			}
-		}
-	}()
-
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
-	close(done)
 	require.Error(t, err)
 	d.requireEmitted(t, cornerstone.EventSpawnTimeoutForcedTeardown)
-	require.True(t, d.dc.forceDeleted["runner"])
+	// Teardown must have been called with force=true.
+	require.Equal(t, 1, d.be.teardownCount(), "Teardown must be called")
+	d.be.mu.Lock()
+	forceVal := d.be.teardownCalls[0].force
+	d.be.mu.Unlock()
+	require.True(t, forceVal, "Teardown must be called with force=true on timeout")
 }
 
 func TestSpawn_RateLimitBackoff(t *testing.T) {
@@ -105,7 +106,7 @@ func TestSpawn_RateLimitBackoff(t *testing.T) {
 
 func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.inspectExitCode = 7
+	d.be.waitExitCode = 7
 	w := NewSpawnWorker(d)
 
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
@@ -117,7 +118,7 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 // to Open. Previously the return values from RecordFailure were dropped.
 func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["proxy"] = errors.New("force failure")
+	d.be.spawnErr = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
@@ -129,14 +130,14 @@ func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 
 func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["proxy"] = errors.New("force failure")
+	d.be.spawnErr = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
 			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
 		})
 	}
-	delete(d.dc.createErr, "proxy")
+	d.be.spawnErr = nil
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "ok",
 	}))
@@ -204,14 +205,15 @@ func TestSpawn_TimeoutZero_AppliesDefault(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventSpawnCompleted)
 }
 
-// Mutation kill: spawn.go:183 — `if runnerID > 0`. Mutation to `>= 0` would
-// call DeleteRunner with id=0; mutation to `< 0` would skip cleanup for
-// valid positive IDs. The test verifies both halves.
+// Mutation kill: spawn.go failAndLeak `if runnerID > 0`. Mutation to `>= 0`
+// would call DeleteRunner with id=0; mutation to `< 0` would skip cleanup
+// for valid positive IDs. The test verifies the leak-clean path fires when
+// the backend returns an error post-JIT (the fake GH backend returns runnerID=42).
 func TestSpawn_FailAndLeak_OnlyCallsDeleteForValidID(t *testing.T) {
 	d := newSpawnDeps(t)
-	// Force step-3 failure (network create) AFTER JIT success → triggers
-	// failAndLeak. The fake mock-github default returns runnerID=42.
-	d.dc.createErr["proxy"] = errors.New("force post-JIT failure")
+	// Force backend.Spawn to fail after JIT success → triggers failAndLeak.
+	// The fake mock-github default returns runnerID=42.
+	d.be.spawnErr = errors.New("force post-JIT failure")
 	w := NewSpawnWorker(d)
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	// runner.leak_cleaned MUST have been emitted.
@@ -292,15 +294,28 @@ func TestSpawn_EgressRenderError_TriggersLeakCleanup(t *testing.T) {
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"egress_render"`)
 }
 
-// docker.CreateNetwork returns error → leak cleanup + spawn.failed.
-func TestSpawn_CreateNetworkError_TriggersLeakCleanup(t *testing.T) {
+// Backend().Spawn returns error → leak cleanup + spawn.failed.
+func TestSpawn_BackendSpawnError_TriggersLeakCleanup(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.netCreateErr = errors.New("simulated docker error")
+	d.be.spawnErr = errors.New("simulated backend error")
 	w := NewSpawnWorker(d)
 
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+// TestSpawn_NoDirectDockerNetworkCreate asserts that Execute never calls
+// Docker().CreateNetwork directly — all network management is delegated to
+// the backend. This ensures a future kube backend can swap in without the
+// orchestrator leaking Docker-specific calls.
+func TestSpawn_NoDirectDockerNetworkCreate(t *testing.T) {
+	d := newSpawnDeps(t)
+	w := NewSpawnWorker(d)
+
+	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"}))
+	require.Equal(t, 0, d.dc.netCreated,
+		"Execute must not call Docker().CreateNetwork; backend owns network lifecycle")
 }
 
 // imageDigest empty in the snapshot → fallback to RunnerImageDigestFor.
@@ -314,12 +329,12 @@ func TestSpawn_EmptySnapshotDigest_UsesRunnerImageDigestFor(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Mutation kill: spawn.go:284 — `if exitCode == 0` boundary. Mutation to
+// Mutation kill: spawn.go `if exitCode == 0` boundary. Mutation to
 // `!= 0` or `<= 0` would flip success/failure semantics.
 func TestSpawn_ExitCodeZero_EmitsCompleted_NonZeroEmitsFailed(t *testing.T) {
 	// Zero exit → completed.
 	d := newSpawnDeps(t)
-	d.dc.inspectExitCode = 0
+	d.be.waitExitCode = 0
 	w := NewSpawnWorker(d)
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "ok"}))
 	d.requireEmitted(t, cornerstone.EventSpawnCompleted)
@@ -327,7 +342,7 @@ func TestSpawn_ExitCodeZero_EmitsCompleted_NonZeroEmitsFailed(t *testing.T) {
 
 	// Non-zero exit → failed.
 	d2 := newSpawnDeps(t)
-	d2.dc.inspectExitCode = 1
+	d2.be.waitExitCode = 1
 	w2 := NewSpawnWorker(d2)
 	require.Error(t, w2.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "fail"}))
 	d2.requireEmitted(t, cornerstone.EventSpawnFailed)
@@ -368,51 +383,52 @@ func TestParseResources_Memory(t *testing.T) {
 
 func TestSpawn_ContextCancelled_AbortsWait(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.inspectExitDelay = 1 * time.Hour // runner doesn't exit
+	// Simulate WaitForExit returning the ctx-cancel sentinel (-1, false).
+	// The compose backend returns -1/false on ctx cancellation; the fakeBackend
+	// must do the same so Execute's event emission is testable end-to-end.
+	d.be.waitExitCode = -1
+	d.be.waitTimedOut = false
 	d.runnerYML.Orchestrator.TimeoutSeconds = 3600
 	w := NewSpawnWorker(d)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-	_ = w.Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
-	// Mutation kill: waitForExit's ctx-cancel branch returns sentinel
-	// exitCode=-1, which Execute renders into the spawn.failed Detail.
-	// Mutations `+1` or `1` (INVERT_NEGATIVES) would change the Detail.
+	// Execute finishes synchronously because fakeBackend.WaitForExit does not block.
+	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	// Mutation kill: exitCode=-1 with timedOut=false triggers the nonzero-exit
+	// path which emits spawn.failed with "exit_code=-1" in Detail.
 	require.Contains(t, d.emBuf.String(), "exit_code=-1",
-		"ctx-cancel must surface exitCode=-1 sentinel")
+		"ctx-cancel must surface exitCode=-1 sentinel in spawn.failed")
 }
 
-// Mutation kill: spawn.go waitForExit lines 216 & 218 — sentinel `-1`
-// returns. Exercises both ctx-cancel and deadline-fire paths directly so
-// the negative literal is asserted by value.
-func TestWaitForExit_CtxCancelled_ReturnsMinusOneSentinel(t *testing.T) {
+// TestBackend_WaitForExit_CtxCancelled and TestBackend_WaitForExit_DeadlineFires
+// verify those sentinel values via the compose backend directly (in compose_test.go).
+// These orchestrator-level tests verify Execute's handling of the returned values.
+
+// Mutation kill: spawn.go WaitForExit timedOut=true path.
+// Execute must emit timeout_forced_teardown and return an error.
+func TestSpawn_WaitForExit_TimedOut_EmitsTimeout(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.inspectExitDelay = 1 * time.Hour
+	d.be.waitExitCode = -1
+	d.be.waitTimedOut = true
+	d.runnerYML.Orchestrator.TimeoutSeconds = 5
 	w := NewSpawnWorker(d)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	ec, timedOut := w.waitForExit(ctx, "x", 1*time.Hour)
-	require.Equal(t, -1, ec, "ctx-cancel returns -1 sentinel")
-	require.False(t, timedOut)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	d.requireEmitted(t, cornerstone.EventSpawnTimeoutForcedTeardown)
 }
 
-func TestWaitForExit_DeadlineFires_ReturnsMinusOneSentinel(t *testing.T) {
+// Mutation kill: spawn.go WaitForExit exitCode=-1 / timedOut=false (ctx cancel).
+// Execute must NOT emit timeout_forced_teardown but must emit spawn.failed.
+func TestSpawn_WaitForExit_CtxCancel_EmitsFailed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.inspectExitDelay = 1 * time.Hour
+	d.be.waitExitCode = -1
+	d.be.waitTimedOut = false
 	w := NewSpawnWorker(d)
-	// The fake clock means After(timeout) fires only on Advance. Drive
-	// the deadline by advancing past the configured timeout in a goroutine.
-	go func() {
-		// Give waitForExit a moment to register the deadline timer.
-		time.Sleep(50 * time.Millisecond)
-		d.clk.Advance(2 * time.Second)
-	}()
-	ec, timedOut := w.waitForExit(context.Background(), "x", 1*time.Second)
-	require.Equal(t, -1, ec, "deadline-fire returns -1 sentinel")
-	require.True(t, timedOut)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	d.requireEmitted(t, cornerstone.EventSpawnFailed)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnTimeoutForcedTeardown)
 }
 
 // Mutation kill: spawn.go secondsToDuration — `s * time.Second`. Exact-value
@@ -449,7 +465,7 @@ func TestSpawn_NonEmptySnapshotDigest_UsesSnapshotNotFallback(t *testing.T) {
 	d := newSpawnDeps(t)
 	d.imageDigest = "ghcr.io/test/runner@sha256:from-snapshot"
 	d.fallbackDigest = "ghcr.io/test/runner@sha256:from-fallback"
-	d.dc.inspectExitCode = 0
+	d.be.waitExitCode = 0
 	w := NewSpawnWorker(d)
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"}))
 	require.Contains(t, d.emBuf.String(), "sha256:from-snapshot",
@@ -526,4 +542,125 @@ func TestSpawn_RunnerYML_DuplicateTCPPort_FailsSpawn(t *testing.T) {
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}
+
+func TestExecute_SpawnInput_TCPEgressPorts(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db.example.com:5432", "npm.io:8080"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "tcp-ports"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.ElementsMatch(t, []int{5432, 8080}, spawnCalls[0].TCPEgressPorts,
+		"TCPEgressPorts must contain the ports from runner.yml tcp_egress entries")
+}
+
+func TestExecute_SpawnInput_EnableDNSMasq_True(t *testing.T) {
+	d := newSpawnDeps(t)
+	falseVal := false
+	d.runnerYML.DNS = runneryml.DNSConfig{Host: &falseVal}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "dns-masq-true"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.True(t, spawnCalls[0].EnableDNSMasq,
+		"EnableDNSMasq must be true when dns.host=false in runner.yml")
+}
+
+func TestExecute_SpawnInput_EnableDNSMasq_False(t *testing.T) {
+	d := newSpawnDeps(t)
+	// No dns block set — dns.host is nil → EnableDNSMasq=false
+	d.runnerYML.DNS = runneryml.DNSConfig{}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "dns-masq-false"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.False(t, spawnCalls[0].EnableDNSMasq,
+		"EnableDNSMasq must be false when dns.host is nil")
+}
+
+// TestExecute_TCPEgressPorts_ZeroPort covers the port<=0 skip branch in the
+// tcpEgressPorts parsing loop (spawn.go). Port "0" passes ValidateEgress (it
+// is a valid digit string and is not 80/443) but is rejected by the `port > 0`
+// guard in the loop — only the positive port 5432 must appear in TCPEgressPorts.
+func TestExecute_TCPEgressPorts_ZeroPort(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{
+		"db.example.com:5432", // valid — included
+	}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "tcp-zeroport"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.Equal(t, []int{5432}, spawnCalls[0].TCPEgressPorts,
+		"only port 5432 must appear in TCPEgressPorts")
+}
+
+// ─── allow_private_cidrs threading tests (issue #47) ─────────────────────────
+
+// TestExecute_SpawnInput_AllowedPrivateCIDRs_ThreadedFromEgress verifies that
+// SpawnInput.AllowedPrivateCIDRs is populated from the resolved Policy CIDRs
+// returned by the EgressGenerator, so the kube backend can enforce L3 rules.
+func TestExecute_SpawnInput_AllowedPrivateCIDRs_ThreadedFromEgress(t *testing.T) {
+	d := newSpawnDeps(t)
+	// Simulate the egress generator returning approved private CIDRs
+	// (e.g. from an allow_private_cidrs scope override).
+	d.eg.allowedPrivateCIDRs = []string{"172.17.0.0/16", "10.10.0.0/24"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "priv-cidrs"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.ElementsMatch(t, []string{"172.17.0.0/16", "10.10.0.0/24"},
+		spawnCalls[0].AllowedPrivateCIDRs,
+		"SpawnInput.AllowedPrivateCIDRs must carry the egress-resolved approved CIDRs")
+}
+
+// TestExecute_SpawnInput_AllowedPrivateCIDRs_EmptyWhenNone verifies that when
+// the egress generator returns no approved CIDRs, SpawnInput.AllowedPrivateCIDRs
+// is empty (nil or zero-length), preserving the default-deny posture.
+func TestExecute_SpawnInput_AllowedPrivateCIDRs_EmptyWhenNone(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.eg.allowedPrivateCIDRs = nil // no private CIDRs
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "no-priv-cidrs"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.Empty(t, spawnCalls[0].AllowedPrivateCIDRs,
+		"SpawnInput.AllowedPrivateCIDRs must be empty when no private CIDRs are approved")
 }

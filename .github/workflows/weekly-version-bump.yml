@@ -147,10 +147,10 @@ jobs:
           echo "$NEXT_VERSION" > "$GITHUB_STEP_SUMMARY"
 
       # ----------------------------------------------------------------------
-      # Plan A: refresh socket-proxy's image-digest allowlist when runner
-      # images publish. The allowlist is baked into the socket-proxy image
-      # at build time, so this step opens a PR with the updated digests
-      # that the publish-images workflow will then pick up.
+      # Refresh socket-proxy's image-digest allowlist when runner images
+      # publish. The allowlist is baked into the socket-proxy image at build
+      # time, so this step opens a PR with the updated digests that the
+      # publish-images workflow will then pick up.
       # ----------------------------------------------------------------------
       - name: Refresh socket-proxy allowed-images.txt
         if: github.event.inputs.dry_run != 'true'

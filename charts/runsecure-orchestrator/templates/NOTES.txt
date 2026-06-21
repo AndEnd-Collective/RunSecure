@@ -1,0 +1,31 @@
+RunSecure Orchestrator deployed successfully.
+
+Release   : {{ .Release.Name }}
+Namespace : {{ include "runsecure-orchestrator.namespace" . }}
+Scope     : {{ .Values.scope.name }}
+Backend   : {{ .Values.scope.backend }}
+Auth      : {{ .Values.auth.type }}
+{{- if .Values.tls.enabled }}
+TLS       : enabled ({{ if .Values.tls.selfSigned }}self-signed{{ else }}issuer: {{ .Values.tls.issuerName }}{{ end }})
+{{- else }}
+TLS       : disabled
+{{- end }}
+
+Security posture:
+  - Pod Security Standards: Restricted (enforced on namespace)
+  - RBAC: namespace-scoped Role only (no ClusterRole)
+  - NetworkPolicy: default-deny + explicit orchestrator egress allow
+  - Secrets mounted at mode 0400
+
+To verify the orchestrator is running:
+  kubectl -n {{ include "runsecure-orchestrator.namespace" . }} get pods
+
+To view logs:
+  kubectl -n {{ include "runsecure-orchestrator.namespace" . }} logs \
+    -l app.kubernetes.io/name={{ include "runsecure-orchestrator.name" . }}
+
+IMPORTANT: In production, set image digests to real SHA256 values:
+  helm upgrade {{ .Release.Name }} charts/runsecure-orchestrator \
+    --set image.orchestrator.digest=sha256:<real-digest> \
+    --set image.proxy.digest=sha256:<real-digest> \
+    --set image.socketProxy.digest=sha256:<real-digest>

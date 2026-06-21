@@ -15,7 +15,7 @@ type Orphan struct {
 // runsecure.role:
 //   - "runner" → increment in-flight for the repo
 //   - "proxy"  → record under the spawn-id; if no runner with same spawn-id
-//                exists, it's an orphan and the caller should tear down
+//     exists, it's an orphan and the caller should tear down
 //
 // Returns the list of orphans. Idempotent.
 func RebuildFromDocker(s *State, listed []docker.Container) []Orphan {

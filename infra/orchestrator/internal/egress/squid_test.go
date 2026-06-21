@@ -1,12 +1,22 @@
 package egress
 
 import (
+	"net"
 	"strings"
 	"testing"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
 )
+
+// mustParseCIDR is a test helper that parses a CIDR string and panics on error.
+func mustParseCIDR(s string) *net.IPNet {
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		panic("test: invalid CIDR: " + s + ": " + err.Error())
+	}
+	return ipnet
+}
 
 // TestRenderSquid_WildcardInjectionBlocked verifies that a WildcardEntries value
 // containing an embedded newline cannot inject a second squid directive. This is
@@ -178,5 +188,165 @@ func TestRenderSquid_NonEmpty_EmitsAllow(t *testing.T) {
 	}
 	if strings.Contains(out, "acl localnet") {
 		t.Fatalf("dead 'acl localnet' line must not appear in output:\n%s", out)
+	}
+}
+
+// ─── allow_private_cidrs exemption tests (issue #47) ─────────────────────────
+
+// TestRenderSquid_AllowedPrivateCIDR_EmittedBeforeDeny verifies the positive case:
+// with AllowedPrivateCIDRs=[172.17.0.0/16], the rendered config contains:
+//  1. acl rs_allowed_private dst 172.17.0.0/16
+//  2. http_access allow rs_allowed_private
+//  3. Both of the above appear BEFORE http_access deny rs_private_dst
+func TestRenderSquid_AllowedPrivateCIDR_EmittedBeforeDeny(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	policy.AllowedPrivateCIDRs = []*net.IPNet{mustParseCIDR("172.17.0.0/16")}
+
+	out := string(RenderSquid(r, policy))
+
+	// 1. ACL definition must be present.
+	const aclLine = "acl rs_allowed_private dst 172.17.0.0/16"
+	if !strings.Contains(out, aclLine) {
+		t.Fatalf("expected %q in squid config:\n%s", aclLine, out)
+	}
+
+	// 2. The allow rule must be present.
+	const allowLine = "http_access allow rs_allowed_private"
+	if !strings.Contains(out, allowLine) {
+		t.Fatalf("expected %q in squid config:\n%s", allowLine, out)
+	}
+
+	// 3. The allow must precede the deny (first-match-wins).
+	allowIdx := strings.Index(out, allowLine)
+	denyIdx := strings.Index(out, "http_access deny rs_private_dst")
+	if allowIdx >= denyIdx {
+		t.Fatalf("http_access allow rs_allowed_private (pos %d) must precede "+
+			"http_access deny rs_private_dst (pos %d):\n%s", allowIdx, denyIdx, out)
+	}
+}
+
+// TestRenderSquid_AllowedPrivateCIDR_MultipleEntries verifies that multiple
+// approved CIDRs each emit their own acl line and share a single allow rule.
+func TestRenderSquid_AllowedPrivateCIDR_MultipleEntries(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	policy.AllowedPrivateCIDRs = []*net.IPNet{
+		mustParseCIDR("172.17.0.0/16"),
+		mustParseCIDR("192.168.100.0/24"),
+	}
+
+	out := string(RenderSquid(r, policy))
+
+	for _, cidr := range []string{"172.17.0.0/16", "192.168.100.0/24"} {
+		line := "acl rs_allowed_private dst " + cidr
+		if !strings.Contains(out, line) {
+			t.Errorf("expected %q in squid config:\n%s", line, out)
+		}
+	}
+	if !strings.Contains(out, "http_access allow rs_allowed_private") {
+		t.Fatalf("expected 'http_access allow rs_allowed_private':\n%s", out)
+	}
+}
+
+// TestRenderSquid_EmptyAllowedPrivateCIDRs_NoExemptionEmitted is the negative
+// case / default-deny guard: when AllowedPrivateCIDRs is nil/empty, NO
+// rs_allowed_private lines must appear in the output. The deny remains intact.
+func TestRenderSquid_EmptyAllowedPrivateCIDRs_NoExemptionEmitted(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict") // AllowedPrivateCIDRs = nil
+
+	out := string(RenderSquid(r, policy))
+
+	if strings.Contains(out, "rs_allowed_private") {
+		t.Fatalf("rs_allowed_private must NOT appear when AllowedPrivateCIDRs is empty:\n%s", out)
+	}
+	// The deny must still be present (default-deny intact).
+	if !strings.Contains(out, "http_access deny rs_private_dst") {
+		t.Fatalf("http_access deny rs_private_dst must always be present:\n%s", out)
+	}
+}
+
+// TestRenderSquid_IMDS_NotCarvedOut_AttackerTest is the attacker scenario:
+// even with AllowedPrivateCIDRs=[172.17.0.0/16], the IMDS address
+// 169.254.169.254 is NOT in the approved range and must remain covered by
+// the rs_private_dst deny — confirming the deny is still emitted and IMDS
+// is not exempted.
+func TestRenderSquid_IMDS_NotCarvedOut_AttackerTest(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	policy.AllowedPrivateCIDRs = []*net.IPNet{mustParseCIDR("172.17.0.0/16")}
+
+	out := string(RenderSquid(r, policy))
+
+	// rs_private_dst ACL must still include 169.254.0.0/16 (IMDS range).
+	if !strings.Contains(out, "acl rs_private_dst dst 169.254.0.0/16") {
+		t.Fatalf("IMDS range 169.254.0.0/16 must remain in rs_private_dst:\n%s", out)
+	}
+	// The deny must still be present (IMDS is not carved out).
+	if !strings.Contains(out, "http_access deny rs_private_dst") {
+		t.Fatalf("http_access deny rs_private_dst must be present even with allowed CIDRs:\n%s", out)
+	}
+	// IMDS must NOT appear in the rs_allowed_private ACL.
+	if strings.Contains(out, "acl rs_allowed_private dst 169.254") {
+		t.Fatalf("IMDS 169.254.x.x must NOT appear in rs_allowed_private:\n%s", out)
+	}
+	// Allow must come before deny (first-match wins for 172.17.x.x).
+	const allowLine = "http_access allow rs_allowed_private"
+	allowIdx := strings.Index(out, allowLine)
+	denyIdx := strings.Index(out, "http_access deny rs_private_dst")
+	if allowIdx < 0 || denyIdx < 0 {
+		t.Fatalf("expected both allow and deny lines:\n%s", out)
+	}
+	if allowIdx >= denyIdx {
+		t.Fatalf("allow (pos %d) must precede deny (pos %d):\n%s", allowIdx, denyIdx, out)
+	}
+}
+
+// TestRenderSquid_AllowedPrivateCIDR_IPv6 verifies that an IPv6 approved CIDR
+// is correctly emitted (e.g., operator approves an IPv6 private range).
+func TestRenderSquid_AllowedPrivateCIDR_IPv6(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	// fc00::/7 is in the private range but operator-approved here.
+	policy.AllowedPrivateCIDRs = []*net.IPNet{mustParseCIDR("fc00::/7")}
+
+	out := string(RenderSquid(r, policy))
+
+	const aclLine = "acl rs_allowed_private dst fc00::/7"
+	if !strings.Contains(out, aclLine) {
+		t.Fatalf("expected %q for IPv6 approved CIDR:\n%s", aclLine, out)
+	}
+	if !strings.Contains(out, "http_access allow rs_allowed_private") {
+		t.Fatalf("expected allow rule for IPv6 approved CIDR:\n%s", out)
+	}
+	// rs_private_dst must still cover fc00::/7 (the general deny remains).
+	if !strings.Contains(out, "acl rs_private_dst dst fc00::/7") {
+		t.Fatalf("fc00::/7 must remain in rs_private_dst general deny:\n%s", out)
+	}
+}
+
+// TestRenderSquid_AllowedPrivateCIDR_MalformedSkipped verifies that a
+// *net.IPNet whose String() returns a non-canonical value (e.g. "<nil>") is
+// silently skipped rather than injected into the squid config. This exercises
+// the reCIDR guard's continue branch (defensive: net.IPNet.String() always
+// produces canonical output in normal usage; this covers the paranoia path).
+func TestRenderSquid_AllowedPrivateCIDR_MalformedSkipped(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	// Construct a *net.IPNet with an empty IP so .String() returns "<nil>",
+	// which fails reCIDR and must be silently skipped.
+	malformed := &net.IPNet{IP: net.IP{}, Mask: net.IPMask{0xff, 0xff, 0xff, 0xff}}
+	policy.AllowedPrivateCIDRs = []*net.IPNet{malformed}
+
+	out := string(RenderSquid(r, policy))
+
+	// The malformed CIDR must NOT appear in the output.
+	if strings.Contains(out, "rs_allowed_private") {
+		t.Fatalf("malformed CIDR must be silently skipped; rs_allowed_private must not appear:\n%s", out)
+	}
+	// The deny must still be present (fail-safe).
+	if !strings.Contains(out, "http_access deny rs_private_dst") {
+		t.Fatalf("http_access deny rs_private_dst must still be present after malformed CIDR skip:\n%s", out)
 	}
 }

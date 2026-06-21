@@ -1,0 +1,190 @@
+# ============================================================================
+# RunSecure Orchestrator — Helm values
+# One release = one scope. Override this file for each scope you deploy.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Image configuration — pin by digest for reproducibility and integrity.
+# The 'digest' field takes precedence over 'tag'; both must be set when
+# deploying to production (the digest is the authoritative pin).
+# ---------------------------------------------------------------------------
+image:
+  orchestrator:
+    repository: ghcr.io/andend-collective/runsecure/orchestrator
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    pullPolicy: Always
+  proxy:
+    repository: ghcr.io/andend-collective/runsecure/proxy
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    pullPolicy: Always
+  socketProxy:
+    repository: ghcr.io/andend-collective/runsecure/socket-proxy
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    pullPolicy: Always
+
+# ---------------------------------------------------------------------------
+# Scope configuration — mirrors infra/orchestrator/scopes/example.yml.
+# ---------------------------------------------------------------------------
+scope:
+  # A short, lowercase name used for the namespace (runsecure-<name>)
+  # and all runsecure.io/* labels. Required.
+  name: "default"
+  description: "Default scope"
+
+  # Backend: 'kube' (this chart) or 'compose'. Must be 'kube' for this chart.
+  backend: kube
+
+  # Host-wide ceiling across all repos in this scope.
+  globalMaxRunners: 5
+
+  # Poll cadence in seconds. Minimum 5.
+  pollIntervalSeconds: 15
+
+  # Security profile: strict | standard | permissive | custom
+  securityProfile: strict
+
+  # Which knobs a project's runner.yml is allowed to override.
+  allowProjectOverrides:
+    - allow_wildcards
+
+  # Orchestrator-side egress allow-list (for the orchestrator's own traffic,
+  # e.g. reaching GitHub API). Runner egress is controlled by runner.yml.
+  orchEgress:
+    allowDomains:
+      - api.github.com
+
+  # Repositories managed by this scope.
+  repos: []
+  # Example:
+  # repos:
+  #   - repo: owner/repo
+  #     maxConcurrent: 3
+
+# ---------------------------------------------------------------------------
+# Authentication — PAT or GitHub App.
+# ---------------------------------------------------------------------------
+auth:
+  # 'pat' or 'github_app'
+  type: pat
+
+  # --- PAT auth ---
+  # Name of a pre-existing Secret with key 'pat' in the orchestrator namespace.
+  # Used when auth.type == 'pat' and auth.pat.value is empty (preferred).
+  pat:
+    # Inline value — leave empty in production; reference an external secret instead.
+    value: ""
+    # Name of a pre-existing k8s Secret containing key 'pat'. If set, takes
+    # precedence over auth.pat.value.
+    existingSecretName: ""
+
+  # --- GitHub App auth ---
+  app:
+    appId: ""
+    installationId: ""
+    # Name of a pre-existing Secret with key 'private-key' (PEM).
+    privateKeySecretName: ""
+
+# ---------------------------------------------------------------------------
+# TLS (cert-manager). Gated: templates render only when tls.enabled=true.
+# ---------------------------------------------------------------------------
+tls:
+  enabled: false
+  # When selfSigned=true, emit a self-signed cert-manager Issuer.
+  # When false, reference an existing Issuer/ClusterIssuer via issuerName.
+  selfSigned: true
+  # Name of the Issuer or ClusterIssuer to use when selfSigned=false.
+  issuerName: ""
+  # cert-manager issuer kind: Issuer or ClusterIssuer
+  issuerKind: Issuer
+  # Secret name for the generated TLS certificate.
+  secretName: "runsecure-orchestrator-tls"
+  # DNS names for the certificate.
+  dnsNames: []
+
+# ---------------------------------------------------------------------------
+# Deployment configuration.
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+# Orchestrator service account
+serviceAccount:
+  # Name of the ServiceAccount to create/use. Defaults to release name.
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Pod Security Context — PSS Restricted defaults (do not weaken).
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container Security Context — PSS Restricted defaults (do not weaken).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Resource limits.
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Probes.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Service (for /healthz scraping / metrics).
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8080
+
+# ---------------------------------------------------------------------------
+# Additional environment variables for the orchestrator container.
+# ---------------------------------------------------------------------------
+extraEnv: []
+
+# ---------------------------------------------------------------------------
+# Node selector, tolerations, affinity.
+# ---------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Pod annotations.
+# ---------------------------------------------------------------------------
+podAnnotations: {}

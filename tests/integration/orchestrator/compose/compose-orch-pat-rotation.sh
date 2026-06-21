@@ -16,8 +16,8 @@ touch -m "${TESTDATA_DIR}/pat"
 chmod 400 "${TESTDATA_DIR}/pat"
 
 # Next poll cycle should use the new token transparently. We don't have a
-# direct config.reloaded emit on PAT-rotation in Plan A (mtime reload is
-# silent in github.Client). The test verifies the orchestrator continues
+# direct config.reloaded emit on PAT-rotation in the Compose backend (mtime
+# reload is silent in github.Client). The test verifies the orchestrator continues
 # to operate after rotation rather than asserting a specific event.
 sleep 8
 ORCH_RUNNING=$(docker inspect rs-test-orchestrator --format '{{.State.Running}}')

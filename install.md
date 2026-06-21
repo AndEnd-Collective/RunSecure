@@ -1,7 +1,7 @@
 # Installing the RunSecure Orchestrator (Compose backend)
 
-This guide walks through standing up the long-running orchestrator
-delivered in Plan A. The orchestrator polls GitHub for queued workflow
+This guide walks through standing up the long-running orchestrator using
+the Compose backend. The orchestrator polls GitHub for queued workflow
 jobs and spawns ephemeral hardened runner containers on demand —
 coexisting with `infra/scripts/run.sh` and
 `infra/scripts/dev/bootstrap-self-runner.sh`, which remain first-class
@@ -15,10 +15,12 @@ For the design rationale, see
 
 ## 1. Decide your deployment target
 
-- **macOS Compose** (this guide) — runs on Colima or Docker Desktop, one
-  compose stack per scope. Plan A.
-- **k8s** — Plan B, not in this release. Watch for a future `helm install`
-  flow under `charts/runsecure-orchestrator/`.
+- **Compose backend** (this guide) — runs on Colima or Docker Desktop, one
+  Compose stack per scope. Set `backend: compose` in the scope config.
+- **Kubernetes backend** — Helm-based deployment to an existing cluster.
+  See [`install-kubernetes.md`](install-kubernetes.md). Set `backend: kube`
+  in the scope config. Requires a NetworkPolicy-enforcing CNI (Calico or
+  Cilium); kindnet/flannel do not enforce NetworkPolicy.
 
 ---
 

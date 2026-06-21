@@ -3,7 +3,7 @@
 # very low and a runner image that won't claim a job (no real job runs),
 # the spawn must be force-torn-down past the timeout.
 #
-# Note: Plan A doesn't ship a real "hang forever" runner image. This test
+# Note: the Compose backend doesn't ship a real "hang forever" runner image. This test
 # uses the mock-github stub to advertise queued jobs that never come; the
 # spawned actions/runner container will idle and the test asserts the
 # spawn.timeout_forced_teardown event fires before the runner naturally

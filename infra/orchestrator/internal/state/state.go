@@ -21,10 +21,10 @@ type State struct {
 }
 
 type RepoState struct {
-	InFlight       int
-	BreakerOpen    bool // surfaced from breaker pkg; see breaker.go
-	LastPollAt     time.Time
-	LastETag       string // for runner.yml ETag caching (k8s — unused in Plan A)
+	InFlight    int
+	BreakerOpen bool // surfaced from breaker pkg; see breaker.go
+	LastPollAt  time.Time
+	LastETag    string // for runner.yml ETag caching (k8s backend — unused in Compose backend)
 }
 
 func New() *State {
@@ -146,6 +146,24 @@ func (s *State) Snapshot() Snapshot {
 	}
 	snap.GlobalInFlight = total
 	return snap
+}
+
+// LastETag returns the cached ETag for the given repo's runner.yml.
+// It is used by the kube backend to perform conditional GitHub API requests.
+func (s *State) LastETag(repo string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if r, ok := s.perRepo[repo]; ok {
+		return r.LastETag
+	}
+	return ""
+}
+
+// SetLastETag updates the cached ETag for the given repo's runner.yml.
+func (s *State) SetLastETag(repo, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensure(repo).LastETag = etag
 }
 
 // AllRepos returns the names of repos that have non-zero state recorded.

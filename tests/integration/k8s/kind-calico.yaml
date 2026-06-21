@@ -1,0 +1,13 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: rs-itest
+networking:
+  # Disable kindnet so Calico can be installed as the CNI.
+  # Without a CNI that enforces NetworkPolicy, NetworkPolicy assertions are meaningless.
+  disableDefaultCNI: true
+  # Calico's default pod CIDR — must match the installation manifest.
+  podSubnet: "192.168.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+nodes:
+  - role: control-plane
+  - role: worker

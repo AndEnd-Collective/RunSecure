@@ -8,10 +8,10 @@ If you run self-hosted GH Actions runners on your own hardware, RunSecure
 is the layer between "I need a runner" and "the runner can read my SSH
 keys, push to my AWS, and stay alive between jobs."
 
-> **Long-running orchestrator (new in Plan A):** see
-> [`install.md`](install.md) for a Compose-based persistent orchestrator
-> that polls GitHub for queued jobs and spawns hardened ephemeral
-> runners on demand. Coexists with `run.sh` — neither replaces the other.
+> **Long-running orchestrator:** see [`install.md`](install.md) for the
+> Compose backend — a persistent orchestrator that polls GitHub for queued
+> jobs and spawns hardened ephemeral runners on demand. Coexists with
+> `run.sh` — neither replaces the other.
 
 ---
 
@@ -621,6 +621,31 @@ To trigger a manual release:
 ```bash
 gh workflow run weekly-version-bump.yml -f bump_type=patch  # or minor / major
 ```
+
+---
+
+## Deployment backends
+
+The persistent orchestrator supports two deployment backends, selected by
+`scope.backend` in the scope config:
+
+| Backend | Config value | Install guide | When to use |
+|---------|-------------|---------------|-------------|
+| **Compose backend** | `backend: compose` | [`install.md`](install.md) | Linux/macOS host with Docker. One Compose stack per scope. |
+| **Kubernetes backend** | `backend: kube` | [`install-kubernetes.md`](install-kubernetes.md) | Existing k8s cluster with a NetworkPolicy-enforcing CNI (Calico, Cilium). Requires Helm. |
+
+Both backends spawn hardened ephemeral runner containers (or Pods) and
+enforce the same egress allow-path from `runner.yml`. They differ in the
+spawning primitive (Docker container vs. Kubernetes Pod), the secrets
+delivery mechanism (named volume vs. k8s Secret), and the network
+isolation layer (Docker internal network vs. NetworkPolicy + per-spawn
+Service).
+
+2.1.0 additions available on both backends: **GitHub App authentication**
+(alternative to PAT — least-privilege installation tokens, no user
+identity) and **optional mTLS** on the orchestrator→socket-proxy hop
+(TLS 1.3, `RequireAndVerifyClientCert`, cert-manager integration on the
+Kubernetes backend via the chart).
 
 ---
 

@@ -6,12 +6,15 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -19,6 +22,11 @@ import (
 // ErrPolicyDenied is returned when the socket-proxy refuses a request
 // (HTTP 403 with a JSON deny body).
 var ErrPolicyDenied = errors.New("docker: socket-proxy policy denied")
+
+// jsonMarshal and newHTTPRequest are injectable seams for testing the error
+// branches inside do() (json.Marshal failure and request-construction failure).
+var jsonMarshal = json.Marshal
+var newHTTPRequest = http.NewRequestWithContext
 
 // Client speaks the Docker Engine API through the socket-proxy.
 type Client interface {
@@ -32,14 +40,14 @@ type Client interface {
 }
 
 type CreateContainerRequest struct {
-	Name              string              `json:"-"`
-	Image             string              `json:"Image"`
-	User              string              `json:"User"`
-	Env               []string            `json:"Env,omitempty"`
-	Cmd               []string            `json:"Cmd,omitempty"`
-	Labels            map[string]string   `json:"Labels,omitempty"`
-	HostConfig        HostConfig          `json:"HostConfig"`
-	NetworkingConfig  *NetworkingConfig   `json:"NetworkingConfig,omitempty"`
+	Name             string            `json:"-"`
+	Image            string            `json:"Image"`
+	User             string            `json:"User"`
+	Env              []string          `json:"Env,omitempty"`
+	Cmd              []string          `json:"Cmd,omitempty"`
+	Labels           map[string]string `json:"Labels,omitempty"`
+	HostConfig       HostConfig        `json:"HostConfig"`
+	NetworkingConfig *NetworkingConfig `json:"NetworkingConfig,omitempty"`
 }
 
 type NetworkingConfig struct {
@@ -51,16 +59,16 @@ type EndpointConfig struct {
 }
 
 type HostConfig struct {
-	CapDrop      []string          `json:"CapDrop"`
-	SecurityOpt  []string          `json:"SecurityOpt"`
-	NetworkMode  string            `json:"NetworkMode"`
-	Memory       int64             `json:"Memory,omitempty"`
-	NanoCPUs     int64             `json:"NanoCpus,omitempty"`
-	PidsLimit    int64             `json:"PidsLimit,omitempty"`
-	ReadonlyRootfs bool            `json:"ReadonlyRootfs,omitempty"`
-	Tmpfs        map[string]string `json:"Tmpfs,omitempty"`
-	Binds        []string          `json:"Binds,omitempty"`
-	AutoRemove   bool              `json:"AutoRemove,omitempty"`
+	CapDrop        []string          `json:"CapDrop"`
+	SecurityOpt    []string          `json:"SecurityOpt"`
+	NetworkMode    string            `json:"NetworkMode"`
+	Memory         int64             `json:"Memory,omitempty"`
+	NanoCPUs       int64             `json:"NanoCpus,omitempty"`
+	PidsLimit      int64             `json:"PidsLimit,omitempty"`
+	ReadonlyRootfs bool              `json:"ReadonlyRootfs,omitempty"`
+	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
+	Binds          []string          `json:"Binds,omitempty"`
+	AutoRemove     bool              `json:"AutoRemove,omitempty"`
 }
 
 type CreateNetworkRequest struct {
@@ -84,6 +92,8 @@ type Container struct {
 
 // NewClient constructs a Client. dockerHost is a TCP URL such as
 // "tcp://socket-proxy:2375". A trailing slash, scheme, or path is OK.
+// When RUNSECURE_DOCKER_TLS_CERT, _KEY, and _CA are all set, the client
+// uses a mutual-TLS transport; otherwise plain HTTP is used.
 func NewClient(dockerHost string) (Client, error) {
 	if dockerHost == "" {
 		return nil, errors.New("docker: DOCKER_HOST is required")
@@ -92,9 +102,54 @@ func NewClient(dockerHost string) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Build TLS transport if configured.
+	transport, err := buildTLSTransport()
+	if err != nil {
+		return nil, err
+	}
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if transport != nil {
+		hc.Transport = transport
+	}
+
 	return &httpClient{
 		base: base,
-		hc:   &http.Client{Timeout: 30 * time.Second},
+		hc:   hc,
+	}, nil
+}
+
+// buildTLSTransport returns a *http.Transport configured for mutual TLS when
+// all three RUNSECURE_DOCKER_TLS_* env vars are set. Returns nil, nil when
+// none are set (plaintext). Returns an error when only some are set.
+func buildTLSTransport() (*http.Transport, error) {
+	certFile := os.Getenv("RUNSECURE_DOCKER_TLS_CERT")
+	keyFile := os.Getenv("RUNSECURE_DOCKER_TLS_KEY")
+	caFile := os.Getenv("RUNSECURE_DOCKER_TLS_CA")
+	if certFile == "" && keyFile == "" && caFile == "" {
+		return nil, nil // plaintext
+	}
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return nil, errors.New("docker: RUNSECURE_DOCKER_TLS_CERT, _KEY, and _CA must all be set together")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("docker: load client cert: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("docker: read CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("docker: failed to parse CA cert")
+	}
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS13,
+		},
 	}, nil
 }
 
@@ -125,13 +180,13 @@ type httpClient struct {
 func (c *httpClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := jsonMarshal(body)
 		if err != nil {
 			return nil, err
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	req, err := newHTTPRequest(ctx, method, c.base+path, reader)
 	if err != nil {
 		return nil, err
 	}

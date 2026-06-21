@@ -14,6 +14,11 @@ import (
 // injection characters.
 var reDomain = regexp.MustCompile(`^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
 
+// reCIDR matches canonical CIDR notation produced by (*net.IPNet).String():
+// IPv4 "d.d.d.d/p" or IPv6 "h::h/p". Rejects embedded newlines, spaces, or
+// any other character that could inject a second squid directive.
+var reCIDR = regexp.MustCompile(`^[0-9a-fA-F:.]+/[0-9]{1,3}$`)
+
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
@@ -54,6 +59,35 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	for _, cidr := range privateRanges {
 		fmt.Fprintf(&b, "acl rs_private_dst dst %s\n", cidr)
 	}
+
+	// Operator-approved private CIDRs (allow_private_cidrs scope override).
+	// Emit the exemption allow BEFORE the deny so that Squid's first-match-wins
+	// evaluation allows the approved ranges while every other private destination
+	// (including IMDS 169.254.169.254) still hits the deny below.
+	//
+	// Security invariant: the CIDR text comes from *net.IPNet.String() which
+	// always produces canonical, safe output ("a.b.c.d/prefix"). We assert
+	// the canonical form contains no spaces, newlines, or shell metacharacters
+	// before emitting — defence against future callers that might pass
+	// user-controlled strings.
+	var emittedAllowedPrivate int
+	for _, ipnet := range p.AllowedPrivateCIDRs {
+		cidr := ipnet.String()
+		// net.IPNet.String() is always "a.b.c.d/prefix" or "a:b::c/prefix";
+		// reject anything that deviates from this safe form.
+		if !reCIDR.MatchString(cidr) {
+			// Silently skip malformed entries — fail-safe (deny wins).
+			continue
+		}
+		fmt.Fprintf(&b, "acl rs_allowed_private dst %s\n", cidr)
+		emittedAllowedPrivate++
+	}
+	// Emit the allow rule only when at least one valid approved CIDR was emitted.
+	// This ensures no orphaned http_access allow rule appears without a matching ACL.
+	if emittedAllowedPrivate > 0 {
+		b.WriteString("http_access allow rs_allowed_private\n")
+	}
+
 	b.WriteString("http_access deny rs_private_dst\n")
 
 	// Collect all permitted domains first, then emit the ACL and allow rule

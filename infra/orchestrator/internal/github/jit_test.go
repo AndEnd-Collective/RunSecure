@@ -48,7 +48,7 @@ func TestGenerateJITConfig_PreservesCallerRunnerGroupID(t *testing.T) {
 		gotGroupID, _ = body["runner_group_id"].(float64)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"runner": map[string]any{"id": 1},
+			"runner":             map[string]any{"id": 1},
 			"encoded_jit_config": "x",
 		})
 	})
@@ -69,7 +69,7 @@ func TestGenerateJITConfig_PreservesCallerWorkFolder(t *testing.T) {
 		gotWF, _ = body["work_folder"].(string)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"runner": map[string]any{"id": 1},
+			"runner":             map[string]any{"id": 1},
 			"encoded_jit_config": "x",
 		})
 	})
@@ -88,7 +88,7 @@ func TestGenerateJITConfig_200StatusAccepted(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"runner": map[string]any{"id": 99},
+			"runner":             map[string]any{"id": 99},
 			"encoded_jit_config": "x",
 		})
 	})

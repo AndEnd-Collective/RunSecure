@@ -1,0 +1,110 @@
+# Attacker runner pod — spawn02, different spawn-id, different proxy service.
+# Used to prove that spawn01's runner CANNOT reach spawn02's proxy.
+# This simulates the cross-spawn isolation guarantee.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-proxy-spawn02
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn02
+    runsecure.io/role: proxy
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: proxy
+      image: busybox:1.37.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          while true; do
+            echo -e 'HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nSPAWN02-REACHED' \
+              | nc -l -p 3128 || true
+          done
+      ports:
+        - name: squid
+          containerPort: 3128
+          protocol: TCP
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rs-proxy-svc-spawn02
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn02
+    runsecure.io/role: proxy
+spec:
+  type: ClusterIP
+  selector:
+    runsecure.io/role: proxy
+    runsecure.io/spawn-id: spawn02
+  ports:
+    - name: squid
+      protocol: TCP
+      port: 3128
+      targetPort: 3128
+---
+# Runner egress policy for spawn02's proxy (so spawn02-proxy has internet egress)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rs-proxy-egress-spawn02
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/spawn-id: spawn02
+    runsecure.io/role: proxy
+spec:
+  podSelector:
+    matchLabels:
+      runsecure.io/role: proxy
+      runsecure.io/spawn-id: spawn02
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16

@@ -1,0 +1,149 @@
+{{/*
+Orchestrator Deployment.
+
+Security invariants (PSS Restricted + CIS Benchmark v1.9):
+  - runAsNonRoot: true, runAsUser: 1001
+  - allowPrivilegeEscalation: false
+  - readOnlyRootFilesystem: true
+  - capabilities: drop ALL
+  - seccompProfile: RuntimeDefault
+  - No host namespaces (hostNetwork/hostPID/hostIPC: false)
+  - No hostPath volumes
+  - automountServiceAccountToken: true ONLY for the orchestrator pod
+    (it must reach kube-apiserver; the SA is namespace-Role-scoped)
+
+Volumes:
+  - scope-config  : ConfigMap  scope.yml → /etc/runsecure/scope.yml (ro)
+  - auth-secret   : Secret     PAT or App key → /run/secrets/... (0400)
+  - tmp           : emptyDir   /tmp (writable; readOnlyRootFilesystem=true
+                    requires a writable /tmp)
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "runsecure-orchestrator.fullname" . }}
+  namespace: {{ include "runsecure-orchestrator.namespace" . }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "runsecure-orchestrator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "runsecure-orchestrator.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "runsecure-orchestrator.serviceAccountName" . }}
+      # The orchestrator pod needs the SA token to reach kube-apiserver.
+      # Runner pods (managed by the orchestrator) have this false.
+      automountServiceAccountToken: true
+
+      # PSS Restricted — pod-level security context.
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # No host namespace sharing.
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+
+      volumes:
+        # Scope configuration from ConfigMap.
+        - name: scope-config
+          configMap:
+            name: {{ include "runsecure-orchestrator.fullname" . }}-scope
+            defaultMode: 0444
+        # Auth secret — PAT or GitHub App private key.
+        # defaultMode 0400: read-only by UID 1001, no group/world access.
+        {{- if eq .Values.auth.type "pat" }}
+        - name: auth-secret
+          secret:
+            secretName: {{ include "runsecure-orchestrator.patSecretName" . }}
+            defaultMode: 0400
+        {{- else if eq .Values.auth.type "github_app" }}
+        - name: auth-secret
+          secret:
+            secretName: {{ include "runsecure-orchestrator.appPrivKeySecretName" . }}
+            defaultMode: 0400
+        {{- end }}
+        # Writable ephemeral /tmp (required because readOnlyRootFilesystem=true).
+        - name: tmp
+          emptyDir:
+            medium: Memory
+
+      containers:
+        - name: orchestrator
+          image: {{ include "runsecure-orchestrator.image" . }}
+          imagePullPolicy: {{ .Values.image.orchestrator.pullPolicy }}
+
+          # PSS Restricted — container-level security context.
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            - name: RUNSECURE_SCOPE_FILE
+              value: /etc/runsecure/scope.yml
+            - name: RUNSECURE_BACKEND
+              value: {{ .Values.scope.backend | quote }}
+            {{- if eq .Values.auth.type "pat" }}
+            - name: RUNSECURE_PAT_FILE
+              value: /run/secrets/runsecure-pat/pat
+            {{- else if eq .Values.auth.type "github_app" }}
+            - name: RUNSECURE_APP_PRIVATE_KEY_FILE
+              value: /run/secrets/runsecure-app-key/private-key
+            - name: RUNSECURE_APP_ID
+              value: {{ .Values.auth.app.appId | quote }}
+            - name: RUNSECURE_APP_INSTALLATION_ID
+              value: {{ .Values.auth.app.installationId | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          volumeMounts:
+            - name: scope-config
+              mountPath: /etc/runsecure
+              readOnly: true
+            {{- if or (eq .Values.auth.type "pat") (eq .Values.auth.type "github_app") }}
+            - name: auth-secret
+              {{- if eq .Values.auth.type "pat" }}
+              mountPath: /run/secrets/runsecure-pat
+              {{- else }}
+              mountPath: /run/secrets/runsecure-app-key
+              {{- end }}
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

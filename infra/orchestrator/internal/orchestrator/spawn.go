@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
@@ -35,11 +36,11 @@ func egressNetworkName() string {
 }
 
 // EgressMountPath is the path the shared egress-configs volume is mounted at
-// inside the proxy container. It is a fixed constant — the volume is always
-// mounted here regardless of scope. Exported so that run.go can use it as the
-// default value for RUNSECURE_EGRESS_BASE_DIR, ensuring the FSGenerator writes
-// to the same path the proxy container reads.
-const EgressMountPath = "/var/run/runsecure/egress"
+// inside the proxy container. Re-exported from internal/backend for callers
+// (run.go, integration tests) that import the orchestrator package rather than
+// backend directly. The canonical definition lives in backend.EgressMountPath
+// to avoid duplicating the string literal across packages.
+const EgressMountPath = backend.EgressMountPath
 
 // egressVolumeName returns the name of the shared named Docker volume that
 // carries per-spawn egress configs. It reads RUNSECURE_EGRESS_VOLUME from the
@@ -125,47 +126,59 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 
 	// Step 2: generate per-spawn egress configs.
-	egressDir, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
+	// Render also returns the resolved operator-approved private CIDRs so they
+	// can be threaded into SpawnInput for kube backend L3 enforcement.
+	egressDir, allowedPrivateCIDRs, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
 	if err != nil {
 		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, "egress_render", err, jit.RunnerID)
 	}
 
-	// Step 3: create network.
-	netName := fmt.Sprintf("rs-net-%s-%s", strings.ReplaceAll(intent.Repo, "/", "_"), intent.SpawnID)
-	netID, err := w.deps.Docker().CreateNetwork(ctx, docker.CreateNetworkRequest{
-		Name: netName, Driver: "bridge", Internal: true, Attachable: false,
-	})
-	if err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
-		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
-	}
-
-	// Step 4+5: create+start the two containers (proxy + runner).
-	// The proxy is dual-homed on the internal net and the egress net.
-	// The runner is internal-only — it never touches the egress net.
+	// Steps 3-5: delegate network creation + container spawn to the backend.
+	// The backend owns network creation, container creation/start, and rollback
+	// on partial failure. This replaces the CreateNetwork→docker.Spawn block
+	// that previously lived here; the compose backend replicates that exact
+	// behavior. The netName used for the runner_created event is derived the
+	// same way as before so the event payload is byte-for-byte identical.
 	memBytes, nanoCPUs := parseResources(snapshot.YML.Resources.Memory, snapshot.YML.Resources.CPUs)
 	r := snapshot.YML
 	// EnableDNSMasq when dns.host is explicitly set to false, meaning the
 	// project wants the proxy to resolve DNS rather than using the host resolver.
 	enableDNSMasq := r.DNS.Host != nil && !*r.DNS.Host
-	containerIDs, err := docker.Spawn(ctx, w.deps.Docker(), docker.SpawnInputs{
-		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-		NetworkID:          netID,
-		EgressNetwork:      egressNetworkName(),
-		RunnerImage:        imageDigest,
-		ProxyImage:         w.deps.ProxyImageDigest(),
-		SeccompProfilePath: w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
-		ResourcesMemory:    memBytes,
-		ResourcesNanoCPUs:  nanoCPUs,
-		ResourcesPIDs:      int64(r.Resources.PIDs),
-		JITConfigB64:       jit.EncodedJITConfig,
-		EgressVolume:       egressVolumeName(),
-		EgressMountPath:    EgressMountPath,
-		EnableDNSMasq:      enableDNSMasq,
-	})
+
+	// Parse port numbers from TCPEgress entries (format "host:port").
+	tcpEgressPorts := make([]int, 0, len(r.TCPEgress))
+	for _, entry := range r.TCPEgress {
+		colon := strings.LastIndex(entry, ":")
+		if colon < 0 {
+			continue
+		}
+		var port int
+		if _, err := fmt.Sscanf(entry[colon+1:], "%d", &port); err == nil && port > 0 {
+			tcpEgressPorts = append(tcpEgressPorts, port)
+		}
+	}
+
+	spawnIn := backend.SpawnInput{
+		Scope:               intent.Scope,
+		Repo:                intent.Repo,
+		SpawnID:             intent.SpawnID,
+		RunnerImage:         imageDigest,
+		ProxyImage:          w.deps.ProxyImageDigest(),
+		SeccompProfilePath:  w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
+		ResourcesMemory:     memBytes,
+		ResourcesNanoCPUs:   nanoCPUs,
+		ResourcesPIDs:       int64(r.Resources.PIDs),
+		JITConfigB64:        jit.EncodedJITConfig,
+		EgressConfigDir:     egressDir,
+		EgressNetwork:       egressNetworkName(),
+		EgressVolume:        egressVolumeName(),
+		EnableDNSMasq:       enableDNSMasq,
+		TCPEgressPorts:      tcpEgressPorts,
+		AllowedPrivateCIDRs: allowedPrivateCIDRs,
+	}
+	h, err := w.deps.Backend().Spawn(ctx, spawnIn)
 	if err != nil {
-		_ = w.deps.Docker().DeleteNetwork(ctx, netID)
 		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
@@ -175,17 +188,21 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// teardown decrements it via ReleaseSemaphores in the defer).
 	_ = w.deps.Emit().EmitSpawnRunnerCreated(cornerstone.SpawnRunnerCreatedFields{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-		ContainerName: containerName, ImageDigest: imageDigest, NetworkName: netName,
+		ContainerName: containerName, ImageDigest: imageDigest,
+		// NetworkName must be the human-readable network name (as before the
+		// backend refactor), not the opaque network ID. The compose backend
+		// surfaces it in Refs["network_name"] = "rs-net-<repo>-<spawnID>".
+		NetworkName: h.Refs["network_name"],
 	})
 
 	// Step 6: wait for exit OR wall-clock timeout (A2).
 	start := w.deps.Clock().Now()
 	timeoutSecs := defaultTimeoutSeconds(snapshot.YML.Orchestrator.TimeoutSeconds)
 	timeout := secondsToDuration(timeoutSecs)
-	exitCode, timedOut := w.waitForExit(ctx, containerIDs["runner"], timeout)
+	exitCode, timedOut := w.deps.Backend().WaitForExit(ctx, h, timeout)
 
 	// Step 7: teardown.
-	w.tearDown(ctx, containerIDs, netID, egressDir, timedOut)
+	_ = w.deps.Backend().Teardown(ctx, h, timedOut)
 
 	if timedOut {
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
@@ -200,11 +217,12 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	}
 
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
+	runnerContainerID := h.Refs["runner"]
 	if exitCode == 0 {
 		w.recordSuccessAndMaybeEmit(intent.Scope, intent.Repo)
 		_ = w.deps.Emit().EmitSpawnCompleted(cornerstone.SpawnCompletedFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-			ContainerID: containerIDs["runner"], ContainerName: containerName,
+			ContainerID: runnerContainerID, ContainerName: containerName,
 			ImageDigest: imageDigest, ExitCode: exitCode, DurationMillis: durationMs,
 		})
 		return nil
@@ -243,44 +261,6 @@ func (w *SpawnWorker) failAndLeak(ctx context.Context, intent SpawnIntent, conta
 		}
 	}
 	return w.fail(intent, containerName, reason, err)
-}
-
-// waitForExit polls the runner's State.Status. Returns when the container
-// exits or the wall-clock timeout elapses.
-//
-// Inspect is checked BEFORE blocking on a clock tick so a runner that has
-// already exited by the time we reach this function returns immediately —
-// important both for fast happy-path completion in production and for
-// deterministic testability under a fake clock.
-func (w *SpawnWorker) waitForExit(ctx context.Context, runnerID string, timeout time.Duration) (exitCode int, timedOut bool) {
-	deadline := w.deps.Clock().After(timeout)
-	for {
-		ins, err := w.deps.Docker().InspectContainer(ctx, runnerID)
-		if err == nil && ins.State == "exited" {
-			return ins.ExitCode, false
-		}
-		select {
-		case <-ctx.Done():
-			return -1, false
-		case <-deadline:
-			return -1, true
-		case <-w.deps.Clock().After(waitForExitPollInterval()):
-			// next iteration: re-inspect.
-		}
-	}
-}
-
-func (w *SpawnWorker) tearDown(ctx context.Context, ids map[string]string, netID, egressDir string, force bool) {
-	for _, id := range ids {
-		_ = w.deps.Docker().DeleteContainer(ctx, id, force)
-	}
-	_ = w.deps.Docker().DeleteNetwork(ctx, netID)
-	// Remove the per-spawn egress config subdir from the shared volume so it
-	// does not accumulate across spawns. egressDir is the full path on the
-	// volume (<base>/<spawnID>); empty means render never ran.
-	if egressDir != "" {
-		_ = os.RemoveAll(egressDir)
-	}
 }
 
 // recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits

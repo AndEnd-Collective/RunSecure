@@ -3,12 +3,25 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -311,6 +324,42 @@ func TestInspectContainer_MalformedResponse(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestDo_MarshalError covers the json.Marshal error branch in do() (client.go:202).
+// We temporarily replace jsonMarshal with a stub that always fails, then restore it.
+func TestDo_MarshalError(t *testing.T) {
+	orig := jsonMarshal
+	jsonMarshal = func(v any) ([]byte, error) {
+		return nil, errors.New("injected marshal failure")
+	}
+	t.Cleanup(func() { jsonMarshal = orig })
+
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Should not be reached.
+		w.WriteHeader(http.StatusOK)
+	})
+	// CreateNetwork passes a non-nil body through do(), triggering jsonMarshal.
+	_, err := c.CreateNetwork(context.Background(), CreateNetworkRequest{Name: "rs-net"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "injected marshal failure")
+}
+
+// TestDo_NewRequestError covers the http.NewRequestWithContext error branch in
+// do() (client.go:208). We replace newHTTPRequest with a stub that fails.
+func TestDo_NewRequestError(t *testing.T) {
+	orig := newHTTPRequest
+	newHTTPRequest = func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+		return nil, errors.New("injected request-creation failure")
+	}
+	t.Cleanup(func() { newHTTPRequest = orig })
+
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	err := c.StartContainer(context.Background(), "abc")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "injected request-creation failure")
+}
+
 func TestCreateContainer_SerializesNetworkingConfig(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -332,4 +381,227 @@ func TestCreateContainer_SerializesNetworkingConfig(t *testing.T) {
 	if !bytes.Contains(gotBody, []byte("\"spawn-egress\"")) || !bytes.Contains(gotBody, []byte("\"proxy\"")) {
 		t.Fatalf("EndpointsConfig not serialized: %s", gotBody)
 	}
+}
+
+func TestBuildTLSTransport_AllEnvUnset_ReturnsNil(t *testing.T) {
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "")
+	tr, err := buildTLSTransport()
+	require.NoError(t, err)
+	require.Nil(t, tr)
+}
+
+func TestBuildTLSTransport_PartialEnv_Errors(t *testing.T) {
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "/some/cert.crt")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "")
+	_, err := buildTLSTransport()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must all be set together")
+}
+
+func TestBuildTLSTransport_InvalidCertFile_Errors(t *testing.T) {
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "/nonexistent/cert.crt")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "/nonexistent/key.key")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "/nonexistent/ca.crt")
+	_, err := buildTLSTransport()
+	require.Error(t, err)
+}
+
+func TestBuildTLSTransport_InvalidCAContent_Errors(t *testing.T) {
+	// Use real cert/key but bad CA content
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "ca"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "client"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &leafKey.PublicKey, caKey)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "client.crt")
+	keyFile := filepath.Join(dir, "client.key")
+	caFile := filepath.Join(dir, "bad-ca.crt")
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	require.NoError(t, os.WriteFile(certFile, certPEM, 0o600))
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	require.NoError(t, os.WriteFile(keyFile, keyPEM, 0o600))
+	require.NoError(t, os.WriteFile(caFile, []byte("not valid pem"), 0o600))
+
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", certFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", keyFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", caFile)
+	_, err = buildTLSTransport()
+	require.ErrorContains(t, err, "failed to parse CA cert")
+}
+
+func TestNewClient_HTTPS_WithMTLS(t *testing.T) {
+	// Generate in-memory CA + server cert + client cert
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ca"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	genLeaf := func(cn string, extKeyUsage []x509.ExtKeyUsage, addIP bool) (certFile, keyFile string) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: cn},
+			NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: extKeyUsage,
+		}
+		if addIP {
+			tmpl.IPAddresses = []net.IP{net.IPv4(127, 0, 0, 1)}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+		require.NoError(t, err)
+		dir := t.TempDir()
+		cf := filepath.Join(dir, cn+".crt")
+		kf := filepath.Join(dir, cn+".key")
+		require.NoError(t, os.WriteFile(cf, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+		kDER, err := x509.MarshalECPrivateKey(key)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(kf, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kDER}), 0o600))
+		return cf, kf
+	}
+
+	serverCertFile, serverKeyFile := genLeaf("server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, true)
+	clientCertFile, clientKeyFile := genLeaf("client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, false)
+
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.crt")
+	require.NoError(t, os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600))
+
+	// Build mTLS server that requires client cert
+	caPool := x509.NewCertPool()
+	caPEM, _ := os.ReadFile(caFile)
+	caPool.AppendCertsFromPEM(caPEM)
+
+	serverCert, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
+	require.NoError(t, err)
+
+	var receivedClientCertCN string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			receivedClientCertCN = r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+		MinVersion:   tls.VersionTLS13,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	// Set env vars so NewClient picks up TLS
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", clientCertFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", clientKeyFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", caFile)
+
+	// srv.URL from httptest.NewUnstartedServer with StartTLS is already https://
+	c, err := NewClient(srv.URL)
+	require.NoError(t, err)
+
+	// Make a request that will be handled — StartContainer hits POST /containers/{id}/start
+	err = c.StartContainer(context.Background(), "testid")
+	require.NoError(t, err)
+	require.Equal(t, "client", receivedClientCertCN)
+}
+
+// TestNewClient_TLSEnvError verifies that NewClient propagates the error
+// returned by buildTLSTransport when the TLS env vars are only partially set.
+// This covers the `if err != nil { return nil, err }` branch in NewClient
+// (client.go:108-110) which is not reached by tests that call buildTLSTransport
+// directly.
+func TestNewClient_TLSEnvError(t *testing.T) {
+	// Only CERT is set — _KEY and _CA are empty → buildTLSTransport errors.
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "/tmp/some.crt")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "")
+	_, err := NewClient("tcp://docker-host:2375")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must all be set together")
+}
+
+// TestBuildTLSTransport_MissingCAFile_Errors exercises the os.ReadFile error
+// path (client.go:139-143): cert+key are valid PEM files but the CA path does
+// not exist, so ReadFile returns an error.
+func TestBuildTLSTransport_MissingCAFile_Errors(t *testing.T) {
+	// Generate a minimal self-signed cert+key so LoadX509KeyPair succeeds.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "client.crt")
+	keyFile := filepath.Join(dir, "client.key")
+
+	require.NoError(t, os.WriteFile(certFile,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyFile,
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+
+	// Point CA at a path that does not exist.
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", certFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", keyFile)
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", filepath.Join(dir, "nonexistent-ca.crt"))
+
+	_, err = buildTLSTransport()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "docker: read CA")
+}
+
+func TestNewClient_HTTP_PlaintextUnchanged(t *testing.T) {
+	// Ensure plaintext path is unchanged when TLS env vars are not set
+	t.Setenv("RUNSECURE_DOCKER_TLS_CERT", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_KEY", "")
+	t.Setenv("RUNSECURE_DOCKER_TLS_CA", "")
+
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	err := c.StartContainer(context.Background(), "abc")
+	require.NoError(t, err)
 }
