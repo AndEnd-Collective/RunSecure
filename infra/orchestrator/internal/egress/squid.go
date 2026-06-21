@@ -47,7 +47,6 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	var b bytes.Buffer
 	b.WriteString("# RunSecure squid.conf — generated per-spawn. Do not edit.\n")
 	b.WriteString("http_port 3128\n")
-	b.WriteString("acl localnet src 0.0.0.0/0\n")
 
 	// Explicit deny ACL for private/special-use IP ranges. Placed before the
 	// domain allowlist so that an allowed hostname that DNS-resolves to a
@@ -57,11 +56,14 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	}
 	b.WriteString("http_access deny rs_private_dst\n")
 
-	// Project allowlist (exact-match domains).
-	b.WriteString("acl allowed_domains dstdomain\n")
+	// Collect all permitted domains first, then emit the ACL and allow rule
+	// only when there are entries. An empty "acl allowed_domains dstdomain"
+	// line with no targets is valid squid syntax but cosmetically wrong and
+	// potentially confusing in a security config.
+	var domainLines []string
 	for _, d := range r.ResolvedHTTPEgress() {
 		if clean := sanitizeDomain(d); clean != "" {
-			fmt.Fprintf(&b, "acl allowed_domains dstdomain .%s\n", clean)
+			domainLines = append(domainLines, fmt.Sprintf("acl allowed_domains dstdomain .%s\n", clean))
 		}
 	}
 	// Wildcard entries only if the resolved policy allows them.
@@ -75,12 +77,16 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 			// Sanitize AFTER stripping the "*." prefix so embedded
 			// newlines or metacharacters in the suffix are rejected.
 			if clean := sanitizeDomain(suffix); clean != "" {
-				fmt.Fprintf(&b, "acl allowed_domains dstdomain %s\n", clean)
+				domainLines = append(domainLines, fmt.Sprintf("acl allowed_domains dstdomain %s\n", clean))
 			}
 		}
 	}
-
-	b.WriteString("http_access allow allowed_domains\n")
+	for _, line := range domainLines {
+		b.WriteString(line)
+	}
+	if len(domainLines) > 0 {
+		b.WriteString("http_access allow allowed_domains\n")
+	}
 	b.WriteString("http_access deny all\n")
 	b.WriteString("visible_hostname runsecure-proxy\n")
 	return b.Bytes()

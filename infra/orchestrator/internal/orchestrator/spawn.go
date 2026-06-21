@@ -78,6 +78,9 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	if err != nil {
 		return w.fail(intent, containerName, "runner_yml_parse", err)
 	}
+	if err := snapshot.YML.ValidateEgress(); err != nil {
+		return w.fail(intent, containerName, "runner_yml_parse", err)
+	}
 	imageDigest := snapshot.ImageDigest
 	if imageDigest == "" {
 		// Fall back to the deps lookup keyed on runtime string.

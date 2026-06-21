@@ -293,6 +293,9 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 		for _, w := range yml.DeprecationWarnings() {
 			fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
 		}
+		if err := yml.ValidateEgress(); err != nil {
+			return nil, fmt.Errorf("runner.yml egress validation: %w", err)
+		}
 		return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
 	}
 	return nil, errors.New("unknown repo")

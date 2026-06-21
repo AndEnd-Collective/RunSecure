@@ -504,3 +504,26 @@ func TestFailAndLeak_NonZeroRunnerID_CallsDelete(t *testing.T) {
 	require.Equal(t, int64(1), deleteCalls.Load(),
 		"runnerID>0 must trigger DeleteRunner once")
 }
+
+// Test A: spawn rejects tcp_egress entry with reserved port 443.
+// ValidateEgress must be called inside Execute so fakes also validate.
+func TestSpawn_RunnerYML_InvalidTCPEgress_FailsSpawn(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db.example.com:443"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}
+
+// Test B: spawn rejects duplicate tcp_egress ports.
+func TestSpawn_RunnerYML_DuplicateTCPPort_FailsSpawn(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db1.example.com:5432", "db2.example.com:5432"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
+	require.Error(t, err)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}

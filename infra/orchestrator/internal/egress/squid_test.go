@@ -124,3 +124,48 @@ func TestRenderSquid_PrivateIPRangesCovered(t *testing.T) {
 		}
 	}
 }
+
+// Test C: empty http_egress with AllowWildcards=false must not emit a bare
+// "acl allowed_domains dstdomain" line, but must still emit "http_access deny all".
+func TestRenderSquid_EmptyHTTPEgress_NoBareACL(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("standard")
+	policy.AllowWildcards = false
+	policy.WildcardEntries = nil
+
+	out := string(RenderSquid(r, policy))
+
+	if strings.Contains(out, "acl allowed_domains dstdomain\n") {
+		t.Fatalf("bare 'acl allowed_domains dstdomain' (empty ACL) must not be emitted:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access deny all") {
+		t.Fatalf("http_access deny all must always be present:\n%s", out)
+	}
+	if strings.Contains(out, "http_access allow allowed_domains") {
+		t.Fatalf("http_access allow allowed_domains must not be emitted when no domains:\n%s", out)
+	}
+	if strings.Contains(out, "acl localnet") {
+		t.Fatalf("dead 'acl localnet' line must not appear in output:\n%s", out)
+	}
+}
+
+// Test D: non-empty http_egress must still emit allow allowed_domains (regression guard).
+func TestRenderSquid_NonEmpty_EmitsAllow(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"api.github.com"}}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+
+	if !strings.Contains(out, "acl allowed_domains dstdomain .api.github.com") {
+		t.Fatalf("expected 'acl allowed_domains dstdomain .api.github.com' in output:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access allow allowed_domains") {
+		t.Fatalf("expected 'http_access allow allowed_domains' in output:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access deny all") {
+		t.Fatalf("expected 'http_access deny all' in output:\n%s", out)
+	}
+	if strings.Contains(out, "acl localnet") {
+		t.Fatalf("dead 'acl localnet' line must not appear in output:\n%s", out)
+	}
+}
