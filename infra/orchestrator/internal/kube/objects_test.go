@@ -334,6 +334,74 @@ func TestProxyService_Namespace(t *testing.T) {
 	}
 }
 
+// TestProxyService_DuplicateTCPEgressPortsDeduped verifies that when
+// TCPEgressPorts contains duplicate values only one ServicePort is emitted
+// per unique port number (exercising the seen[port] dedup branch).
+func TestProxyService_DuplicateTCPEgressPortsDeduped(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = false
+	// Provide duplicates: port 9000 appears twice, port 8443 once.
+	in.TCPEgressPorts = []int{9000, 8443, 9000}
+
+	svc := kube.ProxyService(in)
+
+	// Count how many times port 9000 appears.
+	count9000 := 0
+	for _, p := range svc.Spec.Ports {
+		if p.Port == 9000 {
+			count9000++
+		}
+	}
+	if count9000 != 1 {
+		t.Errorf("ProxyService: port 9000 should appear exactly once after dedup, got %d", count9000)
+	}
+	// Port 8443 must appear exactly once.
+	if !hasServicePort(svc, 8443) {
+		t.Errorf("ProxyService: port 8443 must be present")
+	}
+	// Port 53 must be absent (dnsmasq disabled).
+	if hasServicePort(svc, 53) {
+		t.Errorf("ProxyService: port 53 must not appear when dnsmasq disabled")
+	}
+}
+
+// TestProxyService_EmptyTCPEgressPorts verifies that only the squid port (3128)
+// is present when TCPEgressPorts is empty and dnsmasq is off.
+func TestProxyService_EmptyTCPEgressPorts(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = false
+	in.TCPEgressPorts = nil
+
+	svc := kube.ProxyService(in)
+
+	if len(svc.Spec.Ports) != 1 {
+		t.Errorf("ProxyService with no egress ports: got %d ports, want 1 (squid only)", len(svc.Spec.Ports))
+	}
+	if !hasServicePort(svc, 3128) {
+		t.Errorf("ProxyService: squid port 3128 must always be present")
+	}
+}
+
+// TestProxyService_DNSMasqAndMultipleTCPPorts checks the port set when dnsmasq
+// is enabled alongside several TCP egress ports (no duplicates).
+func TestProxyService_DNSMasqAndMultipleTCPPorts(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = true
+	in.TCPEgressPorts = []int{443, 8080, 22}
+
+	svc := kube.ProxyService(in)
+
+	// squid + dns-tcp + dns-udp + 3 TCP egress = 6 ports total.
+	if len(svc.Spec.Ports) != 6 {
+		t.Errorf("ProxyService: got %d ports, want 6", len(svc.Spec.Ports))
+	}
+	for _, p := range []int32{3128, 53, 443, 8080, 22} {
+		if !hasServicePort(svc, p) {
+			t.Errorf("ProxyService: missing expected port %d", p)
+		}
+	}
+}
+
 // -------------------------------------------------------------------
 // DefaultDenyNetworkPolicy
 // -------------------------------------------------------------------

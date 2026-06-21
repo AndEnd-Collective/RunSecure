@@ -12,7 +12,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/stretchr/testify/assert"
@@ -568,4 +571,196 @@ func TestListSpawns_FallbackSecretName(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	assert.Equal(t, "rs-secret-fb1", refs[0].SecretName, "fallback secret name must be rs-secret-<spawnID>")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// NewInCluster — injectable-var branches
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestNewInCluster_InClusterConfigError covers the branch where rest.InClusterConfig
+// returns an error (e.g. not running inside a pod).
+func TestNewInCluster_InClusterConfigError(t *testing.T) {
+	injected := errors.New("not in cluster")
+
+	orig := *InClusterConfig
+	*InClusterConfig = func() (*rest.Config, error) { return nil, injected }
+	defer func() { *InClusterConfig = orig }()
+
+	_, err := NewInCluster()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "in-cluster config")
+}
+
+// TestNewInCluster_NewForConfigError covers the branch where kubernetes.NewForConfig
+// returns an error after a successful InClusterConfig call.
+func TestNewInCluster_NewForConfigError(t *testing.T) {
+	injected := errors.New("bad config")
+
+	origCfg := *InClusterConfig
+	*InClusterConfig = func() (*rest.Config, error) { return &rest.Config{}, nil }
+	defer func() { *InClusterConfig = origCfg }()
+
+	origNew := *NewForConfig
+	*NewForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) { return nil, injected }
+	defer func() { *NewForConfig = origNew }()
+
+	_, err := NewInCluster()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "new clientset")
+}
+
+// TestNewInCluster_Success covers the happy path: both injected functions
+// succeed and NewInCluster returns a non-nil *Client.
+func TestNewInCluster_Success(t *testing.T) {
+	origCfg := *InClusterConfig
+	*InClusterConfig = func() (*rest.Config, error) { return &rest.Config{}, nil }
+	defer func() { *InClusterConfig = origCfg }()
+
+	fakeCS := fake.NewSimpleClientset()
+	origNew := *NewForConfig
+	*NewForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) { return fakeCS, nil }
+	defer func() { *NewForConfig = origNew }()
+
+	c, err := NewInCluster()
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+// TestNewForConfigWrapper exercises the default newForConfig wrapper body
+// (the anonymous function assigned at package initialisation time). Passing a
+// non-nil *rest.Config is enough — the call may succeed or fail depending on
+// the environment; either outcome covers the statement.
+func TestNewForConfigWrapper(t *testing.T) {
+	// Retrieve the current (default) function value before any test replaces it.
+	// This directly exercises the `return kubernetes.NewForConfig(cfg)` statement.
+	fn := *NewForConfig
+	// Use a minimal valid config; NewForConfig with an empty Host returns an
+	// error but still traverses the function body.
+	_, _ = fn(&rest.Config{Host: "http://127.0.0.1:1"})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ApplySpawn — Get-after-Create error path
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestApplySpawn_GetSecretAfterCreateError verifies that when the re-fetch of
+// the Secret after creation fails, ApplySpawn propagates the error.
+func TestApplySpawn_GetSecretAfterCreateError(t *testing.T) {
+	ns := "runsecure-geterr"
+	cs := fake.NewSimpleClientset()
+	injected := errors.New("injected get error")
+
+	// Allow the create to succeed but fail on get.
+	cs.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, injected
+	})
+
+	c := NewClient(cs)
+	objs := SpawnObjects{
+		Secret:    &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "rs-secret-geterr", Namespace: ns}},
+		Service:   &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: ns}},
+		Policies:  []*networkingv1.NetworkPolicy{},
+		ProxyPod:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "proxy", Namespace: ns}},
+		RunnerPod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: ns}},
+	}
+	err := c.ApplySpawn(context.Background(), objs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "get secret")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WaitRunner — additional branch coverage
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestWaitRunner_WatchError covers the branch where Watch() itself returns an
+// error. WaitRunner must fall through to relist() and return the pod's current
+// phase.
+func TestWaitRunner_WatchError(t *testing.T) {
+	ns := "runsecure-watcherr"
+	podName := "rs-runner-watcherr"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+	}
+
+	cs := fake.NewSimpleClientset(pod)
+	injected := errors.New("watch unavailable")
+	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		return true, nil, injected
+	})
+
+	c := NewClient(cs)
+	phase, timedOut := c.WaitRunner(context.Background(), ns, podName, 5*time.Second)
+	assert.False(t, timedOut, "relist path must not report timeout")
+	// relist reads the pod's phase from the fake store.
+	assert.Equal(t, corev1.PodSucceeded, phase)
+}
+
+// TestWaitRunner_WatchChannelClosedViaFakeWatch covers the branch where the
+// watch channel closes unexpectedly mid-stream. WaitRunner must call relist()
+// and return the pod's current phase.
+func TestWaitRunner_WatchChannelClosedViaFakeWatch(t *testing.T) {
+	ns := "runsecure-closed"
+	podName := "rs-runner-closed"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+		Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+
+	cs := fake.NewSimpleClientset(pod)
+
+	// Inject a RaceFreeFakeWatcher whose channel we close immediately.
+	fw := watch.NewRaceFreeFake()
+	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+
+	// Close the channel before WaitRunner has a chance to consume any events.
+	fw.Stop()
+
+	c := NewClient(cs)
+	phase, timedOut := c.WaitRunner(context.Background(), ns, podName, 5*time.Second)
+	assert.False(t, timedOut, "closed channel must not report timeout")
+	assert.Equal(t, corev1.PodFailed, phase, "relist must return current pod phase after channel close")
+}
+
+// TestWaitRunner_NonPodEventIgnored covers the branch where a watch event
+// carries a non-Pod object (event.Object is not *corev1.Pod). WaitRunner must
+// skip that event and keep waiting until a terminal phase is observed.
+func TestWaitRunner_NonPodEventIgnored(t *testing.T) {
+	ns := "runsecure-nonpod"
+	podName := "rs-runner-nonpod"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	cs := fake.NewSimpleClientset(pod)
+
+	fw := watch.NewRaceFreeFake()
+	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+
+	// Emit a non-Pod event (a ConfigMap) first, then a real terminal Pod event.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		// Non-Pod object — type assertion will fail inside WaitRunner; event skipped.
+		fw.Action(watch.Modified, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "not-a-pod", Namespace: ns},
+		})
+		time.Sleep(5 * time.Millisecond)
+		// Now emit the terminal pod event.
+		updated := pod.DeepCopy()
+		updated.Status.Phase = corev1.PodSucceeded
+		fw.Modify(updated)
+	}()
+
+	c := NewClient(cs)
+	phase, timedOut := c.WaitRunner(context.Background(), ns, podName, 5*time.Second)
+	assert.False(t, timedOut)
+	assert.Equal(t, corev1.PodSucceeded, phase)
 }

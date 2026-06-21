@@ -21,6 +21,17 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// inClusterConfig and newForConfig are package-level variables so that
+// export_test.go can swap them in unit tests to exercise every branch of
+// NewInCluster without requiring a real Kubernetes cluster.
+var inClusterConfig = rest.InClusterConfig
+
+// newForConfig wraps kubernetes.NewForConfig with an interface return type so
+// tests can inject a fake without a concrete *Clientset.
+var newForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) {
+	return kubernetes.NewForConfig(cfg)
+}
+
 // Client wraps a kubernetes.Interface with the higher-level operations used by
 // the orchestrator. It is intentionally thin — no caching, no informers — so
 // unit tests can use fake.NewSimpleClientset() without any ceremony.
@@ -58,11 +69,11 @@ func NewClient(cs kubernetes.Interface) *Client {
 // injected by Kubernetes. It is only usable when the orchestrator binary is
 // running inside a pod.
 func NewInCluster() (*Client, error) {
-	cfg, err := rest.InClusterConfig()
+	cfg, err := inClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("kube: in-cluster config: %w", err)
 	}
-	cs, err := kubernetes.NewForConfig(cfg)
+	cs, err := newForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kube: new clientset: %w", err)
 	}
