@@ -15,6 +15,11 @@ If you're an LLM proposing changes to this project, read this file first. The ru
 - **`apt-get upgrade -y` in every Dockerfile is load-bearing.** Without it, grype flags HIGH CVEs in unpatched debian:bookworm-slim packages even on a fresh digest. Don't remove it for "build speed."
 - **Python comes from `astral-sh/python-build-standalone`, not Debian.** Debian Bookworm's `python3` is 3.11.2; we ship 3.12. Pinned to a specific release tag + SHA256s per architecture. Adding a new minor version means one new case branch in `images/python.Dockerfile` plus the publish matrix entry.
 
+## 2.1.0 additions — also NOT up for re-litigation
+
+- **GitHub App auth exists** (`internal/auth/githubapp.go`). It is a first-class alternative to PAT auth, selected via `auth_type: github_app` in scope config or `auth.type: github_app` in Helm values. It mints RS256 JWTs, exchanges them for short-lived installation tokens, and caches them. Do not treat it as "future work."
+- **Socket-proxy optional mTLS exists** (`internal/config/config.go`; `RUNSECURE_SP_TLS_MODE=mtls`). When enabled, the proxy listens on `:2376`, enforces TLS 1.3, and requires a verified client certificate (`RequireAndVerifyClientCert`). The Helm chart's `tls.enabled` flag wires this up via cert-manager. Default remains `plaintext`.
+
 ## Kubernetes backend (2.1.0) — decisions that are NOT up for re-litigation
 
 - **The Kubernetes backend exists (`charts/runsecure-orchestrator/`, `internal/backend/kube/`, `internal/kube/`).** It is not a future plan — it ships in 2.1.0 and is exercised by `tests/integration/k8s/run-k8s-tests.sh`.

@@ -1,6 +1,6 @@
 ---
 name: runsecure-adopter
-description: Use to adopt RunSecure in a target project — generate a correct .github/runner.yml (2.0.0 schema), wire workflow labels, build/run the hardened egress-controlled runner, and verify. Invoke when a user wants to harden a repo's CI with sandboxed, egress-allowlisted self-hosted runners.
+description: Use to adopt RunSecure in a target project — generate a correct .github/runner.yml, wire workflow labels, build/run the hardened egress-controlled runner, and verify. Invoke when a user wants to harden a repo's CI with sandboxed, egress-allowlisted self-hosted runners.
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
@@ -13,10 +13,10 @@ You set up RunSecure for a consumer project. RunSecure provides hardened, epheme
 
 ## Workflow
 1. **Detect the runtime + needs**: inspect the target repo (package manager, language version, what hosts the build fetches from — registries, package mirrors, databases). Map those to `http_egress` (HTTP/HTTPS domains) and `tcp_egress` (raw TCP `host:port`, unique ports, not 80/443).
-2. **Write `.github/runner.yml`** using the 2.0.0 schema (`runtime`, `labels`, `tools`/`apt`, `http_egress`, `tcp_egress`, `dns`, `resources`). Use `http_egress` (not the deprecated `egress.allow_domains`). Validate with `infra/scripts/lib/validate-schema.sh`.
+2. **Write `.github/runner.yml`** using the runner.yml schema (`runtime`, `labels`, `tools`/`apt`, `http_egress`, `tcp_egress`, `dns`, `resources`). Use `http_egress` (not the deprecated `egress.allow_domains`). Validate with `infra/scripts/lib/validate-schema.sh`.
 3. **Set workflow `runs-on`** to exactly the `labels` in `runner.yml`.
-4. **Build or pin images**: build `runner-base` + the language layer, or set `version:` to pull a published release; or `compose-image.sh` for a project image with tools.
-5. **Run**: `infra/scripts/run.sh --project <dir> --repo owner/repo` for one job, or the orchestrator stack for a persistent pool.
+4. **Build or pin images**: build `runner-base` + the language layer, or set `version:` to pull a published release (2.1.0+); or `compose-image.sh` for a project image with tools.
+5. **Run**: `infra/scripts/run.sh --project <dir> --repo owner/repo` for one job; the Compose orchestrator stack for a persistent pool; or the Helm chart (`charts/runsecure-orchestrator/`, `scope.backend: kube`) for a Kubernetes deployment — see `install-kubernetes.md`. The orchestrator can authenticate as a PAT (`auth.type: pat`) or as a GitHub App (`auth.type: github_app` with App ID, installation ID, and a mode-0400 PEM key).
 6. **Verify**: a labeled job is picked up and the container is destroyed after; an allowed egress target works and a non-allowed one is blocked.
 
 ## Before finishing

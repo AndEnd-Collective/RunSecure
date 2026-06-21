@@ -15,10 +15,11 @@ You implement changes to RunSecure. Follow the `developing-runsecure` skill and 
 
 ## Workflow
 1. Locate the change in the build chain (base → language → project image) or the runtime path (orchestrator → socket-proxy → per-spawn proxy/runner). Match existing patterns.
-2. Write the failing test(s) first. For images, add/keep the build-time version assertion + tool-recipe test. For Go, unit tests (and fuzz for socket-proxy validation).
-3. Implement minimally; run the focused test, then the relevant suite (`go test ./...`, `tests/validation/test-*.sh`, `tests/integration/run-integration-tests.sh --test <suite>`). Integration spawn tests use a local `registry:2` for real manifest digests.
-4. If you add a language/version or tool, update ALL matrices (`publish-images.yml`, `post-publish-acceptance.yml`, `promote-to-stable.yml`) and acceptance claims.
-5. Commit on a branch; open a PR. For self-CI, bootstrap the dogfood runner to clear `lints-on-self`, then kill it.
+2. Write the failing test(s) first. For images, add/keep the build-time version assertion + tool-recipe test. For Go, unit tests (and fuzz for socket-proxy validation). Logic packages (all `internal/*` except composition roots) must stay at ≥99% statement coverage (`tests/validation/test-go-coverage.sh`).
+3. Implement minimally; run the focused test, then the relevant suite (`go test ./...`, `tests/validation/test-*.sh`, `tests/integration/run-integration-tests.sh --test <suite>`). Integration spawn tests use a local `registry:2` for real manifest digests. Kubernetes tests: `tests/integration/k8s/run-k8s-tests.sh` (requires kind + Calico — a CNI that enforces NetworkPolicy).
+4. New areas introduced in 2.1.0 that you may touch: backend abstraction (`internal/backend/backend.go` + `compose/` + `kube/`), Kubernetes object builders and client (`internal/kube/`), auth providers (`internal/auth/` — `pat.go` + `githubapp.go`), socket-proxy mTLS (`internal/config/config.go`), and the Helm chart (`charts/runsecure-orchestrator/`). Read `AGENTS.md` § "Kubernetes backend (2.1.0)" before touching kube NetworkPolicy objects.
+5. If you add a language/version or tool, update ALL matrices (`publish-images.yml`, `post-publish-acceptance.yml`, `promote-to-stable.yml`) and acceptance claims.
+6. Commit on a branch; open a PR. For self-CI, bootstrap the dogfood runner to clear `lints-on-self`, then kill it.
 
 ## Verify before claiming done
 Run the actual commands and report their output. Build the affected image and Grype-scan it if you touched a Dockerfile or pin. Confirm coverage, the security gates, and that no AI-attribution slipped into commit messages.

@@ -16,6 +16,10 @@ This repository's GitHub Actions jobs run on **RunSecure**: each job executes in
 - **`runs-on` must match `runner.yml` `labels` exactly** (e.g. `[self-hosted, Linux, ARM64, container]`). Changing labels in one place means changing both.
 - **Jobs are ephemeral and single-use.** Don't rely on state persisting between steps beyond the workspace, or between jobs at all.
 
+## Backend transparency
+
+CI may run on the Compose backend or the Kubernetes backend, but the egress rules in `.github/runner.yml` are identical either way — you don't need to know which backend is running to add an egress entry or diagnose a network failure.
+
 ## When CI fails on network/egress
 The first question is "is the target in `runner.yml`'s `http_egress`/`tcp_egress`?" — not "how do I bypass the proxy?". Add the host (with a one-line justification), or confirm with the operator if it's a private range.
 
