@@ -28,7 +28,11 @@ var allowedRoutes = []struct {
 	{"DELETE", regexp.MustCompile(`^/containers/[^/]+$`)},
 	{"POST", regexp.MustCompile(`^/networks/create$`)},
 	{"DELETE", regexp.MustCompile(`^/networks/[^/]+$`)},
-	{"POST", regexp.MustCompile(`^/networks/[^/]+/connect$`)},
+	// POST /networks/{id}/connect is intentionally absent: the orchestrator
+	// docker client only uses CreateNetwork and DeleteNetwork (no ConnectNetwork
+	// method exists in internal/docker/client.go). Leaving this route open
+	// would give an attacker a second path to attach a runner container to
+	// the egress network post-create (Bypass 2 in the Task 7 fix brief).
 }
 
 // RouteAllowed reports whether method+path is on the allowlist.

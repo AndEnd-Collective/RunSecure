@@ -136,15 +136,31 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 	}
 
 	// Egress-network gate: if RUNSECURE_EGRESS_NETWORK is configured, only
-	// containers with runsecure.role=proxy may attach it. This prevents a
-	// compromised orchestrator from connecting a runner directly to the
-	// outbound egress network and bypassing the proxy-enforced domain filter.
+	// containers with runsecure.role=proxy may attach it. Two attach paths
+	// exist in the Docker API and both must be gated:
+	//
+	//   1. NetworkingConfig.EndpointsConfig[egressNet] — the explicit endpoint
+	//      map used at container-create time.
+	//   2. HostConfig.NetworkMode=<egressNet> — the alternate form Docker uses
+	//      when the primary network is named directly via NetworkMode rather
+	//      than EndpointsConfig (Bypass 1 in the Task 7 fix brief).
+	//
+	// Default-deny: absent label, empty label, or any role that is not exactly
+	// "proxy" (including "runner") are all denied.
 	if egressNet != "" {
+		labels, _ := req["Labels"].(map[string]any)
+		role, _ := labels["runsecure.role"].(string)
+
 		nc, _ := req["NetworkingConfig"].(map[string]any)
 		eps, _ := nc["EndpointsConfig"].(map[string]any)
 		if _, attaches := eps[egressNet]; attaches {
-			labels, _ := req["Labels"].(map[string]any)
-			if role, _ := labels["runsecure.role"].(string); role != "proxy" {
+			if role != "proxy" {
+				return ErrEgressAttachDenied
+			}
+		}
+
+		if nm, _ := hc["NetworkMode"].(string); nm == egressNet {
+			if role != "proxy" {
 				return ErrEgressAttachDenied
 			}
 		}

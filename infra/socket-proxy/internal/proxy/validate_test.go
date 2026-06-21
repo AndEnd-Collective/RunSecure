@@ -291,6 +291,46 @@ func TestErrors_AreDescriptive(t *testing.T) {
 	require.True(t, strings.Contains(ErrCapAddDenied.Error(), "CapAdd"))
 }
 
+// TestValidateContainerCreate_EgressAttach_NetworkMode covers Bypass 1:
+// Docker also attaches a named network via HostConfig.NetworkMode="<network>".
+// A body with role=runner + NetworkMode=egressNet (and NO EndpointsConfig)
+// must be DENIED; role=proxy + NetworkMode=egressNet must be allowed.
+func TestValidateContainerCreate_EgressAttach_NetworkMode(t *testing.T) {
+	// mk builds a body using HostConfig.NetworkMode instead of EndpointsConfig.
+	mk := func(role string) []byte {
+		return []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+			`"Labels":{"runsecure.role":"` + role + `"},` +
+			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],"NetworkMode":"spawn-egress"}}`)
+	}
+
+	// Attacker: runner role with NetworkMode=egressNet must be denied.
+	err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress")
+	if err == nil {
+		t.Fatal("SECURITY BYPASS: runner+NetworkMode=egressNet must be denied")
+	}
+	require.ErrorIs(t, err, ErrEgressAttachDenied)
+
+	// Unlabeled container with NetworkMode=egressNet must also be denied.
+	err = ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress")
+	if err == nil {
+		t.Fatal("SECURITY BYPASS: unlabeled+NetworkMode=egressNet must be denied")
+	}
+	require.ErrorIs(t, err, ErrEgressAttachDenied)
+
+	// Positive: proxy role with NetworkMode=egressNet is allowed.
+	require.NoError(t, ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress"))
+}
+
+// TestValidateContainerCreate_EgressAttach_NetworkMode_Inert verifies that the
+// NetworkMode gate does not fire when egressNet is empty.
+func TestValidateContainerCreate_EgressAttach_NetworkMode_Inert(t *testing.T) {
+	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+		`"Labels":{"runsecure.role":"runner"},` +
+		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],"NetworkMode":"spawn-egress"}}`)
+	// With egressNet="" the NetworkMode gate must not fire.
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), ""))
+}
+
 func TestContainsString_NilSlice(t *testing.T) {
 	require.False(t, containsString(nil, "x"))
 	require.False(t, containsString(map[string]any{}, "x"))

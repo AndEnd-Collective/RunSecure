@@ -14,9 +14,12 @@ func FuzzValidateContainerCreate(f *testing.F) {
 		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001","HostConfig":{"Privileged":true}}`),
 		[]byte(`not json`),
 		[]byte("{\"Image\":\"\\u0000\"}"),
-		// egress-gate seeds: proxy allowed, runner denied, unlabeled denied.
+		// egress-gate via EndpointsConfig: proxy allowed, runner denied.
 		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"proxy"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`),
 		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"runner"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`),
+		// egress-gate via NetworkMode (Bypass 1): proxy allowed, runner denied.
+		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"proxy"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],"NetworkMode":"spawn-egress"}}`),
+		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"runner"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],"NetworkMode":"spawn-egress"}}`),
 	}
 	for _, s := range seeds {
 		f.Add(s)
