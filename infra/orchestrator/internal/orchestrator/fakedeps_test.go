@@ -261,22 +261,23 @@ type fakeBucket struct{ taken atomic.Int64 }
 func (f *fakeBucket) TryTake() bool { f.taken.Add(1); return true }
 
 type fakeEgress struct {
-	tempBase  string
-	renderErr error
+	tempBase            string
+	renderErr           error
+	allowedPrivateCIDRs []string // returned as the second Render return value
 }
 
-func (f *fakeEgress) Render(spawnID string, r *runneryml.Runner) (string, error) {
+func (f *fakeEgress) Render(spawnID string, r *runneryml.Runner) (string, []string, error) {
 	if f.renderErr != nil {
-		return "", f.renderErr
+		return "", nil, f.renderErr
 	}
 	dir := filepath.Join(f.tempBase, spawnID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for _, fn := range []string{"squid.conf", "haproxy.cfg", "dnsmasq.conf"} {
 		_ = os.WriteFile(filepath.Join(dir, fn), []byte("# generated"), 0o644)
 	}
-	return dir, nil
+	return dir, f.allowedPrivateCIDRs, nil
 }
 
 // ------------- fake backend -------------------------------------------

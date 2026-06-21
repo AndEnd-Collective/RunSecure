@@ -66,8 +66,11 @@ type TokenBucket interface {
 }
 
 // EgressGenerator renders per-spawn squid/haproxy/dnsmasq configs.
+// Render returns the config directory path and the set of operator-approved
+// private CIDRs (from the resolved security Policy) so the caller can thread
+// them into the kube backend's SpawnInput for L3 NetworkPolicy enforcement.
 type EgressGenerator interface {
-	Render(spawnID string, r *runneryml.Runner) (configDir string, err error)
+	Render(spawnID string, r *runneryml.Runner) (configDir string, allowedPrivateCIDRs []string, err error)
 }
 
 // RunnerYMLSnapshot is a parsed runner.yml + the resolved image digest for

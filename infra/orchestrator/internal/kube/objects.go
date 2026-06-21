@@ -632,6 +632,27 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 		},
 	}
 
+	// Rule 3 (one per entry): operator-approved private CIDRs (allow_private_cidrs).
+	// These add explicit L3 egress allows for ranges the operator has whitelisted
+	// (e.g. a local pull-through cache on the Docker bridge). Squid's rs_allowed_private
+	// exemption handles L7; this rule handles L3 in the kube backend.
+	//
+	// The world rule's RFC1918 Except list is NOT modified — non-approved private
+	// ranges remain unreachable at L3 (defence-in-depth). Only the explicit approved
+	// CIDRs receive an additional allow rule.
+	egressRules := []networkingv1.NetworkPolicyEgressRule{dnsRule, internetRule}
+	for _, cidr := range in.AllowedPrivateCIDRs {
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{
+				{
+					IPBlock: &networkingv1.IPBlock{
+						CIDR: cidr,
+					},
+				},
+			},
+		})
+	}
+
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: objectMeta(spawnResourceName("proxy-egress", in.SpawnID), ns, labels),
 		Spec: networkingv1.NetworkPolicySpec{
@@ -644,10 +665,7 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeEgress,
 			},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				dnsRule,
-				internetRule,
-			},
+			Egress: egressRules,
 		},
 	}
 }

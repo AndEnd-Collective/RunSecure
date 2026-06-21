@@ -619,3 +619,48 @@ func TestExecute_TCPEgressPorts_ZeroPort(t *testing.T) {
 	assert.Equal(t, []int{5432}, spawnCalls[0].TCPEgressPorts,
 		"only port 5432 must appear in TCPEgressPorts")
 }
+
+// ─── allow_private_cidrs threading tests (issue #47) ─────────────────────────
+
+// TestExecute_SpawnInput_AllowedPrivateCIDRs_ThreadedFromEgress verifies that
+// SpawnInput.AllowedPrivateCIDRs is populated from the resolved Policy CIDRs
+// returned by the EgressGenerator, so the kube backend can enforce L3 rules.
+func TestExecute_SpawnInput_AllowedPrivateCIDRs_ThreadedFromEgress(t *testing.T) {
+	d := newSpawnDeps(t)
+	// Simulate the egress generator returning approved private CIDRs
+	// (e.g. from an allow_private_cidrs scope override).
+	d.eg.allowedPrivateCIDRs = []string{"172.17.0.0/16", "10.10.0.0/24"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "priv-cidrs"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.ElementsMatch(t, []string{"172.17.0.0/16", "10.10.0.0/24"},
+		spawnCalls[0].AllowedPrivateCIDRs,
+		"SpawnInput.AllowedPrivateCIDRs must carry the egress-resolved approved CIDRs")
+}
+
+// TestExecute_SpawnInput_AllowedPrivateCIDRs_EmptyWhenNone verifies that when
+// the egress generator returns no approved CIDRs, SpawnInput.AllowedPrivateCIDRs
+// is empty (nil or zero-length), preserving the default-deny posture.
+func TestExecute_SpawnInput_AllowedPrivateCIDRs_EmptyWhenNone(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.eg.allowedPrivateCIDRs = nil // no private CIDRs
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "no-priv-cidrs"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.Empty(t, spawnCalls[0].AllowedPrivateCIDRs,
+		"SpawnInput.AllowedPrivateCIDRs must be empty when no private CIDRs are approved")
+}

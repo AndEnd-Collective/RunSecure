@@ -126,7 +126,9 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 
 	// Step 2: generate per-spawn egress configs.
-	egressDir, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
+	// Render also returns the resolved operator-approved private CIDRs so they
+	// can be threaded into SpawnInput for kube backend L3 enforcement.
+	egressDir, allowedPrivateCIDRs, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
 	if err != nil {
 		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, "egress_render", err, jit.RunnerID)
@@ -158,21 +160,22 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	}
 
 	spawnIn := backend.SpawnInput{
-		Scope:              intent.Scope,
-		Repo:               intent.Repo,
-		SpawnID:            intent.SpawnID,
-		RunnerImage:        imageDigest,
-		ProxyImage:         w.deps.ProxyImageDigest(),
-		SeccompProfilePath: w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
-		ResourcesMemory:    memBytes,
-		ResourcesNanoCPUs:  nanoCPUs,
-		ResourcesPIDs:      int64(r.Resources.PIDs),
-		JITConfigB64:       jit.EncodedJITConfig,
-		EgressConfigDir:    egressDir,
-		EgressNetwork:      egressNetworkName(),
-		EgressVolume:       egressVolumeName(),
-		EnableDNSMasq:      enableDNSMasq,
-		TCPEgressPorts:     tcpEgressPorts,
+		Scope:               intent.Scope,
+		Repo:                intent.Repo,
+		SpawnID:             intent.SpawnID,
+		RunnerImage:         imageDigest,
+		ProxyImage:          w.deps.ProxyImageDigest(),
+		SeccompProfilePath:  w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
+		ResourcesMemory:     memBytes,
+		ResourcesNanoCPUs:   nanoCPUs,
+		ResourcesPIDs:       int64(r.Resources.PIDs),
+		JITConfigB64:        jit.EncodedJITConfig,
+		EgressConfigDir:     egressDir,
+		EgressNetwork:       egressNetworkName(),
+		EgressVolume:        egressVolumeName(),
+		EnableDNSMasq:       enableDNSMasq,
+		TCPEgressPorts:      tcpEgressPorts,
+		AllowedPrivateCIDRs: allowedPrivateCIDRs,
 	}
 	h, err := w.deps.Backend().Spawn(ctx, spawnIn)
 	if err != nil {

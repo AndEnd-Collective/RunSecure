@@ -33,6 +33,17 @@ type SpawnInput struct {
 	// because Docker networking handles port routing dynamically and the HAProxy
 	// config (rendered by internal/egress) already lists the ports explicitly.
 	TCPEgressPorts []int
+
+	// AllowedPrivateCIDRs is the set of operator-approved private CIDRs from
+	// the resolved security Policy (allow_private_cidrs scope override).
+	// Each entry is in canonical CIDR notation (e.g. "172.17.0.0/16").
+	//
+	// Used by the kube backend to add explicit L3 egress allow rules for
+	// approved private ranges in ProxyEgressNetworkPolicy, complementing the
+	// Squid L7 exemption rendered by internal/egress.RenderSquid.
+	// The compose backend ignores this field — Squid config already carries
+	// the exemption via RenderSquid.
+	AllowedPrivateCIDRs []string
 }
 
 // Handle is a backend-opaque reference to a live spawn.

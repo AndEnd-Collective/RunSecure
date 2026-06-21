@@ -1101,3 +1101,125 @@ func networkPolicyIngressHasPort(rules []networkingv1.NetworkPolicyIngressRule, 
 	}
 	return false
 }
+
+// ─── allow_private_cidrs kube NetworkPolicy tests (issue #47) ─────────────────
+
+// TestProxyEgressNetworkPolicy_AllowedPrivateCIDRs_AddedAsExplicitRules verifies
+// that ProxyEgressNetworkPolicy emits one additional egress rule per approved
+// private CIDR when SpawnInput.AllowedPrivateCIDRs is non-empty.
+func TestProxyEgressNetworkPolicy_AllowedPrivateCIDRs_AddedAsExplicitRules(t *testing.T) {
+	in := testInput()
+	in.AllowedPrivateCIDRs = []string{"172.17.0.0/16"}
+
+	pol := kube.ProxyEgressNetworkPolicy(in)
+
+	// The policy must have at least one rule matching the approved CIDR.
+	found := false
+	for _, rule := range pol.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil && peer.IPBlock.CIDR == "172.17.0.0/16" {
+				found = true
+				// The approved-CIDR rule must NOT itself carry an Except list.
+				if len(peer.IPBlock.Except) != 0 {
+					t.Errorf("approved CIDR rule must not have an Except list, got %v", peer.IPBlock.Except)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("ProxyEgress: expected an egress rule with ipBlock.cidr=172.17.0.0/16, not found in:\n%+v", pol.Spec.Egress)
+	}
+}
+
+// TestProxyEgressNetworkPolicy_AllowedPrivateCIDRs_Multiple verifies that two
+// approved CIDRs each produce their own dedicated egress rule.
+func TestProxyEgressNetworkPolicy_AllowedPrivateCIDRs_Multiple(t *testing.T) {
+	in := testInput()
+	in.AllowedPrivateCIDRs = []string{"172.17.0.0/16", "10.10.0.0/24"}
+
+	pol := kube.ProxyEgressNetworkPolicy(in)
+
+	for _, cidr := range in.AllowedPrivateCIDRs {
+		found := false
+		for _, rule := range pol.Spec.Egress {
+			for _, peer := range rule.To {
+				if peer.IPBlock != nil && peer.IPBlock.CIDR == cidr {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("ProxyEgress: expected egress rule for approved CIDR %q, not found", cidr)
+		}
+	}
+}
+
+// TestProxyEgressNetworkPolicy_WorldRule_StillExceptsRFC1918 verifies that the
+// "world" (0.0.0.0/0) egress rule still carries the RFC1918 Except list after
+// the AllowedPrivateCIDRs change. Non-approved private ranges must remain blocked
+// at L3.
+func TestProxyEgressNetworkPolicy_WorldRule_StillExceptsRFC1918(t *testing.T) {
+	in := testInput()
+	in.AllowedPrivateCIDRs = []string{"172.17.0.0/16"}
+
+	pol := kube.ProxyEgressNetworkPolicy(in)
+
+	// Find the world rule (CIDR = "0.0.0.0/0").
+	var worldExcepts []string
+	for _, rule := range pol.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil && peer.IPBlock.CIDR == "0.0.0.0/0" {
+				worldExcepts = peer.IPBlock.Except
+			}
+		}
+	}
+	if len(worldExcepts) == 0 {
+		t.Fatalf("ProxyEgress: world rule (0.0.0.0/0) must still carry RFC1918 Except list after AllowedPrivateCIDRs change")
+	}
+	// All three RFC1918 ranges must remain in the Except list.
+	required := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	excepts := make(map[string]bool, len(worldExcepts))
+	for _, e := range worldExcepts {
+		excepts[e] = true
+	}
+	for _, cidr := range required {
+		if !excepts[cidr] {
+			t.Errorf("ProxyEgress: world rule Except must still contain %q (defence-in-depth), got %v", cidr, worldExcepts)
+		}
+	}
+}
+
+// TestProxyEgressNetworkPolicy_EmptyAllowedPrivateCIDRs_NoExtraRules verifies
+// the default-deny path: when AllowedPrivateCIDRs is empty, ProxyEgressNetworkPolicy
+// emits exactly 2 rules (DNS + world) — no approved-private-CIDR rules.
+func TestProxyEgressNetworkPolicy_EmptyAllowedPrivateCIDRs_NoExtraRules(t *testing.T) {
+	in := testInput()
+	in.AllowedPrivateCIDRs = nil
+
+	pol := kube.ProxyEgressNetworkPolicy(in)
+
+	// Must have exactly 2 rules: dnsRule and internetRule.
+	if len(pol.Spec.Egress) != 2 {
+		t.Errorf("ProxyEgress without AllowedPrivateCIDRs: got %d egress rules, want 2 (dns+world)", len(pol.Spec.Egress))
+	}
+}
+
+// TestProxyEgressNetworkPolicy_ApprovedCIDR_NotBlockedByWorldExcept is the
+// attacker/non-approved scenario: a private CIDR that is NOT in AllowedPrivateCIDRs
+// must not receive an explicit allow rule. Only 172.17.0.0/16 is approved;
+// 192.168.1.0/24 is not — it must remain blocked by the world Except list.
+func TestProxyEgressNetworkPolicy_ApprovedCIDR_NotBlockedByWorldExcept(t *testing.T) {
+	in := testInput()
+	in.AllowedPrivateCIDRs = []string{"172.17.0.0/16"}
+
+	pol := kube.ProxyEgressNetworkPolicy(in)
+
+	// 192.168.1.0/24 must NOT appear as an approved CIDR rule.
+	for _, rule := range pol.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil && peer.IPBlock.CIDR == "192.168.1.0/24" {
+				t.Errorf("ProxyEgress: non-approved private CIDR 192.168.1.0/24 must NOT have an egress allow rule")
+			}
+		}
+	}
+}

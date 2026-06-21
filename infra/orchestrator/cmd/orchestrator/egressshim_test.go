@@ -45,7 +45,7 @@ func TestEgressShim_ScopeAllows_ProjectOverrideApplied(t *testing.T) {
 		},
 	}
 
-	_, err := shim.Render("spawn-pos", r)
+	_, _, err := shim.Render("spawn-pos", r)
 	require.NoError(t, err,
 		"project override allowed by scope must permit 10.0.0.5 via allow_private_cidrs")
 }
@@ -72,7 +72,7 @@ func TestEgressShim_ScopeDisallows_ProjectOverrideIgnored(t *testing.T) {
 		},
 	}
 
-	_, err := shim.Render("spawn-neg", r)
+	_, _, err := shim.Render("spawn-neg", r)
 	require.Error(t, err,
 		"project cannot self-authorize allow_private_cidrs when scope disallows it")
 	require.Contains(t, err.Error(), "security:",
@@ -101,7 +101,7 @@ func TestEgressShim_MalformedOverride_SpawnFails(t *testing.T) {
 		},
 	}
 
-	_, err := shim.Render("spawn-malformed", r)
+	_, _, err := shim.Render("spawn-malformed", r)
 	require.Error(t, err, "malformed override value must cause spawn to fail")
 	require.Contains(t, err.Error(), "allow_private_cidrs",
 		"error must name the offending key")
@@ -138,7 +138,7 @@ func TestEgressShim_ScopeOperatorOverrideAppliedAtBase(t *testing.T) {
 		TCPEgress: []string{"10.0.0.5:5432"},
 	}
 
-	_, err = shim.Render("spawn-opbase", r)
+	_, _, err = shim.Render("spawn-opbase", r)
 	require.NoError(t, err,
 		"operator scope override on base must allow private-IP egress")
 }
@@ -158,7 +158,7 @@ func TestEgressShim_NoProjectOverrides_BaseUsed(t *testing.T) {
 		// No Orchestrator.SecurityOverrides set.
 	}
 
-	_, err := shim.Render("spawn-noover", r)
+	_, _, err := shim.Render("spawn-noover", r)
 	require.Error(t, err, "no override set → base strict policy must reject private IP")
 }
 

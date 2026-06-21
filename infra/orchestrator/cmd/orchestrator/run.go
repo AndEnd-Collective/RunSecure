@@ -514,12 +514,21 @@ type egressShim struct {
 	allowKeys []string
 }
 
-func (e egressShim) Render(spawnID string, r *runneryml.Runner) (string, error) {
+func (e egressShim) Render(spawnID string, r *runneryml.Runner) (string, []string, error) {
 	policy, err := security.ApplyProjectOverrides(e.base, e.allowKeys, r.Orchestrator.SecurityOverrides)
 	if err != nil {
-		return "", fmt.Errorf("security: project override invalid: %w", err)
+		return "", nil, fmt.Errorf("security: project override invalid: %w", err)
 	}
-	return e.g.Render(spawnID, r, policy)
+	dir, err := e.g.Render(spawnID, r, policy)
+	if err != nil {
+		return "", nil, err
+	}
+	// Stringify the resolved *net.IPNet CIDRs for transport to the kube backend.
+	var cidrs []string
+	for _, ipnet := range policy.AllowedPrivateCIDRs {
+		cidrs = append(cidrs, ipnet.String())
+	}
+	return dir, cidrs, nil
 }
 
 // buildBasePolicy constructs the operator-level base policy:
