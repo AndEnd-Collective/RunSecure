@@ -70,7 +70,8 @@ Or pin to a published release in `runner.yml` (`version: "2.0.0"`) to pull from 
 ### 4. Run a runner
 
 - **One job, on demand** (simplest): `./infra/scripts/run.sh --project /path/to/project --repo owner/repo`. Add `--no-proxy` only for debugging. Requires Docker, authenticated `gh`, and `yq` v4+.
-- **Persistent pool** (Plan A orchestrator, Compose backend): configure an `infra/orchestrator/scopes/<scope>.yml` (scheduler/concurrency + `orch_egress`) and launch the orchestrator stack. The orchestrator delivers per-spawn egress configs to a combined proxy via a shared named volume and keeps the runner egress-isolated.
+- **Persistent pool (Compose backend)**: configure an `infra/orchestrator/scopes/<scope>.yml` (`backend: compose`, scheduler/concurrency + `orch_egress`) and launch the orchestrator stack. The orchestrator delivers per-spawn egress configs to a combined proxy via a shared named volume and keeps the runner egress-isolated.
+- **Persistent pool (Kubernetes backend)**: install the Helm chart (`charts/runsecure-orchestrator/`) with `scope.backend: kube` on a cluster with a NetworkPolicy-enforcing CNI. See [`install-kubernetes.md`](../../../install-kubernetes.md).
 - **RunSecure's own CI** (dogfood): `./infra/scripts/dev/bootstrap-self-runner.sh` drains queued `dogfood` jobs then exits (no permanent daemon).
 
 ### 5. Verify

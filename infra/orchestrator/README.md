@@ -1,9 +1,9 @@
 # RunSecure Orchestrator (Compose backend)
 
 Distroless Go binary that polls GitHub for queued workflow runs and spawns
-ephemeral hardened runner containers on demand via a custom Go
-docker-socket-proxy. Plan A delivers this without the k8s backend (Plan B)
-or polish tooling (Plan C). For the full design see
+ephemeral hardened runner containers (or Pods) on demand via a custom Go
+docker-socket-proxy (Compose backend) or Kubernetes client (Kubernetes
+backend). For the full design see
 `docs/superpowers/specs/2026-05-19-persistent-local-runners-design.md`.
 
 ## Quickstart

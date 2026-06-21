@@ -24,7 +24,7 @@ type RepoState struct {
 	InFlight    int
 	BreakerOpen bool // surfaced from breaker pkg; see breaker.go
 	LastPollAt  time.Time
-	LastETag    string // for runner.yml ETag caching (k8s — unused in Plan A)
+	LastETag    string // for runner.yml ETag caching (k8s backend — unused in Compose backend)
 }
 
 func New() *State {

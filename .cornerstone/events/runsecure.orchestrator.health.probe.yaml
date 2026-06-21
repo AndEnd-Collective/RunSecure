@@ -7,7 +7,8 @@ metadata:
   description: |
     Emitted by the /healthz handler on each probe. Severity Debug. Used to
     verify probe traffic is reaching the orchestrator from the supervisor
-    (docker HEALTHCHECK or k8s livenessProbe — though k8s is Plan B).
+    (docker HEALTHCHECK on the Compose backend or k8s livenessProbe on the
+    Kubernetes backend).
   status: active
   tags: [runsecure, orchestrator, health]
 

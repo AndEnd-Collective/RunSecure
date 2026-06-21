@@ -11,7 +11,7 @@ RunSecure is a shell/Dockerfile/YAML project plus two Go modules (orchestrator, 
 
 `debian:bookworm-slim` (digest-pinned) → `runner-base` (GH Actions runner + hardening) → `runner-{node,python,rust}:<ver>` → optional project image (`compose-image.sh` layers `tools/*.sh` then `finalize-hardening.sh`).
 
-Runtime (Plan A orchestrator, Compose): `orchestrator` (distroless Go) polls GitHub → asks `socket-proxy` (the only thing mounting docker.sock; strict body validation) to spawn a per-job stack: one combined **proxy** (squid+haproxy+dnsmasq) + **runner**. The runner is on an `internal:true` network only; the proxy is dual-homed (internal + a deploy-provisioned `spawn-egress` network, ICC disabled) and enforces the `runner.yml` allowlist at L7. Per-spawn egress configs are delivered to the proxy via a shared **named volume** (`pat-init`/`egress-init` set ownership). Legacy single-job path: `infra/scripts/run.sh`.
+Runtime (orchestrator, Compose backend): `orchestrator` (distroless Go) polls GitHub → asks `socket-proxy` (the only thing mounting docker.sock; strict body validation) to spawn a per-job stack: one combined **proxy** (squid+haproxy+dnsmasq) + **runner**. The runner is on an `internal:true` network only; the proxy is dual-homed (internal + a deploy-provisioned `spawn-egress` network, ICC disabled) and enforces the `runner.yml` allowlist at L7. Per-spawn egress configs are delivered to the proxy via a shared **named volume** (`pat-init`/`egress-init` set ownership). Kubernetes backend: per-spawn runner Pod + proxy Pod + ClusterIP Service + per-spawn NetworkPolicies + Secret (GC owner) in a per-scope namespace; runner.yml fetched via GitHub API. Legacy single-job path: `infra/scripts/run.sh`.
 
 ## Key invariants (do not break)
 

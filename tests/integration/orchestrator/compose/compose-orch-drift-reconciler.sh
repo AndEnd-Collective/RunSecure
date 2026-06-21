@@ -3,9 +3,9 @@
 # alive; the next reconcile cycle decrements the in-flight counter and
 # emits drift.reconciled.
 #
-# Plan A doesn't run a periodic drift reconciler by default (cold-start
-# reconciles only). This test documents the expected behavior; the
-# automated reconciler can be enabled via RUNSECURE_DRIFT_INTERVAL env
+# The Compose backend doesn't run a periodic drift reconciler by default
+# (cold-start reconciles only). This test documents the expected behavior;
+# the automated reconciler can be enabled via RUNSECURE_DRIFT_INTERVAL env
 # var in a future enhancement. For now: just check the orchestrator
 # doesn't crash when a managed container disappears unexpectedly.
 set -euo pipefail

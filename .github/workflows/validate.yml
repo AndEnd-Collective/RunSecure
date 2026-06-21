@@ -102,7 +102,7 @@ jobs:
           exit "$FAIL"
 
   # --------------------------------------------------------------------------
-  # Plan A: orchestrator + socket-proxy Go build + test + 95% coverage gate.
+  # Orchestrator + socket-proxy Go build + test + 95% coverage gate.
   # --------------------------------------------------------------------------
   build-orchestrator:
     runs-on: ubuntu-latest

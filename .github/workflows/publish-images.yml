@@ -209,7 +209,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  # --- Build orchestrator image (Plan A: long-running orchestrator) ---------
+  # --- Build orchestrator image (long-running orchestrator) -----------------
   # SECURITY: this job uses only `needs.gate.outputs.*` (job-internal),
   # `github.sha`/`github.actor` (GitHub-trusted), and `secrets.GITHUB_TOKEN`.
   # No untrusted-input vectors (no event.* fields).
@@ -241,7 +241,7 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  # --- Build socket-proxy image (Plan A) -----------------------------------
+  # --- Build socket-proxy image (Compose backend) --------------------------
   socket-proxy:
     runs-on: ubuntu-latest
     needs: gate
