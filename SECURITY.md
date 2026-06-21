@@ -78,6 +78,27 @@ The Docker network architecture prevents the container from reaching the interne
 | dnsmasq DNS isolation | Leaking internal queries to host resolver when dns.host:false | `test-dns-validation.sh` |
 | Schema validation | Malformed runner.yml reaching the proxy generator | `test-strict-schema-rejection.sh` |
 
+### Layer 4: Kubernetes backend controls (2.1.0, `backend: kube`)
+
+These controls apply only when deploying via the Kubernetes backend
+(`charts/runsecure-orchestrator/` with `scope.backend: kube`).
+**All NetworkPolicy claims require a NetworkPolicy-enforcing CNI (Calico,
+Cilium). kindnet and flannel do not enforce NetworkPolicy; under those CNIs
+the policies are created but silently ignored.**
+
+| Control | What it prevents | Verified by |
+|---------|-----------------|-------------|
+| Per-spawn `RunnerEgressNetworkPolicy` | Runner Pod reaching anything other than its own proxy Pod on 3128/TCP | `tests/integration/k8s/run-k8s-tests.sh` step 5a–5c (Calico) |
+| Per-spawn `ProxyIngressNetworkPolicy` | Runner of one spawn reaching the proxy of a different spawn (cross-spawn); also makes runner→proxy 3128/TCP work under default-deny (load-bearing — runner→proxy is blocked without it) | `tests/integration/k8s/run-k8s-tests.sh` step 5d |
+| Per-spawn `ProxyEgressNetworkPolicy` | Proxy reaching destinations other than kube-dns + internet via Squid allow-list | `tests/integration/k8s/run-k8s-tests.sh` step 4 |
+| Namespace default-deny NetworkPolicy | All unlisted traffic blocked at network layer | Chart `networkpolicy-default-deny.yaml` |
+| Namespace-scoped RBAC (Role, not ClusterRole) | Orchestrator SA acting outside its scope namespace or creating cluster-level objects | `tests/integration/k8s/run-k8s-tests.sh` step 6 |
+| PSS Restricted admission | Privileged Pods, host namespaces, unsafe capabilities in the scope namespace | `tests/integration/k8s/run-k8s-tests.sh` step 3 |
+| `automountServiceAccountToken: false` on runner+proxy Pods | Runner or proxy code accessing the kube API via the default SA token | `infra/orchestrator/internal/kube/objects.go` (all pod builders) |
+| GitHub App least-privilege installation tokens | Long-lived PAT as the only auth option; user-identity-scoped tokens in multi-team environments | `infra/orchestrator/internal/auth/githubapp.go` |
+| Optional mTLS on orchestrator→socket-proxy hop | Plaintext traffic between orchestrator and socket-proxy in a shared network segment | `infra/socket-proxy/internal/config/config.go` (`BuildTLSConfig`: TLS 1.3, `RequireAndVerifyClientCert`) |
+| cert-manager TLS via chart | Manual certificate rotation for the socket-proxy TLS certificate | Chart `certificate.yaml` + `issuer-selfsigned.yaml` (rendered when `tls.enabled: true`) |
+
 ---
 
 ## Known Limitations
