@@ -103,3 +103,25 @@ func TestFromEnv_TLS_InvalidMode(t *testing.T) {
 	_, err := FromEnv()
 	require.ErrorContains(t, err, "invalid TLS mode")
 }
+
+// ─── AllowedImagesExtraFile tests (issue #54 fix 3) ──────────────────────────
+
+// TestFromEnv_ExtraImagesFile_Default verifies that AllowedImagesExtraFile is
+// empty string when RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE is not set.
+func TestFromEnv_ExtraImagesFile_Default(t *testing.T) {
+	t.Setenv("RUNSECURE_DOCKER_SOCK", "/var/run/docker.sock")
+	t.Setenv("RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE", "")
+	c, err := FromEnv()
+	require.NoError(t, err)
+	require.Empty(t, c.AllowedImagesExtraFile)
+}
+
+// TestFromEnv_ExtraImagesFile_Set verifies that RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE
+// is forwarded into the Config struct.
+func TestFromEnv_ExtraImagesFile_Set(t *testing.T) {
+	t.Setenv("RUNSECURE_DOCKER_SOCK", "/var/run/docker.sock")
+	t.Setenv("RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE", "/run/secrets/extra-images.txt")
+	c, err := FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, "/run/secrets/extra-images.txt", c.AllowedImagesExtraFile)
+}

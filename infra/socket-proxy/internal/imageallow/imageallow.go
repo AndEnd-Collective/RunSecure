@@ -31,6 +31,44 @@ func Load(path string) (*Allowlist, error) {
 	return parse(f, path)
 }
 
+// LoadWithExtra loads the primary allowlist from path, then merges entries from
+// extraPath if it is non-empty and the file exists. This allows operators to
+// supply release-specific digests at runtime without rebuilding the
+// socket-proxy image — addressing the bootstrap problem where a newly-released
+// proxy/runner image digest cannot be baked into the allowlist at release time
+// because the image is not yet published when the release tag is cut (#54 fix 3).
+//
+// extraPath must follow the same format as path. Errors loading extraPath
+// are returned; a missing file (os.IsNotExist) is silently ignored so the
+// operator does not need to supply the file on every deployment.
+func LoadWithExtra(path, extraPath string) (*Allowlist, error) {
+	base, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if extraPath == "" {
+		return base, nil
+	}
+	ef, err := os.Open(extraPath)
+	if os.IsNotExist(err) {
+		// Extra file absent — not an error. Operator didn't supply one.
+		return base, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("imageallow: open extra %s: %w", extraPath, err)
+	}
+	defer ef.Close()
+	extra, err := parse(ef, extraPath)
+	if err != nil {
+		return nil, err
+	}
+	// Merge: add all extra entries into base.
+	for ref := range extra.allowed {
+		base.allowed[ref] = struct{}{}
+	}
+	return base, nil
+}
+
 // parse scans r line-by-line, building an Allowlist. label is used in error
 // messages (typically the file path). Extracted so tests can inject a reader
 // that returns mid-stream I/O errors to exercise the scanner.Err() branch.

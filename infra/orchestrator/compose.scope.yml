@@ -31,6 +31,14 @@ services:
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
       # Egress-volume gate: only role=proxy may mount this named volume.
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
+      # Optional: operator-supplied extra allowlist for release-specific digests.
+      # At release time the newly-published image digests are not yet baked into
+      # the socket-proxy image (bootstrap problem, #54 fix 3). Mount a file with
+      # the release digest(s) and set this env var to its container path:
+      #   RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
+      # with a corresponding volume entry pointing at the host file:
+      #   - /path/to/extra-images.txt:/run/secrets/extra-images.txt:ro
+      # The file must follow the same digest-reference format as allowed-images.txt.
 
   orch-egress:
     image: ${RUNSECURE_PROXY_IMAGE}
