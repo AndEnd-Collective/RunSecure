@@ -95,6 +95,17 @@ jobs:
             canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
             stable_tag: '${{ needs.resolve-version.outputs.version }}'
             also_alias: latest
+          # Control-plane images (orchestrator + socket-proxy) — same retag
+          # shape as base/proxy. Previously omitted, so they were stuck at
+          # <ver>-canary and never got the stable <ver>/latest tags.
+          - kind: orchestrator
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+            also_alias: latest
+          - kind: socket-proxy
+            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+            also_alias: latest
           # Language images: <ver>-canary-<langver> → <ver>-<langver>, nightly-<langver> → latest-<langver>
           - kind: node
             canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-24'
