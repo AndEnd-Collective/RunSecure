@@ -37,7 +37,7 @@ rm -rf /var/lib/apt/lists/*
 # Pin Playwright to a specific version. A floating `npx --yes playwright`
 # would resolve to whatever's latest at image-build time. Bump this
 # manually when you intend to upgrade.
-PLAYWRIGHT_VERSION="1.60.0"
+PLAYWRIGHT_VERSION="1.61.0"
 
 # Install Playwright globally with pinned version, then use the pinned
 # binary to download Chromium. We install via npm rather than running

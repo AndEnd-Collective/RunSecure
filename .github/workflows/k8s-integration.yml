@@ -43,36 +43,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: '1.26'
 
-      - name: Install kind v0.31.0
+      - name: Install kind v0.32.0
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/kind \
-            https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
-          echo "eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa  /tmp/kind" | sha256sum -c -
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-amd64
+          echo "50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54  /tmp/kind" | sha256sum -c -
           sudo install -m 0755 /tmp/kind /usr/local/bin/kind
           kind version
 
-      - name: Install kubectl v1.32.3
+      - name: Install kubectl v1.36.2
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/kubectl \
-            https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl
-          echo "ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f  /tmp/kubectl" | sha256sum -c -
+            https://dl.k8s.io/release/v1.36.2/bin/linux/amd64/kubectl
+          echo "1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82  /tmp/kubectl" | sha256sum -c -
           sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           kubectl version --client
 
-      - name: Install helm v3.17.3
+      - name: Install helm v3.21.2
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/helm.tar.gz \
-            https://get.helm.sh/helm-v3.17.3-linux-amd64.tar.gz
-          echo "ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd  /tmp/helm.tar.gz" | sha256sum -c -
+            https://get.helm.sh/helm-v3.21.2-linux-amd64.tar.gz
+          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  /tmp/helm.tar.gz" | sha256sum -c -
           tar -xzf /tmp/helm.tar.gz -C /tmp linux-amd64/helm
           sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
           helm version
