@@ -1,0 +1,63 @@
+# Runner pod — matches RunnerPod() builder output:
+#   name: rs-runner-<spawnID>  →  rs-runner-spawn01
+#   namespace: runsecure-itest
+#   labels: runsecure.io/role=runner, runsecure.io/scope=itest, runsecure.io/spawn-id=spawn01
+#
+# Uses nicolaka/netshoot for network testing (wget, nc, etc.).
+# PSS Restricted: same constraints as proxy pod.
+# sleep infinity keeps it running so kubectl exec can be used.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-runner-spawn01
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn01
+    runsecure.io/role: runner
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: runner
+      image: nicolaka/netshoot:v0.13
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+        - infinity
+      env:
+        - name: HTTP_PROXY
+          value: "http://rs-proxy-svc-spawn01.runsecure-itest.svc:3128"
+        - name: HTTPS_PROXY
+          value: "http://rs-proxy-svc-spawn01.runsecure-itest.svc:3128"
+        - name: http_proxy
+          value: "http://rs-proxy-svc-spawn01.runsecure-itest.svc:3128"
+        - name: https_proxy
+          value: "http://rs-proxy-svc-spawn01.runsecure-itest.svc:3128"
+        - name: NO_PROXY
+          value: "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc.cluster.local,.cluster.local"
+        - name: no_proxy
+          value: "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc.cluster.local,.cluster.local"
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp

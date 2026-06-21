@@ -1,0 +1,14 @@
+# Namespace matching Namespace("itest") → "runsecure-itest"
+# PSS Restricted labels match charts/runsecure-orchestrator/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

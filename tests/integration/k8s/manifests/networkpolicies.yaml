@@ -1,0 +1,130 @@
+# NetworkPolicies — exact match of objects.go builder output for scope=itest, spawnID=spawn01.
+#
+# 1. DefaultDenyNetworkPolicy("itest"):
+#    - name: default-deny-all, namespace: runsecure-itest
+#    - empty podSelector (all pods), PolicyTypes: [Ingress, Egress], no rules
+#
+# 2. RunnerEgressNetworkPolicy for spawn01:
+#    - name: rs-runner-egress-spawn01, namespace: runsecure-itest
+#    - selector: role=runner, spawn-id=spawn01
+#    - PolicyType: Egress only
+#    - Egress: to role=proxy, spawn-id=spawn01 on 3128/TCP
+#
+# 3. ProxyEgressNetworkPolicy for spawn01:
+#    - name: rs-proxy-egress-spawn01, namespace: runsecure-itest
+#    - selector: role=proxy, spawn-id=spawn01
+#    - PolicyType: Egress only
+#    - Egress: to kube-dns 10.96.0.10/32 on 53/UDP+TCP
+#              to 0.0.0.0/0 except [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] (any port)
+---
+# Default deny — matches DefaultDenyNetworkPolicy("itest")
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Runner egress — matches RunnerEgressNetworkPolicy(SpawnInput{Scope:"itest", SpawnID:"spawn01"})
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rs-runner-egress-spawn01
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn01
+    runsecure.io/role: runner
+spec:
+  podSelector:
+    matchLabels:
+      runsecure.io/role: runner
+      runsecure.io/spawn-id: spawn01
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              runsecure.io/role: proxy
+              runsecure.io/spawn-id: spawn01
+      ports:
+        - protocol: TCP
+          port: 3128
+---
+# Proxy ingress — allows the runner pod (spawn01) to send traffic to the proxy
+# pod on port 3128. This is the ingress counterpart to RunnerEgressNetworkPolicy.
+# Without this, the default-deny-all policy blocks all ingress to the proxy pod.
+# In the real orchestrator, kube-proxy translates the Service ClusterIP to the
+# proxy pod IP; Calico sees runner→proxy-pod-IP, which requires both an egress
+# rule on the runner AND an ingress rule on the proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rs-proxy-ingress-spawn01
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn01
+    runsecure.io/role: proxy
+spec:
+  podSelector:
+    matchLabels:
+      runsecure.io/role: proxy
+      runsecure.io/spawn-id: spawn01
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              runsecure.io/role: runner
+              runsecure.io/spawn-id: spawn01
+      ports:
+        - protocol: TCP
+          port: 3128
+---
+# Proxy egress — matches ProxyEgressNetworkPolicy(SpawnInput{Scope:"itest", SpawnID:"spawn01"})
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rs-proxy-egress-spawn01
+  namespace: runsecure-itest
+  labels:
+    runsecure.io/scope: itest
+    runsecure.io/repo: test_repo
+    runsecure.io/spawn-id: spawn01
+    runsecure.io/role: proxy
+spec:
+  podSelector:
+    matchLabels:
+      runsecure.io/role: proxy
+      runsecure.io/spawn-id: spawn01
+  policyTypes:
+    - Egress
+  egress:
+    # Rule 1: kube-dns
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Rule 2: internet (world CIDR minus RFC1918)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16

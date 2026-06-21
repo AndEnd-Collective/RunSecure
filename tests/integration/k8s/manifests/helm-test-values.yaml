@@ -1,0 +1,45 @@
+# Minimal values for helm template / helm install --dry-run tests.
+# Using a placeholder digest so the template renders without real image digests.
+image:
+  orchestrator:
+    repository: ghcr.io/andend-collective/runsecure/orchestrator
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    pullPolicy: IfNotPresent
+  proxy:
+    repository: ghcr.io/andend-collective/runsecure/proxy
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+    pullPolicy: IfNotPresent
+  socketProxy:
+    repository: ghcr.io/andend-collective/runsecure/socket-proxy
+    tag: "2.1.0"
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000003"
+    pullPolicy: IfNotPresent
+
+scope:
+  name: "itest"
+  description: "Integration test scope"
+  backend: kube
+  globalMaxRunners: 2
+  pollIntervalSeconds: 5
+  securityProfile: strict
+  allowProjectOverrides:
+    - allow_wildcards
+  orchEgress:
+    allowDomains:
+      - api.github.com
+  repos: []
+
+auth:
+  type: pat
+  pat:
+    value: "ghp_placeholder_for_dry_run"
+    existingSecretName: ""
+  app:
+    appId: ""
+    installationId: ""
+    privateKeySecretName: ""
+
+tls:
+  enabled: false
