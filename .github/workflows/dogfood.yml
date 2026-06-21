@@ -102,6 +102,13 @@ jobs:
               test-tool-recipes.sh|test-hardening-idempotency.sh)
                 echo "SKIP $t (Docker-only)"
                 continue ;;
+              test-go-coverage.sh)
+                # Runs 'go test ./...' which pulls the Go module graph
+                # (incl. client-go). The hardened, egress-restricted dogfood
+                # runner has no Go toolchain / module network. This gate is
+                # fully enforced by the GitHub-hosted lints-and-units job.
+                echo "SKIP $t (Go toolchain + module network; enforced in lints-and-units)"
+                continue ;;
             esac
             echo "::group::$t"
             bash "$t" || FAIL=$((FAIL + 1))
