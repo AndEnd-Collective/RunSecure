@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -494,6 +496,112 @@ func TestReconcile_Error(t *testing.T) {
 	_, err := b.Reconcile(context.Background(), "err-scope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reconcile scope")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Spawn — egress config file injection
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestSpawn_SecretContainsSquidCfg(t *testing.T) {
+	b, cs := newBackend(t)
+	ctx := context.Background()
+
+	// Create a temp dir with a real squid.conf
+	dir := t.TempDir()
+	squidContent := "# squid config test"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "squid.conf"), []byte(squidContent), 0o644))
+
+	in := testInput("spawn-squid-cfg")
+	in.EgressConfigDir = dir
+
+	h, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+
+	ns := kube.Namespace(in.Scope)
+	secretName := h.Refs["secret"]
+	secret, err := cs.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, squidContent, secret.StringData["squid.conf"],
+		"Secret must contain squid.conf content from EgressConfigDir")
+}
+
+func TestSpawn_SecretContainsHAProxyCfg(t *testing.T) {
+	b, cs := newBackend(t)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	haproxyContent := "# haproxy config test"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "haproxy.cfg"), []byte(haproxyContent), 0o644))
+
+	in := testInput("spawn-haproxy-cfg")
+	in.EgressConfigDir = dir
+
+	h, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+
+	ns := kube.Namespace(in.Scope)
+	secretName := h.Refs["secret"]
+	secret, err := cs.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, haproxyContent, secret.StringData["haproxy.cfg"],
+		"Secret must contain haproxy.cfg content from EgressConfigDir")
+}
+
+func TestSpawn_SecretMissingFiles_NoError(t *testing.T) {
+	b, _ := newBackend(t)
+	ctx := context.Background()
+
+	in := testInput("spawn-missing-files")
+	in.EgressConfigDir = "" // empty = no files
+
+	_, err := b.Spawn(ctx, in)
+	require.NoError(t, err, "Spawn must succeed when EgressConfigDir is empty")
+}
+
+func TestSpawn_RunnerPodHasJITConfigFileEnv(t *testing.T) {
+	b, cs := newBackend(t)
+	ctx := context.Background()
+
+	in := testInput("spawn-jit-env")
+	h, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+
+	ns := kube.Namespace(in.Scope)
+	runnerPodName := h.Refs["runner_pod"]
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, runnerPodName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	require.Len(t, pod.Spec.Containers, 1)
+	runnerEnv := envMap(pod.Spec.Containers[0].Env)
+	assert.Equal(t, "/var/run/runsecure/jit-config", runnerEnv["RUNNER_JIT_CONFIG_FILE"],
+		"runner pod must have RUNNER_JIT_CONFIG_FILE set")
+}
+
+func TestSpawn_RunnerPodMountsJITSecret(t *testing.T) {
+	b, cs := newBackend(t)
+	ctx := context.Background()
+
+	in := testInput("spawn-jit-mount")
+	h, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+
+	ns := kube.Namespace(in.Scope)
+	secretName := h.Refs["secret"]
+	runnerPodName := h.Refs["runner_pod"]
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, runnerPodName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	// Find the secret volume
+	var secretVol *corev1.SecretVolumeSource
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil && v.Secret.SecretName == secretName {
+			secretVol = v.Secret
+			break
+		}
+	}
+	require.NotNil(t, secretVol, "runner pod must have a volume sourced from the per-spawn secret")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

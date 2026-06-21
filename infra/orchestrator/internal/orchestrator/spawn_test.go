@@ -14,6 +14,8 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -540,4 +542,57 @@ func TestSpawn_RunnerYML_DuplicateTCPPort_FailsSpawn(t *testing.T) {
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_yml_parse"`)
+}
+
+func TestExecute_SpawnInput_TCPEgressPorts(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.runnerYML.TCPEgress = []string{"db.example.com:5432", "npm.io:8080"}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "tcp-ports"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.ElementsMatch(t, []int{5432, 8080}, spawnCalls[0].TCPEgressPorts,
+		"TCPEgressPorts must contain the ports from runner.yml tcp_egress entries")
+}
+
+func TestExecute_SpawnInput_EnableDNSMasq_True(t *testing.T) {
+	d := newSpawnDeps(t)
+	falseVal := false
+	d.runnerYML.DNS = runneryml.DNSConfig{Host: &falseVal}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "dns-masq-true"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.True(t, spawnCalls[0].EnableDNSMasq,
+		"EnableDNSMasq must be true when dns.host=false in runner.yml")
+}
+
+func TestExecute_SpawnInput_EnableDNSMasq_False(t *testing.T) {
+	d := newSpawnDeps(t)
+	// No dns block set — dns.host is nil → EnableDNSMasq=false
+	d.runnerYML.DNS = runneryml.DNSConfig{}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "dns-masq-false"})
+	require.NoError(t, err)
+
+	d.be.mu.Lock()
+	spawnCalls := d.be.spawnCalls
+	d.be.mu.Unlock()
+
+	require.Len(t, spawnCalls, 1)
+	assert.False(t, spawnCalls[0].EnableDNSMasq,
+		"EnableDNSMasq must be false when dns.host is nil")
 }

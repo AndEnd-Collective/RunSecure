@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
@@ -142,6 +143,20 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// EnableDNSMasq when dns.host is explicitly set to false, meaning the
 	// project wants the proxy to resolve DNS rather than using the host resolver.
 	enableDNSMasq := r.DNS.Host != nil && !*r.DNS.Host
+
+	// Parse port numbers from TCPEgress entries (format "host:port").
+	tcpEgressPorts := make([]int, 0, len(r.TCPEgress))
+	for _, entry := range r.TCPEgress {
+		colon := strings.LastIndex(entry, ":")
+		if colon < 0 {
+			continue
+		}
+		var port int
+		if _, err := fmt.Sscanf(entry[colon+1:], "%d", &port); err == nil && port > 0 {
+			tcpEgressPorts = append(tcpEgressPorts, port)
+		}
+	}
+
 	spawnIn := backend.SpawnInput{
 		Scope:              intent.Scope,
 		Repo:               intent.Repo,
@@ -157,6 +172,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		EgressNetwork:      egressNetworkName(),
 		EgressVolume:       egressVolumeName(),
 		EnableDNSMasq:      enableDNSMasq,
+		TCPEgressPorts:     tcpEgressPorts,
 	}
 	h, err := w.deps.Backend().Spawn(ctx, spawnIn)
 	if err != nil {

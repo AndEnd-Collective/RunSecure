@@ -89,37 +89,68 @@ func TestLabels_AllFourKeys(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
-// ProxySecret
+// SpawnSecret (formerly ProxySecret)
 // -------------------------------------------------------------------
 
 func TestProxySecret_JITKeyDefaultMode(t *testing.T) {
 	in := testInput()
-	s := kube.ProxySecret(in)
+	s := kube.SpawnSecret(in, nil, nil, nil)
 
 	if s.Namespace != kube.Namespace(in.Scope) {
-		t.Errorf("ProxySecret namespace = %q, want %q", s.Namespace, kube.Namespace(in.Scope))
+		t.Errorf("SpawnSecret namespace = %q, want %q", s.Namespace, kube.Namespace(in.Scope))
 	}
 	if len(s.StringData) == 0 && len(s.Data) == 0 {
-		t.Errorf("ProxySecret has no data")
+		t.Errorf("SpawnSecret has no data")
 	}
 	// JIT config key must be present in StringData or Data.
 	_, hasJIT := s.StringData["jit-config"]
 	if !hasJIT {
 		if _, ok := s.Data["jit-config"]; !ok {
-			t.Errorf("ProxySecret missing jit-config key")
+			t.Errorf("SpawnSecret missing jit-config key")
 		}
 	}
 	// Annotations must record the spawn-id.
 	if s.Labels["runsecure.io/spawn-id"] != in.SpawnID {
-		t.Errorf("ProxySecret missing spawn-id label")
+		t.Errorf("SpawnSecret missing spawn-id label")
 	}
 }
 
 func TestProxySecret_HasRunSecureLabels(t *testing.T) {
 	in := testInput()
-	s := kube.ProxySecret(in)
+	s := kube.SpawnSecret(in, nil, nil, nil)
 	if s.Labels["runsecure.io/role"] != "proxy" {
-		t.Errorf("ProxySecret role label = %q, want proxy", s.Labels["runsecure.io/role"])
+		t.Errorf("SpawnSecret role label = %q, want proxy", s.Labels["runsecure.io/role"])
+	}
+}
+
+func TestSpawnSecret_HasAllConfigKeys(t *testing.T) {
+	in := testInput()
+	s := kube.SpawnSecret(in, []byte("squid-cfg"), []byte("haproxy-cfg"), []byte("dnsmasq-cfg"))
+	for _, key := range []string{"jit-config", "squid.conf", "haproxy.cfg", "dnsmasq.conf"} {
+		if _, ok := s.StringData[key]; !ok {
+			t.Errorf("SpawnSecret missing key %q", key)
+		}
+	}
+}
+
+func TestSpawnSecret_OmitsEmptyConfigKeys(t *testing.T) {
+	in := testInput()
+	s := kube.SpawnSecret(in, nil, nil, nil)
+	for _, key := range []string{"squid.conf", "haproxy.cfg", "dnsmasq.conf"} {
+		if _, ok := s.StringData[key]; ok {
+			t.Errorf("SpawnSecret should omit key %q when bytes are nil", key)
+		}
+	}
+	if _, ok := s.StringData["jit-config"]; !ok {
+		t.Errorf("SpawnSecret must always have jit-config")
+	}
+}
+
+func TestSpawnSecret_JITKeyPresent(t *testing.T) {
+	in := testInput()
+	s := kube.SpawnSecret(in, []byte("x"), []byte("y"), []byte("z"))
+	if _, ok := s.StringData["jit-config"]; !ok {
+		t.Errorf("SpawnSecret must always have jit-config key")
 	}
 }
 
@@ -190,14 +221,14 @@ func TestProxyPod_Namespace(t *testing.T) {
 
 func TestRunnerPod_SecurityContext(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "rs-proxy-svc-"+in.SpawnID+"."+kube.Namespace(in.Scope)+".svc.cluster.local")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "rs-proxy-svc-"+in.SpawnID+"."+kube.Namespace(in.Scope)+".svc.cluster.local")
 	assertPodSecurity(t, "RunnerPod", pod)
 }
 
 func TestRunnerPod_HTTPProxy(t *testing.T) {
 	in := testInput()
 	proxyDNS := "rs-proxy-svc-spawn-abc123.runsecure-ci.svc.cluster.local"
-	pod := kube.RunnerPod(in, proxyDNS)
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, proxyDNS)
 
 	wantProxy := "http://" + proxyDNS + ":3128"
 	envMap := containerEnvMap(pod.Spec.Containers[0])
@@ -212,7 +243,7 @@ func TestRunnerPod_HTTPProxy(t *testing.T) {
 func TestRunnerPod_NoProxyEnv(t *testing.T) {
 	in := testInput()
 	proxyDNS := "rs-proxy-svc-spawn-abc123.runsecure-ci.svc.cluster.local"
-	pod := kube.RunnerPod(in, proxyDNS)
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, proxyDNS)
 	envMap := containerEnvMap(pod.Spec.Containers[0])
 	if v, ok := envMap["NO_PROXY"]; !ok || v == "" {
 		t.Errorf("RunnerPod: NO_PROXY env must be set, got %q (present=%v)", v, ok)
@@ -221,7 +252,7 @@ func TestRunnerPod_NoProxyEnv(t *testing.T) {
 
 func TestRunnerPod_RestartPolicyNever(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("RunnerPod restartPolicy = %q, want Never", pod.Spec.RestartPolicy)
 	}
@@ -229,7 +260,7 @@ func TestRunnerPod_RestartPolicyNever(t *testing.T) {
 
 func TestRunnerPod_AutomountSATokenFalse(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
 		t.Errorf("RunnerPod: automountServiceAccountToken must be explicitly false")
 	}
@@ -237,7 +268,7 @@ func TestRunnerPod_AutomountSATokenFalse(t *testing.T) {
 
 func TestRunnerPod_NoHostNamespaces(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if pod.Spec.HostNetwork || pod.Spec.HostPID || pod.Spec.HostIPC {
 		t.Errorf("RunnerPod: host namespaces must not be enabled")
 	}
@@ -245,7 +276,7 @@ func TestRunnerPod_NoHostNamespaces(t *testing.T) {
 
 func TestRunnerPod_SingleContainer(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if len(pod.Spec.Containers) != 1 {
 		t.Errorf("RunnerPod: got %d containers, want 1", len(pod.Spec.Containers))
 	}
@@ -253,7 +284,7 @@ func TestRunnerPod_SingleContainer(t *testing.T) {
 
 func TestRunnerPod_Labels(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if pod.Labels["runsecure.io/role"] != "runner" {
 		t.Errorf("RunnerPod: role label = %q, want runner", pod.Labels["runsecure.io/role"])
 	}
@@ -261,9 +292,154 @@ func TestRunnerPod_Labels(t *testing.T) {
 
 func TestRunnerPod_Namespace(t *testing.T) {
 	in := testInput()
-	pod := kube.RunnerPod(in, "proxy.svc")
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	if pod.Namespace != kube.Namespace(in.Scope) {
 		t.Errorf("RunnerPod namespace = %q, want %q", pod.Namespace, kube.Namespace(in.Scope))
+	}
+}
+
+// -------------------------------------------------------------------
+// ProxyPod env var tests
+// -------------------------------------------------------------------
+
+func TestProxyPod_MountsSQUID_CFG_Env(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	squid := pod.Spec.Containers[0] // first container is squid
+	envMap := containerEnvMap(squid)
+	if v, ok := envMap["SQUID_CFG"]; !ok || v != "/etc/runsecure/squid.conf" {
+		t.Errorf("squid container SQUID_CFG = %q, want /etc/runsecure/squid.conf", v)
+	}
+}
+
+func TestProxyPod_MountsHAPROXY_CFG_Env(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	squid := pod.Spec.Containers[0]
+	envMap := containerEnvMap(squid)
+	if v, ok := envMap["HAPROXY_CFG"]; !ok || v != "/etc/runsecure/haproxy.cfg" {
+		t.Errorf("squid container HAPROXY_CFG = %q, want /etc/runsecure/haproxy.cfg", v)
+	}
+	if v, ok := envMap["ENABLE_HAPROXY"]; !ok || v != "true" {
+		t.Errorf("squid container ENABLE_HAPROXY = %q, want true", v)
+	}
+}
+
+func TestProxyPod_EnableDNSMasq_EnvTrue(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = true
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	// Check dnsmasq container (index 2 when enabled)
+	found := false
+	for _, c := range pod.Spec.Containers {
+		em := containerEnvMap(c)
+		if v, ok := em["ENABLE_DNSMASQ"]; ok && v == "true" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ProxyPod with EnableDNSMasq=true must have ENABLE_DNSMASQ=true on at least one container")
+	}
+}
+
+func TestProxyPod_NoEnableDNSMasq_EnvAbsent(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = false
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	for _, c := range pod.Spec.Containers {
+		em := containerEnvMap(c)
+		if _, ok := em["ENABLE_DNSMASQ"]; ok {
+			t.Errorf("container %s must not have ENABLE_DNSMASQ when EnableDNSMasq=false", c.Name)
+		}
+	}
+}
+
+func TestProxyPod_SecretVolumeItemsContainConfigKeys(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	var secretVol *corev1.SecretVolumeSource
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil {
+			secretVol = v.Secret
+			break
+		}
+	}
+	if secretVol == nil {
+		t.Fatal("ProxyPod: no secret volume found")
+	}
+	keys := map[string]bool{}
+	for _, item := range secretVol.Items {
+		keys[item.Key] = true
+	}
+	for _, k := range []string{"squid.conf", "haproxy.cfg", "dnsmasq.conf"} {
+		if !keys[k] {
+			t.Errorf("ProxyPod secret volume Items missing key %q", k)
+		}
+	}
+}
+
+func TestProxyPod_DoesNotMountJITConfigKey(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil {
+			for _, item := range v.Secret.Items {
+				if item.Key == "jit-config" {
+					t.Errorf("ProxyPod must NOT project jit-config key (runner only)")
+				}
+			}
+		}
+	}
+}
+
+// -------------------------------------------------------------------
+// RunnerPod secret/jit tests
+// -------------------------------------------------------------------
+
+func TestRunnerPod_HasJITConfigFileEnv(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	envMap := containerEnvMap(pod.Spec.Containers[0])
+	if v, ok := envMap["RUNNER_JIT_CONFIG_FILE"]; !ok || v != "/var/run/runsecure/jit-config" {
+		t.Errorf("runner container RUNNER_JIT_CONFIG_FILE = %q, want /var/run/runsecure/jit-config", v)
+	}
+}
+
+func TestRunnerPod_MountsJITSecretWith0400(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	var secretVol *corev1.SecretVolumeSource
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil {
+			secretVol = v.Secret
+			break
+		}
+	}
+	if secretVol == nil {
+		t.Fatal("RunnerPod: no secret volume found")
+	}
+	if secretVol.DefaultMode == nil || *secretVol.DefaultMode != int32(0o400) {
+		t.Errorf("RunnerPod secret volume defaultMode = %v, want 0o400", secretVol.DefaultMode)
+	}
+	hasJIT := false
+	for _, item := range secretVol.Items {
+		if item.Key == "jit-config" {
+			hasJIT = true
+		}
+	}
+	if !hasJIT {
+		t.Errorf("RunnerPod secret volume Items must contain key jit-config")
+	}
+}
+
+func TestRunnerPod_DoesNotMountSQUIDCFG(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	for _, c := range pod.Spec.Containers {
+		em := containerEnvMap(c)
+		if _, ok := em["SQUID_CFG"]; ok {
+			t.Errorf("runner container must NOT have SQUID_CFG env var")
+		}
 	}
 }
 

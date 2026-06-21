@@ -144,29 +144,41 @@ func spawnResourceName(kind, spawnID string) string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ProxySecret
+// SpawnSecret
 // ──────────────────────────────────────────────────────────────────────────────
 
-// ProxySecret builds the per-spawn Secret that carries the GitHub JIT config
-// and rendered egress configs.  The JIT config key is projected with
-// defaultMode 0o400 (read-only by owner) via the Secret's DefaultMode field.
+// SpawnSecret builds the per-spawn Secret that carries the GitHub JIT config
+// and optionally rendered egress configs.  The JIT config key is always
+// present; proxy config keys (squid.conf, haproxy.cfg, dnsmasq.conf) are
+// included only when the corresponding bytes are non-nil and non-empty.
 //
 // The Secret acts as the *owning* object for the spawn stack: deleting it
 // cascades (via ownerReferences set on other objects) to remove all per-spawn
 // resources.
-func ProxySecret(in backend.SpawnInput) *corev1.Secret {
+func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte) *corev1.Secret {
 	ns := Namespace(in.Scope)
 	name := spawnResourceName("secret", in.SpawnID)
 	labels := Labels(in, RoleProxy)
+
+	sd := map[string]string{
+		"jit-config": in.JITConfigB64,
+	}
+	if len(squidCfg) > 0 {
+		sd["squid.conf"] = string(squidCfg)
+	}
+	if len(haproxyCfg) > 0 {
+		sd["haproxy.cfg"] = string(haproxyCfg)
+	}
+	if len(dnsmasqCfg) > 0 {
+		sd["dnsmasq.conf"] = string(dnsmasqCfg)
+	}
 
 	return &corev1.Secret{
 		ObjectMeta: objectMeta(name, ns, labels),
 		// defaultMode 0o400 — read-only by the owning UID; no group/world access.
 		// Individual volumes that mount from this Secret should also specify mode 0o400.
-		Immutable: ptr(false), // allow the orchestrator to patch egress configs
-		StringData: map[string]string{
-			"jit-config": in.JITConfigB64,
-		},
+		Immutable:  ptr(false), // allow the orchestrator to patch egress configs
+		StringData: sd,
 	}
 }
 
@@ -179,19 +191,25 @@ func ProxySecret(in backend.SpawnInput) *corev1.Secret {
 //   - 2 containers when EnableDNSMasq is false (squid, haproxy).
 //   - 3 containers when EnableDNSMasq is true  (squid, haproxy, dnsmasq).
 //
-// The JIT config and rendered egress configs are mounted from secretName with
-// mode 0o400.
+// The proxy egress configs are mounted from secretName under /etc/runsecure
+// with mode 0o400 using KeyToPath projection (jit-config is NOT projected here;
+// the runner pod mounts that key separately).
 func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 	ns := Namespace(in.Scope)
 	labels := Labels(in, RoleProxy)
 
-	// Secret volume for JIT config + egress configs.
+	// Secret volume projects only the proxy config keys (not jit-config).
 	secretVolume := corev1.Volume{
 		Name: "jit-secret",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  secretName,
 				DefaultMode: ptr(int32(0o400)),
+				Items: []corev1.KeyToPath{
+					{Key: "squid.conf", Path: "squid.conf"},
+					{Key: "haproxy.cfg", Path: "haproxy.cfg"},
+					{Key: "dnsmasq.conf", Path: "dnsmasq.conf"},
+				},
 			},
 		},
 	}
@@ -207,7 +225,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 
 	secretMount := corev1.VolumeMount{
 		Name:      "jit-secret",
-		MountPath: "/var/run/runsecure/secrets",
+		MountPath: "/etc/runsecure",
 		ReadOnly:  true,
 	}
 	tmpMount := corev1.VolumeMount{
@@ -216,11 +234,23 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		ReadOnly:  false,
 	}
 
+	// Common env vars for all proxy containers.
+	proxyEnv := []corev1.EnvVar{
+		{Name: "SQUID_CFG", Value: "/etc/runsecure/squid.conf"},
+		{Name: "HAPROXY_CFG", Value: "/etc/runsecure/haproxy.cfg"},
+		{Name: "ENABLE_HAPROXY", Value: "true"},
+		{Name: "DNSMASQ_CFG", Value: "/etc/runsecure/dnsmasq.conf"},
+	}
+	if in.EnableDNSMasq {
+		proxyEnv = append(proxyEnv, corev1.EnvVar{Name: "ENABLE_DNSMASQ", Value: "true"})
+	}
+
 	squid := corev1.Container{
 		Name:            "squid",
 		Image:           in.ProxyImage,
 		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: hardContainerSecCtx(),
+		Env:             proxyEnv,
 		VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
 		Ports: []corev1.ContainerPort{
 			{Name: "squid", ContainerPort: proxyPort, Protocol: corev1.ProtocolTCP},
@@ -231,6 +261,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		Image:           in.ProxyImage,
 		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: hardContainerSecCtx(),
+		Env:             proxyEnv,
 		VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
 		Args:            []string{"haproxy"},
 	}
@@ -242,6 +273,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 			Image:           in.ProxyImage,
 			ImagePullPolicy: corev1.PullAlways,
 			SecurityContext: hardContainerSecCtx(),
+			Env:             proxyEnv,
 			VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
 			Args:            []string{"dnsmasq"},
 			Ports: []corev1.ContainerPort{
@@ -277,21 +309,23 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 //     http://<proxyServiceDNS>:3128.
 //   - NO_PROXY excludes the cluster-local address space so kube API calls are
 //     not routed through the proxy.
+//   - RUNNER_JIT_CONFIG_FILE points to the projected jit-config key.
 //   - restartPolicy: Never (one-shot CI runner; GH Actions expects exit code).
-func RunnerPod(in backend.SpawnInput, proxyServiceDNS string) *corev1.Pod {
+func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev1.Pod {
 	ns := Namespace(in.Scope)
 	labels := Labels(in, RoleRunner)
 
 	proxyURL := fmt.Sprintf("http://%s:%d", proxyServiceDNS, proxyPort)
 	noProxy := "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc.cluster.local,.cluster.local"
 
-	proxyEnv := []corev1.EnvVar{
+	runnerEnv := []corev1.EnvVar{
 		{Name: "HTTP_PROXY", Value: proxyURL},
 		{Name: "HTTPS_PROXY", Value: proxyURL},
 		{Name: "http_proxy", Value: proxyURL},
 		{Name: "https_proxy", Value: proxyURL},
 		{Name: "NO_PROXY", Value: noProxy},
 		{Name: "no_proxy", Value: noProxy},
+		{Name: "RUNNER_JIT_CONFIG_FILE", Value: "/var/run/runsecure/jit-config"},
 	}
 
 	// tmpfs so the runner can write to /tmp (readOnlyRootFilesystem=true).
@@ -309,13 +343,32 @@ func RunnerPod(in backend.SpawnInput, proxyServiceDNS string) *corev1.Pod {
 		ReadOnly:  false,
 	}
 
+	// Secret volume projects only the jit-config key for the runner.
+	jitVolume := corev1.Volume{
+		Name: "jit-secret",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  secretName,
+				DefaultMode: ptr(int32(0o400)),
+				Items: []corev1.KeyToPath{
+					{Key: "jit-config", Path: "jit-config"},
+				},
+			},
+		},
+	}
+	jitMount := corev1.VolumeMount{
+		Name:      "jit-secret",
+		MountPath: "/var/run/runsecure",
+		ReadOnly:  true,
+	}
+
 	runner := corev1.Container{
 		Name:            "runner",
 		Image:           in.RunnerImage,
 		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: hardContainerSecCtx(),
-		Env:             proxyEnv,
-		VolumeMounts:    []corev1.VolumeMount{tmpMount},
+		Env:             runnerEnv,
+		VolumeMounts:    []corev1.VolumeMount{tmpMount, jitMount},
 	}
 
 	return &corev1.Pod{
@@ -327,7 +380,7 @@ func RunnerPod(in backend.SpawnInput, proxyServiceDNS string) *corev1.Pod {
 			HostPID:                      false,
 			HostIPC:                      false,
 			SecurityContext:              hardPodSecCtx(),
-			Volumes:                      []corev1.Volume{tmpVolume},
+			Volumes:                      []corev1.Volume{tmpVolume, jitVolume},
 			Containers:                   []corev1.Container{runner},
 		},
 	}

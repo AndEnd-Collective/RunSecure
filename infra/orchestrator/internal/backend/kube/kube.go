@@ -8,6 +8,8 @@ package kube
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,8 +55,24 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		return backend.Handle{}, fmt.Errorf("kube backend: ensure namespace: %w", err)
 	}
 
+	// Read rendered egress config files. Missing files are silently ignored —
+	// the proxy containers pick up what is available via env vars.
+	readEgressFile := func(name string) []byte {
+		if in.EgressConfigDir == "" {
+			return nil
+		}
+		b, err := os.ReadFile(filepath.Join(in.EgressConfigDir, name))
+		if err != nil {
+			return nil
+		}
+		return b
+	}
+	squidBytes := readEgressFile("squid.conf")
+	haproxyBytes := readEgressFile("haproxy.cfg")
+	dnsmasqBytes := readEgressFile("dnsmasq.conf")
+
 	// Build the per-spawn objects.
-	secret := kube.ProxySecret(in)
+	secret := kube.SpawnSecret(in, squidBytes, haproxyBytes, dnsmasqBytes)
 	svc := kube.ProxyService(in)
 	policies := []*networkingv1.NetworkPolicy{
 		kube.RunnerEgressNetworkPolicy(in),
@@ -67,7 +85,7 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 	proxyServiceDNS := fmt.Sprintf("%s.%s.svc", svc.Name, ns)
 
 	proxyPod := kube.ProxyPod(in, secret.Name)
-	runnerPod := kube.RunnerPod(in, proxyServiceDNS)
+	runnerPod := kube.RunnerPod(in, secret.Name, proxyServiceDNS)
 
 	objs := kube.SpawnObjects{
 		Secret:    secret,
