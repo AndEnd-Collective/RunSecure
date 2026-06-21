@@ -42,3 +42,14 @@ func TestRebuildFromDocker_EmptyList(t *testing.T) {
 	require.Empty(t, orphans)
 	require.Equal(t, 0, s.GlobalInFlight())
 }
+
+func TestRebuildFromDocker_NewSingleProxyRole(t *testing.T) {
+	s := New()
+	listed := []docker.Container{
+		{ID: "r1", Labels: map[string]string{"runsecure.role": "runner", "runsecure.repo": "o/a", "runsecure.spawn_id": "s1"}},
+		{ID: "p1", Labels: map[string]string{"runsecure.role": "proxy", "runsecure.spawn_id": "s1"}},
+	}
+	orphans := RebuildFromDocker(s, listed)
+	require.Empty(t, orphans)
+	require.Equal(t, 1, s.InFlight("o/a"))
+}

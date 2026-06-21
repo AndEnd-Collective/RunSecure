@@ -36,7 +36,7 @@ func RebuildFromDocker(s *State, listed []docker.Container) []Orphan {
 			if repo != "" {
 				s.IncrementInFlight(repo)
 			}
-		case "proxy", "squid", "haproxy", "dnsmasq":
+		case "proxy":
 			proxies = append(proxies, proxyEntry{containerID: c.ID, spawnID: spawnID})
 		}
 	}
