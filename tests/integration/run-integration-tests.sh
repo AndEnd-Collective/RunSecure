@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --test)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress)"
+                echo "ERROR: --test requires a value (egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress|egress-spawn-e2e)"
                 exit 1
             fi
             SINGLE_TEST="$2"
@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$SINGLE_TEST" ]]; then
-    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress"
+    valid_tests="egress|node|python|rust|attack|entrypoint|log-loss|log-loss-retention|schema|ssrf|tcp-validate|dns-validate|tcp-egress|dns|orch-egress|socket-proxy-egress|egress-spawn-e2e"
     if ! echo "$SINGLE_TEST" | grep -qE "^(${valid_tests})$"; then
         echo "ERROR: --test requires a value (${valid_tests})"
         exit 1
@@ -405,6 +405,17 @@ if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "socket-proxy-egress" ]]; then
         run_orch_compose_test "compose-egress-attach-deny.sh"
 else
     skip_step "Socket-proxy egress-attach isolation gate" "--test $SINGLE_TEST"
+fi
+
+# ============================================================================
+# Phase 17: Orchestrator Spawn-Path Egress Delivery E2E (Task 12 / 2.0.0 gate)
+# ============================================================================
+if [[ -z "$SINGLE_TEST" || "$SINGLE_TEST" == "egress-spawn-e2e" ]]; then
+    echo -e "\n${BOLD}--- Phase 17: Orchestrator Spawn-Path Egress Delivery E2E ---${NC}"
+    step "Egress spawn e2e: real orchestrator spawn delivers configs via volume + enforces egress" \
+        run_orch_compose_test "compose-egress-spawn-e2e.sh"
+else
+    skip_step "Orchestrator spawn-path egress delivery e2e" "--test $SINGLE_TEST"
 fi
 
 # ============================================================================

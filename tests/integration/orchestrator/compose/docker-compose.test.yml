@@ -50,6 +50,23 @@ services:
       # Must match the orchestrator's RUNSECURE_EGRESS_VOLUME.
       RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
 
+  egress-init:
+    # One-shot container that sets the ownership of the shared egress-configs
+    # volume root to UID 65532 (the orchestrator's non-root user). Docker
+    # always creates named volume roots as root:root 755; without this step
+    # the orchestrator cannot create per-spawn subdirs and every spawn fails
+    # with egress_render / "permission denied".
+    # CAP_CHOWN is required to change file ownership; it is dropped after
+    # this service exits and is never present in the long-running services.
+    image: alpine:3.22
+    container_name: rs-test-egress-init
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["chown", "65532:65532", "/data"]
+    volumes:
+      - egress-configs:/data
+    security_opt: ["no-new-privileges:true"]
+
   orchestrator:
     image: runsecure-orchestrator:local
     container_name: rs-test-orchestrator
@@ -58,7 +75,13 @@ services:
     security_opt: ["no-new-privileges:true"]
     user: "65532:65532"
     networks: [test-net]
-    depends_on: [mock-github, socket-proxy]
+    depends_on:
+      mock-github:
+        condition: service_started
+      socket-proxy:
+        condition: service_started
+      egress-init:
+        condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
       DOCKER_HOST: "tcp://socket-proxy:2375"

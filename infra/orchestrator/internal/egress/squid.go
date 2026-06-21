@@ -89,5 +89,14 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	}
 	b.WriteString("http_access deny all\n")
 	b.WriteString("visible_hostname runsecure-proxy\n")
+	// Runtime paths that must be writable even on a read-only rootfs.
+	// The proxy container is spawned with tmpfs on /var/run/squid and
+	// /var/log/squid; setting these explicitly avoids squid falling back to
+	// its compiled-in default (/run/squid.pid) which is root-only on Debian.
+	b.WriteString("pid_filename /var/run/squid/squid.pid\n")
+	b.WriteString("access_log stdio:/var/log/squid/access.log\n")
+	b.WriteString("cache_log /var/log/squid/cache.log\n")
+	b.WriteString("cache deny all\n")
+	b.WriteString("coredump_dir /var/spool/squid\n")
 	return b.Bytes()
 }

@@ -34,10 +34,11 @@ func TestRenderSquid_WildcardInjectionBlocked(t *testing.T) {
 	if strings.Contains(out, "acl allowed_domains dstdomain foo") {
 		t.Fatalf("poisoned wildcard suffix should have been dropped, but was emitted:\n%s", out)
 	}
-	// http_access deny all must still be last.
+	// The runtime-path directives must appear after all access rules.
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if lines[len(lines)-1] != "visible_hostname runsecure-proxy" {
-		t.Fatalf("last line must be visible_hostname, got: %s", lines[len(lines)-1])
+	lastLine := lines[len(lines)-1]
+	if lastLine != "coredump_dir /var/spool/squid" {
+		t.Fatalf("last line must be coredump_dir directive, got: %s", lastLine)
 	}
 }
 
