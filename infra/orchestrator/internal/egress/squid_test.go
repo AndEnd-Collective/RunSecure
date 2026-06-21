@@ -68,3 +68,59 @@ func TestRenderSquid_DenyAllIsLast(t *testing.T) {
 		t.Fatalf("http_access deny all must come AFTER allow; deny at %d, allow at %d\n%s", denyIdx, allowIdx, out)
 	}
 }
+
+// TestRenderSquid_PrivateIPDenyPrecedesAllow verifies that an explicit
+// "http_access deny rs_private_dst" line is emitted BEFORE the
+// "http_access allow allowed_domains" line. This gives defense-in-depth
+// against DNS-rebinding: even if a hostname resolves to a private IP, Squid
+// will deny the connection based on the resolved destination address.
+func TestRenderSquid_PrivateIPDenyPrecedesAllow(t *testing.T) {
+	r := &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"api.github.com"}}}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+
+	// The private-dst ACL definition must be present.
+	if !strings.Contains(out, "acl rs_private_dst dst") {
+		t.Fatalf("expected 'acl rs_private_dst dst' in squid config:\n%s", out)
+	}
+
+	// The explicit deny must be present.
+	const denyLine = "http_access deny rs_private_dst"
+	if !strings.Contains(out, denyLine) {
+		t.Fatalf("expected %q in squid config:\n%s", denyLine, out)
+	}
+
+	// The deny must come BEFORE the allow.
+	denyIdx := strings.Index(out, denyLine)
+	allowIdx := strings.Index(out, "http_access allow allowed_domains")
+	if denyIdx >= allowIdx {
+		t.Fatalf("private-IP deny (pos %d) must precede allow (pos %d):\n%s", denyIdx, allowIdx, out)
+	}
+}
+
+// TestRenderSquid_PrivateIPRangesCovered verifies that all required private and
+// special-use IP ranges appear in the rs_private_dst ACL.
+func TestRenderSquid_PrivateIPRangesCovered(t *testing.T) {
+	r := &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"api.github.com"}}}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+
+	required := []string{
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"0.0.0.0/8",
+		"::1/128",
+		"fe80::/10",
+		"fc00::/7",
+	}
+	for _, cidr := range required {
+		if !strings.Contains(out, cidr) {
+			t.Errorf("private-IP range %q missing from squid config:\n%s", cidr, out)
+		}
+	}
+}

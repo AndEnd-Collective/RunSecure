@@ -24,6 +24,22 @@ func sanitizeDomain(d string) string {
 	return ""
 }
 
+// privateRanges lists private, loopback, link-local, and special-use IP
+// ranges that runners must never reach. Squid resolves the destination IP and
+// denies if it falls in one of these CIDRs — independent of the domain
+// allowlist, providing DNS-rebinding defense for HTTP.
+var privateRanges = []string{
+	"127.0.0.0/8",    // loopback
+	"169.254.0.0/16", // link-local / cloud IMDS
+	"10.0.0.0/8",     // RFC-1918
+	"172.16.0.0/12",  // RFC-1918
+	"192.168.0.0/16", // RFC-1918
+	"0.0.0.0/8",      // "this" network
+	"::1/128",        // IPv6 loopback
+	"fe80::/10",      // IPv6 link-local
+	"fc00::/7",       // IPv6 unique-local
+}
+
 // RenderSquid produces a squid configuration with the project's egress
 // domains and any wildcard entries (if the resolved policy permits).
 // Reads domains from ResolvedHTTPEgress() to support the new schema.
@@ -32,6 +48,14 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	b.WriteString("# RunSecure squid.conf — generated per-spawn. Do not edit.\n")
 	b.WriteString("http_port 3128\n")
 	b.WriteString("acl localnet src 0.0.0.0/0\n")
+
+	// Explicit deny ACL for private/special-use IP ranges. Placed before the
+	// domain allowlist so that an allowed hostname that DNS-resolves to a
+	// private IP is still blocked (DNS-rebinding defense).
+	for _, cidr := range privateRanges {
+		fmt.Fprintf(&b, "acl rs_private_dst dst %s\n", cidr)
+	}
+	b.WriteString("http_access deny rs_private_dst\n")
 
 	// Project allowlist (exact-match domains).
 	b.WriteString("acl allowed_domains dstdomain\n")
