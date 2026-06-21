@@ -87,11 +87,11 @@ func TestSpawn_CreatesAllObjects(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, svcs.Items, 1, "exactly one Service must be created by Spawn")
 
-	// ── NetworkPolicies (runner-egress + proxy-egress, plus default-deny) ─
+	// ── NetworkPolicies (runner-egress + proxy-egress + proxy-ingress + default-deny) ─
 	policies, err := cs.NetworkingV1().NetworkPolicies(ns).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	// 3 total: default-deny-all + runner-egress + proxy-egress
-	assert.Len(t, policies.Items, 3, "must have 3 NetworkPolicies after Spawn")
+	// 4 total: default-deny-all + runner-egress + proxy-egress + proxy-ingress
+	assert.Len(t, policies.Items, 4, "must have 4 NetworkPolicies after Spawn")
 
 	// ── ProxyPod ──────────────────────────────────────────────────────────
 	proxyPodName := h.Refs["proxy_pod"]
@@ -142,6 +142,48 @@ func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
 		_, ok := h.Refs[key]
 		assert.True(t, ok, "Handle.Refs must contain key %q", key)
 	}
+}
+
+// TestSpawn_CreatesProxyIngressPolicy verifies that after a successful Spawn the
+// fake cluster contains the ProxyIngress NetworkPolicy that allows the runner
+// to reach the proxy on port 3128. This is the production bug fix: without this
+// policy, the default-deny blocks proxy pod ingress under a real CNI (Calico).
+func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
+	b, cs := newBackend(t)
+	ctx := context.Background()
+	in := testInput("spawn-proxy-ingress")
+
+	_, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+
+	ns := kube.Namespace(in.Scope)
+	expectedName := "rs-proxy-ingress-spawn-proxy-ingress"
+
+	pol, err := cs.NetworkingV1().NetworkPolicies(ns).Get(ctx, expectedName, metav1.GetOptions{})
+	require.NoError(t, err, "proxy-ingress NetworkPolicy must be created by Spawn")
+
+	// Must target the proxy pod of this spawn.
+	require.NotNil(t, pol.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, "proxy", pol.Spec.PodSelector.MatchLabels["runsecure.io/role"],
+		"proxy-ingress podSelector must select role=proxy")
+	assert.Equal(t, in.SpawnID, pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"],
+		"proxy-ingress podSelector must pin this spawn-id")
+
+	// Must have Ingress type only.
+	require.Len(t, pol.Spec.PolicyTypes, 1, "proxy-ingress must declare exactly one policyType")
+	assert.Equal(t, "Ingress", string(pol.Spec.PolicyTypes[0]),
+		"proxy-ingress policyType must be Ingress")
+
+	// Must have at least one ingress rule allowing the runner.
+	require.NotEmpty(t, pol.Spec.Ingress, "proxy-ingress must have ingress rules")
+	rule := pol.Spec.Ingress[0]
+	require.NotEmpty(t, rule.From, "proxy-ingress rule must have From peers")
+	peer := rule.From[0]
+	require.NotNil(t, peer.PodSelector, "proxy-ingress From peer must have podSelector")
+	assert.Equal(t, "runner", peer.PodSelector.MatchLabels["runsecure.io/role"],
+		"proxy-ingress From must select role=runner")
+	assert.Equal(t, in.SpawnID, peer.PodSelector.MatchLabels["runsecure.io/spawn-id"],
+		"proxy-ingress From must pin the same spawn-id (cross-spawn isolation)")
 }
 
 // TestSpawn_Idempotent_Namespace verifies that calling Spawn on the same scope

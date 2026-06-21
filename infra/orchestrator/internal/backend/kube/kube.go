@@ -59,6 +59,7 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 	policies := []*networkingv1.NetworkPolicy{
 		kube.RunnerEgressNetworkPolicy(in),
 		kube.ProxyEgressNetworkPolicy(in),
+		kube.ProxyIngressNetworkPolicy(in),
 	}
 
 	// Derive the proxy Service DNS name: <svcName>.<namespace>.svc

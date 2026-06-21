@@ -10,7 +10,15 @@
 #    - PolicyType: Egress only
 #    - Egress: to role=proxy, spawn-id=spawn01 on 3128/TCP
 #
-# 3. ProxyEgressNetworkPolicy for spawn01:
+# 3. ProxyIngressNetworkPolicy for spawn01 (matches ProxyIngressNetworkPolicy builder):
+#    - name: rs-proxy-ingress-spawn01, namespace: runsecure-itest
+#    - selector: role=proxy, spawn-id=spawn01
+#    - PolicyType: Ingress only
+#    - Ingress: from role=runner, spawn-id=spawn01 on 3128/TCP
+#    - Required so Calico/real CNI allows runner→proxy ingress under default-deny.
+#    - From selector pins spawn-id for cross-spawn isolation.
+#
+# 4. ProxyEgressNetworkPolicy for spawn01:
 #    - name: rs-proxy-egress-spawn01, namespace: runsecure-itest
 #    - selector: role=proxy, spawn-id=spawn01
 #    - PolicyType: Egress only
@@ -59,12 +67,14 @@ spec:
         - protocol: TCP
           port: 3128
 ---
-# Proxy ingress — allows the runner pod (spawn01) to send traffic to the proxy
-# pod on port 3128. This is the ingress counterpart to RunnerEgressNetworkPolicy.
-# Without this, the default-deny-all policy blocks all ingress to the proxy pod.
-# In the real orchestrator, kube-proxy translates the Service ClusterIP to the
+# Proxy ingress — matches ProxyIngressNetworkPolicy(SpawnInput{Scope:"itest", SpawnID:"spawn01"})
+# Allows the runner pod (spawn01) to send traffic to the proxy pod on port 3128.
+# This is the ingress counterpart to RunnerEgressNetworkPolicy.
+# Without this, the default-deny-all policy blocks all ingress to the proxy pod
+# under a real CNI (Calico). kube-proxy translates the Service ClusterIP to the
 # proxy pod IP; Calico sees runner→proxy-pod-IP, which requires both an egress
 # rule on the runner AND an ingress rule on the proxy.
+# The From selector pins spawn-id=spawn01 for cross-spawn isolation.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

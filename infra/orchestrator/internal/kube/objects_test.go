@@ -613,6 +613,181 @@ func TestProxyEgressNetworkPolicy_Namespace(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
+// ProxyIngressNetworkPolicy
+// -------------------------------------------------------------------
+
+func TestProxyIngressNetworkPolicy_IngressTypeOnly(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+
+	hasIngress := false
+	for _, pt := range pol.Spec.PolicyTypes {
+		if pt == networkingv1.PolicyTypeIngress {
+			hasIngress = true
+		}
+		if pt == networkingv1.PolicyTypeEgress {
+			t.Errorf("ProxyIngress: must not have Egress policyType")
+		}
+	}
+	if !hasIngress {
+		t.Errorf("ProxyIngress: missing Ingress policyType")
+	}
+}
+
+func TestProxyIngressNetworkPolicy_PodSelectorIsProxyThisSpawn(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+
+	if pol.Spec.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" {
+		t.Errorf("ProxyIngress: podSelector role = %q, want proxy",
+			pol.Spec.PodSelector.MatchLabels["runsecure.io/role"])
+	}
+	if pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+		t.Errorf("ProxyIngress: podSelector spawn-id = %q, want %q",
+			pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"], in.SpawnID)
+	}
+}
+
+func TestProxyIngressNetworkPolicy_FromSelectorIsRunnerSameSpawn(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+
+	if len(pol.Spec.Ingress) == 0 {
+		t.Fatalf("ProxyIngress: no ingress rules")
+	}
+	rule := pol.Spec.Ingress[0]
+	if len(rule.From) == 0 {
+		t.Fatalf("ProxyIngress: ingress rule has no From peers")
+	}
+	for _, peer := range rule.From {
+		if peer.PodSelector == nil {
+			t.Errorf("ProxyIngress: From peer must have podSelector, got %+v", peer)
+			continue
+		}
+		if peer.PodSelector.MatchLabels["runsecure.io/role"] != "runner" {
+			t.Errorf("ProxyIngress: From peer role = %q, want runner",
+				peer.PodSelector.MatchLabels["runsecure.io/role"])
+		}
+		// Cross-spawn isolation: the From selector must pin the same spawn-id
+		// so runners from other spawns cannot reach this proxy.
+		if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+			t.Errorf("ProxyIngress: From peer spawn-id = %q, want %q (cross-spawn isolation violated)",
+				peer.PodSelector.MatchLabels["runsecure.io/spawn-id"], in.SpawnID)
+		}
+	}
+}
+
+func TestProxyIngressNetworkPolicy_Port3128(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if !networkPolicyIngressHasPort(pol.Spec.Ingress, 3128) {
+		t.Errorf("ProxyIngress: missing port 3128")
+	}
+}
+
+func TestProxyIngressNetworkPolicy_TCPEgressPorts(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	for _, p := range in.TCPEgressPorts {
+		if !networkPolicyIngressHasPort(pol.Spec.Ingress, int32(p)) {
+			t.Errorf("ProxyIngress: missing TCPEgressPort %d", p)
+		}
+	}
+}
+
+func TestProxyIngressNetworkPolicy_DNSMasqPort53(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = true
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if !networkPolicyIngressHasPort(pol.Spec.Ingress, 53) {
+		t.Errorf("ProxyIngress: missing port 53 when dnsmasq enabled")
+	}
+}
+
+func TestProxyIngressNetworkPolicy_NoDNSPortWhenDisabled(t *testing.T) {
+	in := testInput()
+	in.EnableDNSMasq = false
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if networkPolicyIngressHasPort(pol.Spec.Ingress, 53) {
+		t.Errorf("ProxyIngress: port 53 must not appear when dnsmasq disabled")
+	}
+}
+
+func TestProxyIngressNetworkPolicy_Namespace(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if pol.Namespace != kube.Namespace(in.Scope) {
+		t.Errorf("ProxyIngress namespace = %q, want %q", pol.Namespace, kube.Namespace(in.Scope))
+	}
+}
+
+func TestProxyIngressNetworkPolicy_CrossSpawnIsolation(t *testing.T) {
+	// Two spawns: spawnA and spawnB. Their ingress policies must each pin
+	// their own spawn-id in both the podSelector (which proxy is targeted)
+	// and the From selector (which runner is allowed). This ensures spawn B's
+	// runner cannot reach spawn A's proxy.
+	inA := testInput()
+	inA.SpawnID = "spawn-aaa"
+	inB := testInput()
+	inB.SpawnID = "spawn-bbb"
+
+	polA := kube.ProxyIngressNetworkPolicy(inA)
+	polB := kube.ProxyIngressNetworkPolicy(inB)
+
+	// polA must target spawnA's proxy and allow only spawnA's runner.
+	if polA.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-aaa" {
+		t.Errorf("polA podSelector spawn-id = %q, want spawn-aaa",
+			polA.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+	}
+	for _, rule := range polA.Spec.Ingress {
+		for _, peer := range rule.From {
+			if peer.PodSelector != nil {
+				if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-aaa" {
+					t.Errorf("polA From spawn-id = %q, want spawn-aaa (cross-spawn isolation broken)",
+						peer.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+				}
+			}
+		}
+	}
+
+	// polB must target spawnB's proxy and allow only spawnB's runner.
+	if polB.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-bbb" {
+		t.Errorf("polB podSelector spawn-id = %q, want spawn-bbb",
+			polB.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+	}
+	for _, rule := range polB.Spec.Ingress {
+		for _, peer := range rule.From {
+			if peer.PodSelector != nil {
+				if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-bbb" {
+					t.Errorf("polB From spawn-id = %q, want spawn-bbb (cross-spawn isolation broken)",
+						peer.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+				}
+			}
+		}
+	}
+}
+
+func TestProxyIngressNetworkPolicy_NoEgressRules(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if len(pol.Spec.Egress) != 0 {
+		t.Errorf("ProxyIngress: egress rules must be empty, got %d", len(pol.Spec.Egress))
+	}
+}
+
+func TestProxyIngressNetworkPolicy_ObjectMetaLabels(t *testing.T) {
+	in := testInput()
+	pol := kube.ProxyIngressNetworkPolicy(in)
+	if pol.Labels["runsecure.io/role"] != "proxy" {
+		t.Errorf("ProxyIngress: role label = %q, want proxy", pol.Labels["runsecure.io/role"])
+	}
+	if pol.Labels["runsecure.io/spawn-id"] != in.SpawnID {
+		t.Errorf("ProxyIngress: spawn-id label = %q, want %q",
+			pol.Labels["runsecure.io/spawn-id"], in.SpawnID)
+	}
+}
+
+// -------------------------------------------------------------------
 // OwnerRef
 // -------------------------------------------------------------------
 
@@ -722,6 +897,18 @@ func hasServicePort(svc *corev1.Service, port int32) bool {
 }
 
 func networkPolicyHasPort(rules []networkingv1.NetworkPolicyEgressRule, port int32) bool {
+	target := intstr.FromInt32(port)
+	for _, rule := range rules {
+		for _, p := range rule.Ports {
+			if p.Port != nil && *p.Port == target {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func networkPolicyIngressHasPort(rules []networkingv1.NetworkPolicyIngressRule, port int32) bool {
 	target := intstr.FromInt32(port)
 	for _, rule := range rules {
 		for _, p := range rule.Ports {

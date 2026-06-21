@@ -593,6 +593,91 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ProxyIngressNetworkPolicy
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ProxyIngressNetworkPolicy returns a NetworkPolicy that allows the proxy Pod to
+// RECEIVE connections from the runner Pod of the SAME spawn, on the proxy ports.
+//
+// Without this policy, the namespace default-deny (DefaultDenyNetworkPolicy)
+// blocks all ingress to the proxy Pod, so runner→proxy:3128 is rejected by a
+// real CNI (e.g. Calico) even when the runner has a matching egress rule.
+//
+// Security invariants enforced by this policy:
+//   - podSelector targets role=proxy + this spawn's spawn-id ONLY — so the
+//     policy does not widen ingress for proxy pods of other spawns.
+//   - The Ingress[0].From podSelector pins role=runner + the SAME spawn-id —
+//     only this spawn's runner can initiate connections, not runners from other
+//     spawns (cross-spawn isolation).
+//   - PolicyTypes: [Ingress] ONLY — no Egress rule is added here; proxy egress
+//     is governed by ProxyEgressNetworkPolicy.
+//   - Ports mirror ProxyService: 3128/TCP always, 53/UDP+TCP when EnableDNSMasq
+//     is true, plus each TCPEgressPort from the input.
+func ProxyIngressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
+	ns := Namespace(in.Scope)
+	labels := Labels(in, RoleProxy)
+
+	tcpProto := corev1.ProtocolTCP
+	udpProto := corev1.ProtocolUDP
+
+	// Build the port list that the runner is allowed to connect to on the proxy.
+	// Must mirror ProxyService and RunnerEgressNetworkPolicy exactly.
+	ports := []networkingv1.NetworkPolicyPort{
+		{
+			Protocol: &tcpProto,
+			Port:     ptrIntStr(proxyPort),
+		},
+	}
+	if in.EnableDNSMasq {
+		ports = append(ports,
+			networkingv1.NetworkPolicyPort{Protocol: &udpProto, Port: ptrIntStr(dnsPort)},
+			networkingv1.NetworkPolicyPort{Protocol: &tcpProto, Port: ptrIntStr(dnsPort)},
+		)
+	}
+	for _, p := range in.TCPEgressPorts {
+		port := int32(p)
+		ports = append(ports, networkingv1.NetworkPolicyPort{
+			Protocol: &tcpProto,
+			Port:     ptrIntStr(port),
+		})
+	}
+
+	// The ingress rule allows only this spawn's runner pod to connect.
+	// Pinning spawn-id in the From selector enforces cross-spawn isolation:
+	// a runner from spawn B cannot reach the proxy of spawn A.
+	runnerPeer := networkingv1.NetworkPolicyPeer{
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				LabelRole:    RoleRunner,
+				LabelSpawnID: in.SpawnID,
+			},
+		},
+	}
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: objectMeta(spawnResourceName("proxy-ingress", in.SpawnID), ns, labels),
+		Spec: networkingv1.NetworkPolicySpec{
+			// Selects only this spawn's proxy pod.
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					LabelRole:    RoleProxy,
+					LabelSpawnID: in.SpawnID,
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+			},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From:  []networkingv1.NetworkPolicyPeer{runnerPeer},
+					Ports: ports,
+				},
+			},
+		},
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // OwnerRef
 // ──────────────────────────────────────────────────────────────────────────────
 
