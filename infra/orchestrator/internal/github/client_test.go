@@ -149,6 +149,30 @@ func TestClient_Reload_StatFails(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestClient_Reload_ReadFileFails covers the os.ReadFile error branch inside
+// reload. After construction succeeds, we force a reload by bumping mtime, then
+// strip read permission from the file so Stat succeeds but ReadFile fails.
+func TestClient_Reload_ReadFileFails(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("ghp_test"), 0o400))
+
+	c, err := NewClient("http://127.0.0.1:9999", patFile)
+	require.NoError(t, err)
+
+	// Make the file unreadable (Stat still works; only the directory x-bit matters).
+	require.NoError(t, os.Chmod(patFile, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(patFile, 0o600) })
+
+	// Force mtime change so maybeReload considers the PAT stale and calls reload.
+	future := time.Now().Add(time.Second)
+	require.NoError(t, os.Chtimes(patFile, future, future))
+
+	_, err = c.Do(context.Background(), "GET", "/x", nil)
+	require.Error(t, err, "Do must fail when reload cannot read the PAT file")
+	require.Contains(t, err.Error(), "read pat")
+}
+
 // Tiny io reader without pulling in additional imports in this file's tests.
 func readAll(r interface {
 	Read(p []byte) (n int, err error)

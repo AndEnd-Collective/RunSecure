@@ -204,3 +204,44 @@ func TestGetRunnerYML_MaybeReloadFails(t *testing.T) {
 	_, _, _, err = c.GetRunnerYML(context.Background(), "o/r", "")
 	require.Error(t, err, "GetRunnerYML must fail when maybeReload cannot stat the PAT file")
 }
+
+// TestGetRunnerYML_BadBaseURL covers the http.NewRequestWithContext error
+// branch inside GetRunnerYML. A malformed base URL (non-ASCII control byte)
+// causes NewRequestWithContext to return an error before any network I/O.
+func TestGetRunnerYML_BadBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "pat")
+	require.NoError(t, os.WriteFile(patFile, []byte("ghp_test"), 0o400))
+	// Use a URL that is syntactically accepted by url.Parse but rejected by
+	// http.NewRequestWithContext because it contains a control character.
+	c, err := NewClient("http://host\x00bad", patFile)
+	require.NoError(t, err)
+	_, _, _, err = c.GetRunnerYML(context.Background(), "o/r", "")
+	require.Error(t, err)
+}
+
+// TestGetRunnerYML_BodyReadError covers the io.ReadAll error branch in
+// GetRunnerYML. The httptest server hijacks the connection and sends a 200
+// response with Content-Length: 1000 but only writes 5 bytes before closing,
+// causing the client's io.ReadAll to return io.ErrUnexpectedEOF.
+func TestGetRunnerYML_BodyReadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok, "httptest.Server must support http.Hijacker")
+		conn, bufrw, err := hj.Hijack()
+		require.NoError(t, err)
+		// Advertise a 1000-byte body but write only 5 bytes, then close.
+		// The client's io.ReadAll will receive fewer bytes than Content-Length
+		// and return io.ErrUnexpectedEOF.
+		_, _ = bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: application/json\r\n\r\n")
+		_, _ = bufrw.WriteString("short")
+		_ = bufrw.Flush()
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	c := makeClient(t, srv.URL)
+	_, _, _, err := c.GetRunnerYML(context.Background(), "o/r", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read body")
+}
