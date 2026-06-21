@@ -164,6 +164,29 @@ func TestValidateContainerCreate_EgressVolume(t *testing.T) {
 		require.ErrorIs(t, err, ErrEgressVolumeDenied)
 	})
 
+	t.Run("proxy+egressVol:rw DENIED", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "myscope-egress-configs:/mnt/e:rw"),
+			allowAll(t), "", "myscope-egress-configs")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
+	t.Run("proxy+egressVol no-mode DENIED", func(t *testing.T) {
+		err := ValidateContainerCreate(
+			mk("proxy", "myscope-egress-configs:/mnt/e"),
+			allowAll(t), "", "myscope-egress-configs")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
+	t.Run("unlabeled+egressVol DENIED", func(t *testing.T) {
+		// No Labels key in the body at all — role defaults to "".
+		body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
+			`"Binds":["myscope-egress-configs:/mnt/e:ro"]}}`)
+		err := ValidateContainerCreate(body, allowAll(t), "", "myscope-egress-configs")
+		require.ErrorIs(t, err, ErrEgressVolumeDenied)
+	})
+
 	t.Run("host-bind denial intact", func(t *testing.T) {
 		err := ValidateContainerCreate(
 			mk("proxy", "/var/run:/foo:ro"),

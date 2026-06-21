@@ -9,6 +9,7 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/egress"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/orchestrator"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
 	"github.com/stretchr/testify/require"
@@ -279,6 +280,16 @@ http_egress:
 	require.NotNil(t, snap)
 	require.NotContains(t, buf.String(), "[RunSecure] WARNING:",
 		"no deprecation warning must be emitted when http_egress is used")
+}
+
+// TestDefaultEgressBaseDir_EqualsEgressMountPath asserts that when
+// RUNSECURE_EGRESS_BASE_DIR is unset the FSGenerator BaseDir matches
+// the path the proxy container mounts the egress volume at. A mismatch
+// means the orchestrator writes configs to a path the proxy never reads.
+func TestDefaultEgressBaseDir_EqualsEgressMountPath(t *testing.T) {
+	t.Setenv("RUNSECURE_EGRESS_BASE_DIR", "")
+	dir := envOr("RUNSECURE_EGRESS_BASE_DIR", orchestrator.EgressMountPath)
+	require.Equal(t, orchestrator.EgressMountPath, dir)
 }
 
 // TestAllOverrideKeys_EachKeyRecognized is a drift guard: for every key returned

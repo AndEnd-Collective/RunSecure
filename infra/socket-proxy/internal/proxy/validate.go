@@ -162,12 +162,21 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 				if !ok {
 					continue
 				}
-				src := strings.SplitN(s, ":", 2)[0]
+				parts := strings.SplitN(s, ":", 3)
+				src := parts[0]
 				if strings.HasPrefix(src, "/") {
 					continue // host path — already vetted by checkBinds
 				}
 				// Named-volume source: gate it.
 				if egressVol == "" || src != egressVol || role != "proxy" {
+					return ErrEgressVolumeDenied
+				}
+				// Mode check: must be explicitly ro.
+				mode := ""
+				if len(parts) == 3 {
+					mode = parts[2]
+				}
+				if !strings.Contains(mode, "ro") {
 					return ErrEgressVolumeDenied
 				}
 			}

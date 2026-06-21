@@ -34,10 +34,12 @@ func egressNetworkName() string {
 	return egressNetworkFallback
 }
 
-// egressMountPath is the path the shared egress-configs volume is mounted at
+// EgressMountPath is the path the shared egress-configs volume is mounted at
 // inside the proxy container. It is a fixed constant — the volume is always
-// mounted here regardless of scope.
-const egressMountPath = "/var/run/runsecure/egress"
+// mounted here regardless of scope. Exported so that run.go can use it as the
+// default value for RUNSECURE_EGRESS_BASE_DIR, ensuring the FSGenerator writes
+// to the same path the proxy container reads.
+const EgressMountPath = "/var/run/runsecure/egress"
 
 // egressVolumeName returns the name of the shared named Docker volume that
 // carries per-spawn egress configs. It reads RUNSECURE_EGRESS_VOLUME from the
@@ -159,7 +161,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		ResourcesPIDs:      int64(r.Resources.PIDs),
 		JITConfigB64:       jit.EncodedJITConfig,
 		EgressVolume:       egressVolumeName(),
-		EgressMountPath:    egressMountPath,
+		EgressMountPath:    EgressMountPath,
 		EnableDNSMasq:      enableDNSMasq,
 	})
 	if err != nil {

@@ -71,7 +71,7 @@ func Run(ctx context.Context, scopePath string) error {
 	// rate prevents a runaway poll loop from spawning thousands.
 	rl := state.NewTokenBucket(5, 10, time.Now)
 	brks := newBreakerMap()
-	eg := egress.NewFSGenerator(envOr("RUNSECURE_EGRESS_BASE_DIR", "/tmp/runsecure/egress"))
+	eg := egress.NewFSGenerator(envOr("RUNSECURE_EGRESS_BASE_DIR", orchestrator.EgressMountPath))
 	basePolicy, err := buildBasePolicy(s.SecurityProfile, s.SecurityOverrides, allOverrideKeys())
 	if err != nil {
 		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
