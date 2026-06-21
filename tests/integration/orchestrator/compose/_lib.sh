@@ -54,8 +54,13 @@ EOF
   fi
   if [[ ! -f "${TESTDATA_DIR}/pat" ]]; then
     echo "ghp_fake_for_tests" > "${TESTDATA_DIR}/pat"
-    chmod 400 "${TESTDATA_DIR}/pat"
   fi
+  # Mode 0400: PAT is delivered to the orchestrator via the pat-secret named
+  # volume (see pat-init in docker-compose.test.yml) rather than a direct host
+  # bind-mount. The host file itself only needs to be readable by the current
+  # user so the pat-init container can bind-mount and copy it; mode 0400 is
+  # correct and matches the orchestrator's security requirement.
+  chmod 400 "${TESTDATA_DIR}/pat"
   # The orchestrator (HEAD) attaches per-spawn proxy containers to the egress
   # network (RUNSECURE_EGRESS_NETWORK, default: runsecure-egress). Create it
   # here so the spawn path succeeds even in the bare test environment.
@@ -433,11 +438,18 @@ project_name() {
 stack_up() {
   local pname; pname="$(project_name)"
   ensure_testdata
-  # egress-init runs first (service_completed_successfully dependency) to set
-  # the egress-configs volume root ownership to 65532 so the orchestrator can
-  # write per-spawn subdirs. Listing it explicitly here forces compose to
-  # include it even though it is not a network-visible service.
-  $DC -f "${COMPOSE_FILE}" -p "${pname}" up -d --build mock-github socket-proxy egress-init orchestrator
+  # The orchestrator + socket-proxy compose services reference local-only image
+  # tags (runsecure-orchestrator:local, runsecure-socket-proxy:local) that have
+  # no build context in the compose file, so `up --build` would try to PULL them
+  # and fail on a fresh CI host. Build them here so EVERY suite using stack_up
+  # has them (previously only ensure_egress_allowlist built them, so suites like
+  # compose-egress-attach-deny pulled and failed). Idempotent / layer-cached.
+  build_orchestrator_stack_images
+  # egress-init and pat-init run first (service_completed_successfully
+  # dependency) so the orchestrator starts with correct volume ownership.
+  # Listing them explicitly forces compose to include them even though they
+  # are not network-visible services.
+  $DC -f "${COMPOSE_FILE}" -p "${pname}" up -d --build mock-github socket-proxy egress-init pat-init orchestrator
 }
 
 stack_down() {

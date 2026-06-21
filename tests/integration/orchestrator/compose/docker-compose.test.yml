@@ -67,6 +67,31 @@ services:
       - egress-configs:/data
     security_opt: ["no-new-privileges:true"]
 
+  pat-init:
+    # One-shot container that copies the test PAT from the host bind-mount into
+    # a named volume and sets ownership to UID 65532 at mode 0400. This is
+    # required because on native-Linux CI, a host file owned by the CI user at
+    # mode 0400 is unreadable by UID 65532 (distroless nonroot inside the
+    # orchestrator). Named-volume delivery avoids the host-ownership problem:
+    # the init runs as root and writes the secret into the volume with the
+    # correct uid/mode before the orchestrator starts.
+    # CAP_CHOWN is required to change file ownership; dropped when this exits.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-test-pat-init
+    restart: "no"
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        cp /host-pat /secret/runsecure-pat
+        chown 65532:65532 /secret/runsecure-pat
+        chmod 400 /secret/runsecure-pat
+    volumes:
+      - ./testdata/pat:/host-pat:ro
+      - pat-secret:/secret
+    security_opt: ["no-new-privileges:true"]
+
   orchestrator:
     image: runsecure-orchestrator:local
     container_name: rs-test-orchestrator
@@ -81,6 +106,8 @@ services:
       socket-proxy:
         condition: service_started
       egress-init:
+        condition: service_completed_successfully
+      pat-init:
         condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
@@ -102,7 +129,10 @@ services:
       RUNSECURE_EGRESS_VOLUME: "runsecure-egress-configs"
     volumes:
       - ./testdata/scope.yml:/etc/runsecure/scope.yml:ro
-      - ./testdata/pat:/run/secrets/runsecure-pat:ro
+      # PAT delivered via named volume (owned 65532:65532, mode 0400).
+      # See pat-init service above; named volume works on both native-Linux CI
+      # and Colima/Docker Desktop without host uid-remapping dependency.
+      - pat-secret:/run/secrets:ro
       - ./testdata/proj:/projects/proj:ro
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
@@ -116,6 +146,7 @@ services:
 volumes:
   egress-configs:
     name: runsecure-egress-configs
+  pat-secret:
 
 networks:
   test-net:
