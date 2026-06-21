@@ -75,3 +75,4 @@ tests/integration/orchestrator/compose/testdata/
 
 # SDD workflow scratch (local-only)
 .superpowers/
+infra/orchestrator/orchestrator
