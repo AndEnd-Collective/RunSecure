@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -31,10 +32,25 @@ func run() error {
 	}
 	log.Printf("socket-proxy: listening on %s (image-allowlist=%d entries)", cfg.ListenAddr, allow.Size())
 
+	tlsCfg, err := cfg.BuildTLSConfig()
+	if err != nil {
+		return err
+	}
+
+	httpSrv := buildHTTPServer(cfg, allow)
+	return serveWith(httpSrv, tlsCfg,
+		func() error { return httpSrv.ListenAndServe() },
+		func() error { return httpSrv.ListenAndServeTLS("", "") },
+	)
+}
+
+// buildHTTPServer constructs the http.Server from config and the image
+// allowlist. It is extracted so unit tests can verify the server fields
+// (timeouts, handler) without binding a real socket.
+func buildHTTPServer(cfg config.Config, allow *imageallow.Allowlist) *http.Server {
 	srv := proxy.New(cfg.DockerSock, allow)
 	srv.SetLogger(func(f string, a ...any) { log.Printf("socket-proxy: "+f, a...) })
-
-	httpSrv := &http.Server{
+	return &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           srv,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -42,16 +58,17 @@ func run() error {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
 
-	tlsCfg, err := cfg.BuildTLSConfig()
-	if err != nil {
-		return err
-	}
+// serveWith selects the serve path based on whether tlsCfg is nil.
+// listenPlain and listenTLS are injected so tests can verify which path is
+// chosen without binding a real port. In production both are closures over
+// httpSrv's own methods.
+func serveWith(httpSrv *http.Server, tlsCfg *tls.Config, listenPlain, listenTLS func() error) error {
 	if tlsCfg != nil {
 		httpSrv.TLSConfig = tlsCfg
-		httpSrv.Addr = cfg.TLSListenAddr
-		log.Printf("socket-proxy: TLS listener on %s", cfg.TLSListenAddr)
-		return httpSrv.ListenAndServeTLS("", "")
+		log.Printf("socket-proxy: TLS listener on %s", httpSrv.Addr)
+		return listenTLS()
 	}
-	return httpSrv.ListenAndServe()
+	return listenPlain()
 }
