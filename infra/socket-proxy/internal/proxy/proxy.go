@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/imageallow"
@@ -17,9 +18,10 @@ import (
 
 // Server is the docker-socket-proxy HTTP server.
 type Server struct {
-	rp     *httputil.ReverseProxy
-	images *imageallow.Allowlist
-	logger func(format string, args ...any)
+	rp        *httputil.ReverseProxy
+	images    *imageallow.Allowlist
+	logger    func(format string, args ...any)
+	egressNet string // value of RUNSECURE_EGRESS_NETWORK; "" disables egress gate
 }
 
 // transportIdleConnTimeout is the per-connection idle timeout for the
@@ -31,6 +33,11 @@ func transportIdleConnTimeout() time.Duration {
 
 // New constructs a Server. dockerSock is the path to /var/run/docker.sock
 // (or another UDS path the socket-proxy bind-mounts).
+//
+// The egress-network name is read from RUNSECURE_EGRESS_NETWORK at
+// construction time so that the gate is active from the first request. An
+// empty env var disables the gate (useful in development / test environments
+// that do not use a named egress network).
 func New(dockerSock string, images *imageallow.Allowlist) *Server {
 	target, _ := url.Parse("http://docker") // hostname is arbitrary; dialer overrides
 	rp := httputil.NewSingleHostReverseProxy(target)
@@ -46,7 +53,12 @@ func New(dockerSock string, images *imageallow.Allowlist) *Server {
 	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 	}
-	return &Server{rp: rp, images: images, logger: func(string, ...any) {}}
+	return &Server{
+		rp:        rp,
+		images:    images,
+		logger:    func(string, ...any) {},
+		egressNet: os.Getenv("RUNSECURE_EGRESS_NETWORK"),
+	}
 }
 
 // SetLogger replaces the default no-op logger.
@@ -68,7 +80,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = r.Body.Close()
-		if err := ValidateContainerCreate(body, s.images); err != nil {
+		if err := ValidateContainerCreate(body, s.images, s.egressNet); err != nil {
 			s.deny(w, "validation_failed", err.Error(), http.StatusForbidden)
 			return
 		}

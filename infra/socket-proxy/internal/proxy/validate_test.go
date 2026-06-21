@@ -42,11 +42,85 @@ func minimalValidBody() map[string]any {
 	}
 }
 
+// allowAll is an alias for loadAllowAllImages, used by egress-gate tests for
+// readability consistency with the brief's test skeleton.
+func allowAll(t *testing.T) *imageallow.Allowlist {
+	t.Helper()
+	return loadAllowAllImages(t)
+}
+
 func validate(t *testing.T, body map[string]any) error {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
-	return ValidateContainerCreate(b, loadAllowAllImages(t))
+	// egressNet="" keeps the egress gate inert for all existing validation tests.
+	return ValidateContainerCreate(b, loadAllowAllImages(t), "")
+}
+
+// TestValidateContainerCreate_EgressAttach covers the egress-network gate:
+//
+//   - role=proxy attaching the egress network → allowed
+//   - role=runner attaching the egress network → DENIED (isolation bypass)
+//   - unlabeled container attaching the egress network → DENIED
+//   - egressNet="" → gate is inert regardless of NetworkingConfig
+//   - attach a different network → unaffected (not denied by the egress gate)
+func TestValidateContainerCreate_EgressAttach(t *testing.T) {
+	// mk builds a minimal valid body that attaches the given network via
+	// NetworkingConfig.EndpointsConfig and carries the given role label.
+	mk := func(role string) []byte {
+		return []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+			`"Labels":{"runsecure.role":"` + role + `"},` +
+			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+			`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
+	}
+
+	// Positive: proxy container is allowed to attach the egress network.
+	if err := ValidateContainerCreate(mk("proxy"), allowAll(t), "spawn-egress"); err != nil {
+		t.Fatalf("proxy->egress should be allowed: %v", err)
+	}
+
+	// Attacker: runner role must be denied.
+	if err := ValidateContainerCreate(mk("runner"), allowAll(t), "spawn-egress"); err == nil {
+		t.Fatal("SECURITY: runner->egress must be denied")
+	}
+
+	// Attacker: unlabeled container must be denied.
+	if err := ValidateContainerCreate(mk(""), allowAll(t), "spawn-egress"); err == nil {
+		t.Fatal("SECURITY: unlabeled->egress must be denied")
+	}
+}
+
+// TestValidateContainerCreate_EgressGateInertWhenNetEmpty verifies that when
+// RUNSECURE_EGRESS_NETWORK is not configured (empty string) the gate adds no
+// new denials.
+func TestValidateContainerCreate_EgressGateInertWhenNetEmpty(t *testing.T) {
+	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
+	// With egressNet="" the gate must not fire even if spawn-egress is attached.
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), ""))
+}
+
+// TestValidateContainerCreate_NonEgressNetworkUnaffected verifies that
+// attaching a network other than the egress network is not gated.
+func TestValidateContainerCreate_NonEgressNetworkUnaffected(t *testing.T) {
+	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+		`"Labels":{"runsecure.role":"runner"},` +
+		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"NetworkingConfig":{"EndpointsConfig":{"rs-internal":{}}}}`)
+	// runner attaches rs-internal, not spawn-egress → no egress-gate denial.
+	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "spawn-egress"))
+}
+
+// TestValidateContainerCreate_EgressAttach_ErrorSentinel verifies that the
+// denial for runner->egress returns ErrEgressAttachDenied specifically.
+func TestValidateContainerCreate_EgressAttach_ErrorSentinel(t *testing.T) {
+	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
+		`"Labels":{"runsecure.role":"runner"},` +
+		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
+	err := ValidateContainerCreate(body, allowAll(t), "spawn-egress")
+	require.ErrorIs(t, err, ErrEgressAttachDenied)
 }
 
 func TestValidateContainerCreate_Baseline_OK(t *testing.T) {
@@ -178,7 +252,7 @@ func TestValidateContainerCreate_RefusesUntrustedImage(t *testing.T) {
 }
 
 func TestValidateContainerCreate_RefusesMalformedJSON(t *testing.T) {
-	err := ValidateContainerCreate([]byte("{ not json"), loadAllowAllImages(t))
+	err := ValidateContainerCreate([]byte("{ not json"), loadAllowAllImages(t), "")
 	require.Error(t, err)
 }
 

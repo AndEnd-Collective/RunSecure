@@ -26,6 +26,11 @@ var (
 	ErrBindForbidden                = errors.New("HostConfig.Binds contains a forbidden host path")
 	ErrUserRequired                 = errors.New("User field is required and must be non-root")
 	ErrImageNotAllowed              = errors.New("Image not in digest allowlist")
+	// ErrEgressAttachDenied is returned when a container-create request attaches
+	// the designated egress network without carrying the runsecure.role=proxy
+	// label. This is the isolation-bypass gate: only the proxy sidecar may join
+	// the outbound egress network; runner containers must never reach it.
+	ErrEgressAttachDenied = errors.New("attachment to egress network requires runsecure.role=proxy")
 )
 
 // Forbidden host-path prefixes for HostConfig.Binds source paths.
@@ -63,8 +68,16 @@ var forbiddenBindSuffixes = []string{
 // ValidateContainerCreate parses body as Docker's containers/create request
 // and refuses it if any spec §7.2 rule fails.
 //
+// egressNet is the name of the designated egress network (read from
+// RUNSECURE_EGRESS_NETWORK at server init). When non-empty, any request that
+// attaches this network via NetworkingConfig.EndpointsConfig must carry
+// Labels["runsecure.role"]="proxy"; all other values, including the empty
+// string and "runner", are denied with ErrEgressAttachDenied. Pass "" to
+// disable the egress gate (development / test environments without an egress
+// network).
+//
 // The function does NOT modify the body; it only validates.
-func ValidateContainerCreate(body []byte, images *imageallow.Allowlist) error {
+func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNet string) error {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return fmt.Errorf("malformed JSON: %w", err)
@@ -121,6 +134,22 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist) error {
 	if err := checkBinds(hc["Binds"]); err != nil {
 		return err
 	}
+
+	// Egress-network gate: if RUNSECURE_EGRESS_NETWORK is configured, only
+	// containers with runsecure.role=proxy may attach it. This prevents a
+	// compromised orchestrator from connecting a runner directly to the
+	// outbound egress network and bypassing the proxy-enforced domain filter.
+	if egressNet != "" {
+		nc, _ := req["NetworkingConfig"].(map[string]any)
+		eps, _ := nc["EndpointsConfig"].(map[string]any)
+		if _, attaches := eps[egressNet]; attaches {
+			labels, _ := req["Labels"].(map[string]any)
+			if role, _ := labels["runsecure.role"].(string); role != "proxy" {
+				return ErrEgressAttachDenied
+			}
+		}
+	}
+
 	return nil
 }
 

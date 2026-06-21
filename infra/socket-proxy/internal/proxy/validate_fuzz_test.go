@@ -14,6 +14,9 @@ func FuzzValidateContainerCreate(f *testing.F) {
 		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001","HostConfig":{"Privileged":true}}`),
 		[]byte(`not json`),
 		[]byte("{\"Image\":\"\\u0000\"}"),
+		// egress-gate seeds: proxy allowed, runner denied, unlabeled denied.
+		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"proxy"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`),
+		[]byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0","Labels":{"runsecure.role":"runner"},"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`),
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -29,7 +32,8 @@ func FuzzValidateContainerCreate(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		// Must never panic.
-		_ = ValidateContainerCreate(body, allow)
+		// Must never panic — exercise both with and without egress gate.
+		_ = ValidateContainerCreate(body, allow, "")
+		_ = ValidateContainerCreate(body, allow, "spawn-egress")
 	})
 }
