@@ -1,8 +1,10 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -307,4 +309,27 @@ func TestInspectContainer_MalformedResponse(t *testing.T) {
 	})
 	_, err := c.InspectContainer(context.Background(), "x")
 	require.Error(t, err)
+}
+
+func TestCreateContainer_SerializesNetworkingConfig(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc"})
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+	_, err := c.CreateContainer(context.Background(), CreateContainerRequest{
+		Image: "img", User: "1001:0",
+		NetworkingConfig: &NetworkingConfig{EndpointsConfig: map[string]EndpointConfig{
+			"net-internal": {Aliases: []string{"proxy"}},
+			"spawn-egress": {},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(gotBody, []byte("\"spawn-egress\"")) || !bytes.Contains(gotBody, []byte("\"proxy\"")) {
+		t.Fatalf("EndpointsConfig not serialized: %s", gotBody)
+	}
 }
