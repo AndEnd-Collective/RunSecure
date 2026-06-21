@@ -650,6 +650,15 @@ SECURITY.md              # Threat model + known limitations
 
 ---
 
+## AI agent integration (Claude Code / Codex)
+
+RunSecure ships agent tooling so AI agents can both **adopt** it in a project and **work on** it:
+
+- **Claude Code plugin** (`.claude-plugin/plugin.json`): install this repo as a plugin to get two skills — `using-runsecure` (set RunSecure up in a project) and `developing-runsecure` (work on the codebase) — and two agents (`runsecure-adopter`, `runsecure-maintainer`) under `agents/`.
+- **Codex** (`codex/`): copy `codex/prompts/*.md` to `~/.codex/prompts/` for `/use-runsecure` and `/develop-runsecure`; Codex also reads `AGENTS.md` automatically. See `codex/README.md`.
+- **`AGENTS.md`** (repo root): operating principles + anti-patterns for working on RunSecure (read by Claude, Codex, and humans).
+- **Consumer `AGENTS.md` template** (`skills/using-runsecure/AGENTS-template.md`): drop into a project that adopts RunSecure so agents respect the egress/hardening rules there.
+
 ## Contributing
 
 Bug reports and PRs welcome. The integration test suite must pass
