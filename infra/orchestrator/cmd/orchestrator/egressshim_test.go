@@ -30,8 +30,8 @@ func TestEgressShim_ScopeAllows_ProjectOverrideApplied(t *testing.T) {
 	allowKeys := []string{"allow_private_cidrs"}
 
 	shim := egressShim{
-		g:        newFSGen(t),
-		base:     base,
+		g:         newFSGen(t),
+		base:      base,
 		allowKeys: allowKeys,
 	}
 
@@ -58,8 +58,8 @@ func TestEgressShim_ScopeDisallows_ProjectOverrideIgnored(t *testing.T) {
 	allowKeys := []string{} // allow_private_cidrs NOT listed — project cannot authorize it
 
 	shim := egressShim{
-		g:        newFSGen(t),
-		base:     base,
+		g:         newFSGen(t),
+		base:      base,
 		allowKeys: allowKeys,
 	}
 
@@ -87,8 +87,8 @@ func TestEgressShim_MalformedOverride_SpawnFails(t *testing.T) {
 	allowKeys := []string{"allow_private_cidrs"}
 
 	shim := egressShim{
-		g:        newFSGen(t),
-		base:     base,
+		g:         newFSGen(t),
+		base:      base,
 		allowKeys: allowKeys,
 	}
 
@@ -128,8 +128,8 @@ func TestEgressShim_ScopeOperatorOverrideAppliedAtBase(t *testing.T) {
 
 	// Scope does NOT permit any project overrides.
 	shim := egressShim{
-		g:        newFSGen(t),
-		base:     base,
+		g:         newFSGen(t),
+		base:      base,
 		allowKeys: []string{},
 	}
 
@@ -148,8 +148,8 @@ func TestEgressShim_ScopeOperatorOverrideAppliedAtBase(t *testing.T) {
 // base blocks private IPs.
 func TestEgressShim_NoProjectOverrides_BaseUsed(t *testing.T) {
 	shim := egressShim{
-		g:        newFSGen(t),
-		base:     security.Defaults("strict"),
+		g:         newFSGen(t),
+		base:      security.Defaults("strict"),
 		allowKeys: []string{"allow_private_cidrs"},
 	}
 
@@ -302,10 +302,10 @@ func TestDefaultEgressBaseDir_EqualsEgressMountPath(t *testing.T) {
 // unhandled will be caught at the type-mismatch layer before it can slip through.
 func TestAllOverrideKeys_EachKeyRecognized(t *testing.T) {
 	minimalValues := map[string]any{
-		"allow_wildcards":    []any{"*.example.com"},
-		"allow_doh":          true,
-		"allow_imds":         true,
-		"allow_kube_api":     true,
+		"allow_wildcards":     []any{"*.example.com"},
+		"allow_doh":           true,
+		"allow_imds":          true,
+		"allow_kube_api":      true,
 		"allow_private_cidrs": []any{"10.0.0.0/8"},
 	}
 

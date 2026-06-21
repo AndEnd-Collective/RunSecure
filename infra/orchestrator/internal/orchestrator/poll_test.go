@@ -44,8 +44,8 @@ func (d *pollDeps) RateLimitContextFor(_ string) (int, int, string) {
 	return d.rl.remaining, d.rl.limit, d.rl.reset
 }
 func (d *pollDeps) RecordRateLimit(_ string, _ github.RateLimit) {}
-func (d *pollDeps) MarkRateLimited(_ string)                { d.rl.paused.Store(true) }
-func (d *pollDeps) IsRateLimited(_ string) bool             { return d.rl.paused.Load() }
+func (d *pollDeps) MarkRateLimited(_ string)                     { d.rl.paused.Store(true) }
+func (d *pollDeps) IsRateLimited(_ string) bool                  { return d.rl.paused.Load() }
 func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
 	// Honour rl.stickPaused: when set, never clear (so the "still paused;
 	// skip this tick" return in tick() is exercised).
@@ -58,6 +58,7 @@ func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
 	}
 	return false
 }
+
 var spawnIDCounter atomic.Int64
 
 func (d *pollDeps) NewSpawnID() string {

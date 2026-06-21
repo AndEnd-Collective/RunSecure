@@ -11,7 +11,7 @@ import (
 
 // RenderDNSMasq generates a dnsmasq configuration that:
 //   - Forwards queries only for explicitly-allowed domains (ResolvedHTTPEgress
-//     + host parts of TCPEgress) via per-name server stanzas.
+//   - host parts of TCPEgress) via per-name server stanzas.
 //   - Emits upstream resolvers from Runner.DNS.Servers when provided (each
 //     must parse as a valid IP; hostnames are silently dropped). Falls back to
 //     hardcoded 1.1.1.1 / 9.9.9.9 when the list is empty.

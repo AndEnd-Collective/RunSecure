@@ -17,6 +17,7 @@ type Scope struct {
 	APIVersion            string          `yaml:"apiVersion"`
 	Name                  string          `yaml:"name"`
 	Description           string          `yaml:"description"`
+	Backend               string          `yaml:"backend"` // "compose" (default) or "kube"
 	GlobalMaxRunners      int             `yaml:"global_max_runners"`
 	PollIntervalSeconds   int             `yaml:"poll_interval_seconds"`
 	SecurityProfile       string          `yaml:"security_profile"`

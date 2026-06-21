@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
@@ -108,7 +109,15 @@ type PollDeps interface {
 // SpawnDeps is the dependency surface a SpawnWorker needs.
 type SpawnDeps interface {
 	GitHub() *github.Client
+	// Docker returns the raw docker client. Still required by tests and
+	// production code that inspects containers outside of the spawn lifecycle
+	// (e.g. cold-start reconciliation in run.go). Execute no longer calls
+	// Docker() for the spawn lifecycle — that is delegated to Backend().
 	Docker() docker.Client
+	// Backend returns the pluggable spawn mechanism. Execute calls
+	// Backend().Spawn / WaitForExit / Teardown instead of calling Docker()
+	// directly for the spawn lifecycle.
+	Backend() backend.Backend
 	Emit() *cornerstone.Emitter
 	Clock() ClockLike
 	Egress() EgressGenerator

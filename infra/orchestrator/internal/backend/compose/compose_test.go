@@ -28,7 +28,7 @@ type fakeDocker struct {
 	started []string
 
 	// Network state.
-	networkID      string
+	networkID       string
 	networksDeleted []string
 
 	// DeleteContainer records.
@@ -119,11 +119,11 @@ func (f *fakeDocker) ListContainersForScope(_ context.Context, _ string) ([]dock
 
 func minimalInput() backend.SpawnInput {
 	return backend.SpawnInput{
-		Scope:        "myscope",
-		Repo:         "owner/repo",
-		SpawnID:      "sp1",
-		RunnerImage:  "runner@sha256:r",
-		ProxyImage:   "proxy@sha256:p",
+		Scope:         "myscope",
+		Repo:          "owner/repo",
+		SpawnID:       "sp1",
+		RunnerImage:   "runner@sha256:r",
+		ProxyImage:    "proxy@sha256:p",
 		EgressNetwork: "myscope-spawn-egress",
 		EgressVolume:  "myscope-egress-configs",
 	}
@@ -373,10 +373,16 @@ func TestWaitForExit_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel immediately after calling WaitForExit in a goroutine.
-	done := make(chan struct{ code int; timedOut bool }, 1)
+	done := make(chan struct {
+		code     int
+		timedOut bool
+	}, 1)
 	go func() {
 		code, timedOut := b.WaitForExit(ctx, h, 30*time.Second)
-		done <- struct{ code int; timedOut bool }{code, timedOut}
+		done <- struct {
+			code     int
+			timedOut bool
+		}{code, timedOut}
 	}()
 	cancel()
 	result := <-done

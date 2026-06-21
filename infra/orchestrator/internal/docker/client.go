@@ -32,14 +32,14 @@ type Client interface {
 }
 
 type CreateContainerRequest struct {
-	Name              string              `json:"-"`
-	Image             string              `json:"Image"`
-	User              string              `json:"User"`
-	Env               []string            `json:"Env,omitempty"`
-	Cmd               []string            `json:"Cmd,omitempty"`
-	Labels            map[string]string   `json:"Labels,omitempty"`
-	HostConfig        HostConfig          `json:"HostConfig"`
-	NetworkingConfig  *NetworkingConfig   `json:"NetworkingConfig,omitempty"`
+	Name             string            `json:"-"`
+	Image            string            `json:"Image"`
+	User             string            `json:"User"`
+	Env              []string          `json:"Env,omitempty"`
+	Cmd              []string          `json:"Cmd,omitempty"`
+	Labels           map[string]string `json:"Labels,omitempty"`
+	HostConfig       HostConfig        `json:"HostConfig"`
+	NetworkingConfig *NetworkingConfig `json:"NetworkingConfig,omitempty"`
 }
 
 type NetworkingConfig struct {
@@ -51,16 +51,16 @@ type EndpointConfig struct {
 }
 
 type HostConfig struct {
-	CapDrop      []string          `json:"CapDrop"`
-	SecurityOpt  []string          `json:"SecurityOpt"`
-	NetworkMode  string            `json:"NetworkMode"`
-	Memory       int64             `json:"Memory,omitempty"`
-	NanoCPUs     int64             `json:"NanoCpus,omitempty"`
-	PidsLimit    int64             `json:"PidsLimit,omitempty"`
-	ReadonlyRootfs bool            `json:"ReadonlyRootfs,omitempty"`
-	Tmpfs        map[string]string `json:"Tmpfs,omitempty"`
-	Binds        []string          `json:"Binds,omitempty"`
-	AutoRemove   bool              `json:"AutoRemove,omitempty"`
+	CapDrop        []string          `json:"CapDrop"`
+	SecurityOpt    []string          `json:"SecurityOpt"`
+	NetworkMode    string            `json:"NetworkMode"`
+	Memory         int64             `json:"Memory,omitempty"`
+	NanoCPUs       int64             `json:"NanoCpus,omitempty"`
+	PidsLimit      int64             `json:"PidsLimit,omitempty"`
+	ReadonlyRootfs bool              `json:"ReadonlyRootfs,omitempty"`
+	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
+	Binds          []string          `json:"Binds,omitempty"`
+	AutoRemove     bool              `json:"AutoRemove,omitempty"`
 }
 
 type CreateNetworkRequest struct {

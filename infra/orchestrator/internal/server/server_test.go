@@ -26,14 +26,14 @@ type fakeDeps struct {
 	breakers  map[string]bool
 }
 
-func (f *fakeDeps) LastPollAt() time.Time            { return f.lastPoll }
-func (f *fakeDeps) Now() time.Time                    { return f.now }
-func (f *fakeDeps) PollIntervalSeconds() int          { return f.intervalS }
-func (f *fakeDeps) StateSnapshot() state.Snapshot     { return f.snap }
-func (f *fakeDeps) APICalls() map[APICallKey]int64    { return f.api }
-func (f *fakeDeps) SpawnsTotal() map[SpawnKey]int64   { return f.spawns }
+func (f *fakeDeps) LastPollAt() time.Time                { return f.lastPoll }
+func (f *fakeDeps) Now() time.Time                       { return f.now }
+func (f *fakeDeps) PollIntervalSeconds() int             { return f.intervalS }
+func (f *fakeDeps) StateSnapshot() state.Snapshot        { return f.snap }
+func (f *fakeDeps) APICalls() map[APICallKey]int64       { return f.api }
+func (f *fakeDeps) SpawnsTotal() map[SpawnKey]int64      { return f.spawns }
 func (f *fakeDeps) SpawnDurations() map[string][]float64 { return f.durations }
-func (f *fakeDeps) BreakerOpen() map[string]bool      { return f.breakers }
+func (f *fakeDeps) BreakerOpen() map[string]bool         { return f.breakers }
 
 func newDeps(t *testing.T) *fakeDeps {
 	t.Helper()
@@ -43,8 +43,8 @@ func newDeps(t *testing.T) *fakeDeps {
 		now:       now,
 		intervalS: 15,
 		snap: state.Snapshot{
-			PerRepo: map[string]state.RepoState{"o/r": {InFlight: 2}},
-			GlobalInFlight: 2,
+			PerRepo:            map[string]state.RepoState{"o/r": {InFlight: 2}},
+			GlobalInFlight:     2,
 			RateLimitRemaining: 4321,
 			RateLimitLimit:     5000,
 		},
@@ -53,7 +53,6 @@ func newDeps(t *testing.T) *fakeDeps {
 		breakers: map[string]bool{"o/r": false},
 	}
 }
-
 
 func TestHealthz_OkWhenFresh(t *testing.T) {
 	d := newDeps(t)

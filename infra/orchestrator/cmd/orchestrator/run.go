@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/compose"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/clock"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
@@ -79,6 +81,7 @@ func Run(ctx context.Context, scopePath string) error {
 	pdeps := &productionDeps{
 		gh:         gh,
 		dc:         dc,
+		be:         selectBackend(s, dc),
 		em:         em,
 		clk:        clk,
 		st:         st,
@@ -219,7 +222,13 @@ func newServerDeps(st *state.State, clk clock.Clock, intervalS int) *serverDeps 
 	return d
 }
 
-func (d *serverDeps) LastPollAt() time.Time         { p := d.lastPoll.Load(); if p == nil { return time.Time{} }; return *p }
+func (d *serverDeps) LastPollAt() time.Time {
+	p := d.lastPoll.Load()
+	if p == nil {
+		return time.Time{}
+	}
+	return *p
+}
 func (d *serverDeps) Now() time.Time                { return d.clk.Now() }
 func (d *serverDeps) PollIntervalSeconds() int      { return d.intervalS }
 func (d *serverDeps) StateSnapshot() state.Snapshot { return d.st.Snapshot() }
@@ -252,6 +261,7 @@ func (d *serverDeps) BreakerOpen() map[string]bool {
 type productionDeps struct {
 	gh         *github.Client
 	dc         docker.Client
+	be         backend.Backend
 	em         *cornerstone.Emitter
 	clk        clock.Clock
 	st         *state.State
@@ -265,21 +275,22 @@ type productionDeps struct {
 	serverDeps *serverDeps
 
 	// rate-limit state
-	rlMu      sync.Mutex
-	rlPaused  bool
-	rlReset   time.Time
+	rlMu     sync.Mutex
+	rlPaused bool
+	rlReset  time.Time
 }
 
 // PollDeps and SpawnDeps shared methods.
 
-func (p *productionDeps) GitHub() *github.Client          { return p.gh }
-func (p *productionDeps) Docker() docker.Client           { return p.dc }
-func (p *productionDeps) Emit() *cornerstone.Emitter      { return p.em }
-func (p *productionDeps) Clock() orchestrator.ClockLike   { return p.clk }
+func (p *productionDeps) GitHub() *github.Client        { return p.gh }
+func (p *productionDeps) Docker() docker.Client         { return p.dc }
+func (p *productionDeps) Backend() backend.Backend      { return p.be }
+func (p *productionDeps) Emit() *cornerstone.Emitter    { return p.em }
+func (p *productionDeps) Clock() orchestrator.ClockLike { return p.clk }
 func (p *productionDeps) Egress() orchestrator.EgressGenerator {
 	return egressShim{g: p.eg, base: p.basePolicy, allowKeys: p.allowKeys}
 }
-func (p *productionDeps) State() orchestrator.StateLike    { return p.st }
+func (p *productionDeps) State() orchestrator.StateLike { return p.st }
 
 func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot, error) {
 	for _, r := range p.scopeRef.Repos {
@@ -303,9 +314,9 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 
 // PollDeps-only ------------------------------------------------------------
 
-func (p *productionDeps) InFlight(repo string) int         { return p.st.InFlight(repo) }
-func (p *productionDeps) GlobalInFlight() int              { return p.st.GlobalInFlight() }
-func (p *productionDeps) BreakerIsOpen(repo string) bool   { return p.brks.IsOpen(repo) }
+func (p *productionDeps) InFlight(repo string) int       { return p.st.InFlight(repo) }
+func (p *productionDeps) GlobalInFlight() int            { return p.st.GlobalInFlight() }
+func (p *productionDeps) BreakerIsOpen(repo string) bool { return p.brks.IsOpen(repo) }
 func (p *productionDeps) BreakerMaybeHalfOpen(repo string) bool {
 	return p.brks.MaybeHalfOpen(repo)
 }
@@ -358,7 +369,7 @@ func (p *productionDeps) RecordPollTick() {
 
 // SpawnDeps-only --------------------------------------------------------
 
-func (p *productionDeps) GlobalMaxRunners() int        { return p.scopeRef.GlobalMaxRunners }
+func (p *productionDeps) GlobalMaxRunners() int { return p.scopeRef.GlobalMaxRunners }
 func (p *productionDeps) RepoMaxConcurrent(repo string) int {
 	for _, r := range p.scopeRef.Repos {
 		if r.Repo == repo {
@@ -367,8 +378,8 @@ func (p *productionDeps) RepoMaxConcurrent(repo string) int {
 	}
 	return 1
 }
-func (p *productionDeps) ScopeName() string                       { return p.scopeRef.Name }
-func (p *productionDeps) ProxyImageDigest() string                { return os.Getenv("RUNSECURE_PROXY_IMAGE") }
+func (p *productionDeps) ScopeName() string        { return p.scopeRef.Name }
+func (p *productionDeps) ProxyImageDigest() string { return os.Getenv("RUNSECURE_PROXY_IMAGE") }
 func (p *productionDeps) RunnerImageDigestFor(runtime string) string {
 	// Convention: env var RUNSECURE_RUNNER_IMAGE_<RUNTIME_UPPERCASE> →
 	// "ghcr.io/.../runner-<lang>:<ver>@sha256:..." Caller has bounded
@@ -397,8 +408,10 @@ func (p *productionDeps) SeccompProfileHostPath(name string) string {
 	}
 	return "/host/seccomp/" + name
 }
-func (p *productionDeps) RateLimiter() orchestrator.TokenBucket { return tokenBucketAdapter{b: p.bucket} }
-func (p *productionDeps) Breakers() orchestrator.BreakerMap     { return p.brks }
+func (p *productionDeps) RateLimiter() orchestrator.TokenBucket {
+	return tokenBucketAdapter{b: p.bucket}
+}
+func (p *productionDeps) Breakers() orchestrator.BreakerMap { return p.brks }
 
 // ------------- small adapters --------------------------------------------
 
@@ -481,3 +494,16 @@ func upperRuntime(rt string) string {
 var seq atomic.Int64
 
 func nextSeq() int64 { return seq.Add(1) }
+
+// selectBackend constructs the spawn backend indicated by scope.Backend.
+// Currently only "compose" (the default) is wired. Phase 2 adds "kube":
+//
+//	if s.Backend == "kube" { return kube.New(...) }
+//
+// The helper is intentionally a top-level function so Phase 2 can add the
+// kube branch with a one-line change and without touching the rest of Run().
+func selectBackend(s *config.Scope, dc docker.Client) backend.Backend {
+	// "kube" is accepted by validation but not wired yet (Phase 2).
+	// Fall through to compose for both "" (validated to "compose") and "compose".
+	return compose.New(dc)
+}

@@ -134,3 +134,41 @@ func TestValidate_GlobalMaxRunnersPositive(t *testing.T) {
 	s := makeScope(t, func(s *Scope) { s.GlobalMaxRunners = 0 })
 	require.ErrorContains(t, s.Validate(), "global_max_runners")
 }
+
+// --- backend field ---
+
+// TestValidate_Backend_Empty_DefaultsToCompose verifies that omitting backend
+// is equivalent to setting it to "compose" — the zero value is normalised.
+func TestValidate_Backend_Empty_DefaultsToCompose(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "" })
+	require.NoError(t, s.Validate())
+	require.Equal(t, "compose", s.Backend,
+		"empty backend must be normalised to 'compose'")
+}
+
+// TestValidate_Backend_Compose_Accepted verifies the explicit "compose" value.
+func TestValidate_Backend_Compose_Accepted(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "compose" })
+	require.NoError(t, s.Validate())
+}
+
+// TestValidate_Backend_Kube_Accepted verifies that "kube" is a valid backend
+// value (Phase 2 will wire it; validation must accept it now).
+func TestValidate_Backend_Kube_Accepted(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "kube" })
+	require.NoError(t, s.Validate())
+}
+
+// TestValidate_Backend_Invalid_Rejected verifies that unknown backend values
+// are rejected with an informative error.
+func TestValidate_Backend_Invalid_Rejected(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "bogus" })
+	require.ErrorContains(t, s.Validate(), "backend")
+}
+
+// TestValidate_Backend_Invalid_Rejected_Docker verifies "docker" is not a
+// valid alias (the accepted values are precisely "compose" and "kube").
+func TestValidate_Backend_Invalid_Rejected_Docker(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "docker" })
+	require.ErrorContains(t, s.Validate(), "backend")
+}

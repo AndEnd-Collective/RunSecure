@@ -17,10 +17,12 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 )
 
-// egressMountPath is the path the shared egress-configs volume is mounted at
-// inside the proxy container. Must match the value used by the orchestrator
-// when rendering egress configs (orchestrator.EgressMountPath).
-const egressMountPath = "/var/run/runsecure/egress"
+// egressMountPath aliases backend.EgressMountPath for use within this package.
+// The canonical definition lives in internal/backend/backend.go — a leaf
+// package imported by both orchestrator and backend/compose — to avoid
+// duplicating the string literal and to prevent import cycles.
+// Do NOT change this value without updating backend.EgressMountPath.
+var egressMountPath = backend.EgressMountPath
 
 // pollInterval is the cadence at which WaitForExit re-inspects the runner
 // container while waiting for it to transition to "exited".

@@ -8,11 +8,11 @@ import (
 
 type fakeBackend struct{}
 
-func (fakeBackend) Spawn(context.Context, SpawnInput) (Handle, error)        { return Handle{}, nil }
+func (fakeBackend) Spawn(context.Context, SpawnInput) (Handle, error)              { return Handle{}, nil }
 func (fakeBackend) WaitForExit(context.Context, Handle, time.Duration) (int, bool) { return 0, false }
-func (fakeBackend) Teardown(context.Context, Handle, bool) error             { return nil }
-func (fakeBackend) Reconcile(context.Context, string) ([]Handle, error)      { return nil, nil }
-func (fakeBackend) Name() string                                            { return "fake" }
+func (fakeBackend) Teardown(context.Context, Handle, bool) error                   { return nil }
+func (fakeBackend) Reconcile(context.Context, string) ([]Handle, error)            { return nil, nil }
+func (fakeBackend) Name() string                                                   { return "fake" }
 
 var _ Backend = fakeBackend{}
 

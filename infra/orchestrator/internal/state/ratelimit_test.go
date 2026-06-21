@@ -55,10 +55,12 @@ func TestTokenBucket_RateZeroDefaultsToOne(t *testing.T) {
 // while mutation to < would let tokens overflow past burst.
 // Mutation kill: ratelimit.go:45 — `b.tokens += elapsed * b.rate`.
 // Use rate != burst != 1 so `*` is observably different from `+` or `/`.
-//   Original: elapsed=0.5s × rate=10 = 5 tokens added.
-//   Mutation `/`: 0.5 / 10 = 0.05 → no useful refill.
-//   Mutation `+`: 0.5 + 10 = 10.5 → over burst, capped to maxBurst (5 added).
-//   Mutation `-`: 0.5 - 10 = -9.5 → negative, no refill.
+//
+//	Original: elapsed=0.5s × rate=10 = 5 tokens added.
+//	Mutation `/`: 0.5 / 10 = 0.05 → no useful refill.
+//	Mutation `+`: 0.5 + 10 = 10.5 → over burst, capped to maxBurst (5 added).
+//	Mutation `-`: 0.5 - 10 = -9.5 → negative, no refill.
+//
 // The exact-5-refill expectation discriminates `*` from `/` and `-`; the
 // boundary check after refill discriminates `*` from `+`.
 func TestTokenBucket_ArithmeticIsMultiplication(t *testing.T) {

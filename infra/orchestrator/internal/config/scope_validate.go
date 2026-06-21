@@ -9,9 +9,21 @@ import (
 
 var validProfiles = map[string]bool{"strict": true, "standard": true, "permissive": true, "custom": true}
 
+// validBackends is the set of backend names accepted by Validate.
+// An empty backend field is normalised to "compose" by Validate before
+// any other check so callers can omit the field entirely.
+var validBackends = map[string]bool{"compose": true, "kube": true}
+
 // Validate enforces spec §4.2 invariants. Fail-closed; orchestrator refuses
 // to start if any rule fails.
 func (s *Scope) Validate() error {
+	// Normalise: empty backend defaults to "compose".
+	if s.Backend == "" {
+		s.Backend = "compose"
+	}
+	if !validBackends[s.Backend] {
+		return fmt.Errorf("config: backend must be 'compose' or 'kube' (got %q)", s.Backend)
+	}
 	if s.Name == "" {
 		return errors.New("config: name is required")
 	}

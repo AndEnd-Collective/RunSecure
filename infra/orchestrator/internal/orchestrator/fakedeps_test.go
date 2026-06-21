@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/clock"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
@@ -229,7 +230,11 @@ func newFakeBreakers() *fakeBreakers {
 	return &fakeBreakers{open: map[string]bool{}, failed: map[string]int{}, closed: map[string]int{}}
 }
 
-func (b *fakeBreakers) IsOpen(repo string) bool { b.mu.Lock(); defer b.mu.Unlock(); return b.open[repo] }
+func (b *fakeBreakers) IsOpen(repo string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.open[repo]
+}
 func (b *fakeBreakers) MaybeHalfOpen(repo string) bool { return false }
 func (b *fakeBreakers) RecordSuccess(repo string) (closed bool) {
 	b.mu.Lock()
@@ -256,7 +261,7 @@ type fakeBucket struct{ taken atomic.Int64 }
 func (f *fakeBucket) TryTake() bool { f.taken.Add(1); return true }
 
 type fakeEgress struct {
-	tempBase string
+	tempBase  string
 	renderErr error
 }
 
@@ -274,41 +279,144 @@ func (f *fakeEgress) Render(spawnID string, r *runneryml.Runner) (string, error)
 	return dir, nil
 }
 
+// ------------- fake backend -------------------------------------------
+
+// fakeBackend implements backend.Backend for unit tests. It records every
+// Spawn / WaitForExit / Teardown call so tests can assert invocation order
+// and count. By default Spawn succeeds and WaitForExit returns (0, false).
+type fakeBackend struct {
+	mu sync.Mutex
+
+	// Spawn controls.
+	spawnErr     error // if non-nil, Spawn returns this error
+	spawnCalls   []backend.SpawnInput
+	spawnHandles []backend.Handle // handles returned by Spawn (one per call)
+
+	// WaitForExit controls.
+	waitCalls    []backend.Handle
+	waitExitCode int
+	waitTimedOut bool
+
+	// Teardown controls.
+	teardownCalls []struct {
+		handle backend.Handle
+		force  bool
+	}
+	// inspectExitDelay simulates a runner that never exits (WaitForExit blocks
+	// until timeout fires). When non-zero WaitForExit returns (-1, true).
+	inspectExitDelay time.Duration
+}
+
+func newFakeBackend() *fakeBackend { return &fakeBackend{} }
+
+func (f *fakeBackend) Name() string { return "fake" }
+
+func (f *fakeBackend) Spawn(_ context.Context, in backend.SpawnInput) (backend.Handle, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.spawnCalls = append(f.spawnCalls, in)
+	if f.spawnErr != nil {
+		return backend.Handle{}, f.spawnErr
+	}
+	h := backend.Handle{
+		SpawnID: in.SpawnID,
+		Backend: "fake",
+		Refs: map[string]string{
+			"runner":  "id-runner",
+			"proxy":   "id-proxy",
+			"network": "net-fake",
+		},
+	}
+	f.spawnHandles = append(f.spawnHandles, h)
+	return h, nil
+}
+
+func (f *fakeBackend) WaitForExit(_ context.Context, h backend.Handle, _ time.Duration) (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitCalls = append(f.waitCalls, h)
+	if f.inspectExitDelay > 0 {
+		// Simulate never-exiting runner: block briefly then return timedOut.
+		// Use a small real sleep so callers that advance a fake clock can drive
+		// the timeout in Execute; fakeBackend itself does not consult the clock.
+		time.Sleep(f.inspectExitDelay)
+		return -1, true
+	}
+	return f.waitExitCode, f.waitTimedOut
+}
+
+func (f *fakeBackend) Teardown(_ context.Context, h backend.Handle, force bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.teardownCalls = append(f.teardownCalls, struct {
+		handle backend.Handle
+		force  bool
+	}{h, force})
+	return nil
+}
+
+func (f *fakeBackend) Reconcile(_ context.Context, _ string) ([]backend.Handle, error) {
+	return nil, nil
+}
+
+// spawnCount returns the number of Spawn calls recorded.
+func (f *fakeBackend) spawnCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.spawnCalls)
+}
+
+// waitCount returns the number of WaitForExit calls recorded.
+func (f *fakeBackend) waitCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.waitCalls)
+}
+
+// teardownCount returns the number of Teardown calls recorded.
+func (f *fakeBackend) teardownCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.teardownCalls)
+}
+
 // ------------- combined deps shim --------------------------------------
 
 type spawnDeps struct {
-	gh          *github.Client
-	dc          *fakeDockerClient
-	em          *cornerstone.Emitter
-	emBuf       *bytes.Buffer
-	clk         *clock.Fake
-	eg          *fakeEgress
-	st          *state.State
-	scopeName   string
-	globalCap   int
-	repoCap     int
-	runnerYML        *runneryml.Runner
-	runnerYMLErr     error
-	imageDigest      string // snapshot.ImageDigest
-	fallbackDigest   string // RunnerImageDigestFor(...) — defaults to imageDigest
-	proxyDigest      string
-	breakers     *fakeBreakers
-	bucket       TokenBucket
+	gh             *github.Client
+	dc             *fakeDockerClient
+	be             *fakeBackend
+	em             *cornerstone.Emitter
+	emBuf          *bytes.Buffer
+	clk            *clock.Fake
+	eg             *fakeEgress
+	st             *state.State
+	scopeName      string
+	globalCap      int
+	repoCap        int
+	runnerYML      *runneryml.Runner
+	runnerYMLErr   error
+	imageDigest    string // snapshot.ImageDigest
+	fallbackDigest string // RunnerImageDigestFor(...) — defaults to imageDigest
+	proxyDigest    string
+	breakers       *fakeBreakers
+	bucket         TokenBucket
 }
 
-func (d *spawnDeps) GitHub() *github.Client       { return d.gh }
-func (d *spawnDeps) Docker() docker.Client        { return d.dc }
-func (d *spawnDeps) Emit() *cornerstone.Emitter   { return d.em }
-func (d *spawnDeps) Clock() ClockLike             { return d.clk }
-func (d *spawnDeps) Egress() EgressGenerator      { return d.eg }
+func (d *spawnDeps) GitHub() *github.Client     { return d.gh }
+func (d *spawnDeps) Docker() docker.Client      { return d.dc }
+func (d *spawnDeps) Backend() backend.Backend   { return d.be }
+func (d *spawnDeps) Emit() *cornerstone.Emitter { return d.em }
+func (d *spawnDeps) Clock() ClockLike           { return d.clk }
+func (d *spawnDeps) Egress() EgressGenerator    { return d.eg }
 func (d *spawnDeps) RunnerYML(_ string) (*RunnerYMLSnapshot, error) {
 	if d.runnerYMLErr != nil {
 		return nil, d.runnerYMLErr
 	}
 	return &RunnerYMLSnapshot{YML: d.runnerYML, ImageDigest: d.imageDigest}, nil
 }
-func (d *spawnDeps) State() StateLike              { return d.st }
-func (d *spawnDeps) GlobalMaxRunners() int         { return d.globalCap }
+func (d *spawnDeps) State() StateLike               { return d.st }
+func (d *spawnDeps) GlobalMaxRunners() int          { return d.globalCap }
 func (d *spawnDeps) RepoMaxConcurrent(_ string) int { return d.repoCap }
 func (d *spawnDeps) ScopeName() string              { return d.scopeName }
 func (d *spawnDeps) ProxyImageDigest() string       { return d.proxyDigest }
@@ -319,8 +427,8 @@ func (d *spawnDeps) RunnerImageDigestFor(_ string) string {
 	return d.imageDigest
 }
 func (d *spawnDeps) SeccompProfileHostPath(_ string) string { return "/seccomp/p.json" }
-func (d *spawnDeps) RateLimiter() TokenBucket      { return d.bucket }
-func (d *spawnDeps) Breakers() BreakerMap          { return d.breakers }
+func (d *spawnDeps) RateLimiter() TokenBucket               { return d.bucket }
+func (d *spawnDeps) Breakers() BreakerMap                   { return d.breakers }
 
 func newSpawnDeps(t *testing.T) *spawnDeps {
 	t.Helper()
@@ -365,6 +473,7 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 	return &spawnDeps{
 		gh:        gh,
 		dc:        newFakeDocker(),
+		be:        newFakeBackend(),
 		em:        em,
 		emBuf:     buf,
 		clk:       clock.NewFake(time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)),
@@ -374,9 +483,9 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 		globalCap: 10,
 		repoCap:   5,
 		runnerYML: &runneryml.Runner{
-			Runtime:   "node:24",
-			Labels:    []string{"self-hosted", "Linux"},
-			Resources: runneryml.Resources{Memory: "8g", CPUs: 4, PIDs: 2048},
+			Runtime:      "node:24",
+			Labels:       []string{"self-hosted", "Linux"},
+			Resources:    runneryml.Resources{Memory: "8g", CPUs: 4, PIDs: 2048},
 			Orchestrator: runneryml.OrchestratorBlock{TimeoutSeconds: 60},
 		},
 		imageDigest: "ghcr.io/test/runner@sha256:rr",
