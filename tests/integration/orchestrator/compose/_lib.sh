@@ -7,6 +7,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.test.yml"
 TESTDATA_DIR="${SCRIPT_DIR}/testdata"
 
+# Local registry used to produce TRUE manifest digests for locally-built images.
+# On native-Linux CI, locally-built images have empty RepoDigests; docker create
+# with @sha256:<config-id> fails because the daemon treats config IDs as manifest
+# digests only for registry-pushed images. Pushing to a local registry:2 instance
+# populates RepoDigests with a real manifest digest that any Docker engine resolves.
+LOCAL_REGISTRY_HOST="localhost:5000"
+LOCAL_REGISTRY_CONTAINER="rs-test-registry"
+
 # Detect docker-compose v1 or v2 (plugin). Mirrors the dispatch pattern
 # already used in infra/scripts/run.sh.
 if docker compose version >/dev/null 2>&1; then
@@ -17,6 +25,64 @@ else
   echo "FATAL: neither 'docker compose' nor 'docker-compose' is installed" >&2
   exit 1
 fi
+
+# start_local_registry starts a registry:2 container on localhost:5000 if one
+# is not already running. Idempotent: safe to call multiple times.
+# The registry is only reachable from the HOST (127.0.0.1:5000), which is all
+# that is needed — image resolution happens on the host Docker daemon.
+start_local_registry() {
+  # Already running — nothing to do.
+  if docker ps --filter "name=${LOCAL_REGISTRY_CONTAINER}" --format '{{.Names}}' \
+      | grep -q "^${LOCAL_REGISTRY_CONTAINER}$"; then
+    return 0
+  fi
+  # Remove any stopped container with this name from a previous aborted run.
+  docker rm -f "${LOCAL_REGISTRY_CONTAINER}" >/dev/null 2>&1 || true
+  docker run -d \
+    --name "${LOCAL_REGISTRY_CONTAINER}" \
+    -p "127.0.0.1:5000:5000" \
+    --label "runsecure.scope=test" \
+    registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 \
+    >/dev/null
+  # Wait for the registry to become ready.  registry:2 typically starts in
+  # under one second; 30 s timeout is generous for a slow CI host.
+  local elapsed=0
+  while (( elapsed < 30 )); do
+    # A manifest-not-found error from the registry proves the HTTP server is up.
+    # The '|| true' prevents set -e from aborting on the non-zero exit of docker pull.
+    local probe_out
+    probe_out=$(docker pull "${LOCAL_REGISTRY_HOST}/runsecure-probe:nope" 2>&1) || true
+    if echo "${probe_out}" | grep -qE "manifest unknown|not found|does not exist|repository.*not found"; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$(( elapsed + 1 ))
+  done
+  echo "FATAL: local registry (${LOCAL_REGISTRY_CONTAINER}) never became ready" >&2
+  return 1
+}
+
+# push_and_get_digest <local_tag> <registry_repo>
+# Tags <local_tag> as ${LOCAL_REGISTRY_HOST}/<registry_repo>, pushes it, and
+# prints the full digest ref (localhost:5000/<repo>@sha256:<manifest>) that the
+# Docker daemon can resolve on any platform — including native-Linux CI where
+# locally-built images have empty RepoDigests.
+push_and_get_digest() {
+  local local_tag="$1"
+  local registry_repo="$2"
+  local registry_ref="${LOCAL_REGISTRY_HOST}/${registry_repo}"
+
+  docker tag "${local_tag}" "${registry_ref}"
+  docker push "${registry_ref}" >/dev/null
+
+  # After a successful push the daemon updates RepoDigests with the manifest
+  # digest returned by the registry.  This is the TRUE manifest digest that
+  # dockerd resolves when given a @sha256: ref — unlike .Id (config digest),
+  # which only works on Colima/Docker Desktop by coincidence.
+  local digest
+  digest=$(docker image inspect "${registry_ref}" --format '{{index .RepoDigests 0}}')
+  echo "${digest}"
+}
 
 ensure_testdata() {
   mkdir -p "${TESTDATA_DIR}/proj/.github"
@@ -91,13 +157,17 @@ EOF
   rm -rf "$builddir"
 }
 
-# ensure_test_allowlist resolves the digest (or ID fallback) of the local
-# test-runner image and writes a single-entry allowed-images.txt that the
-# compose stack will bind-mount over the socket-proxy's baked-in empty file.
+# ensure_test_allowlist resolves the TRUE manifest digest of the local
+# test-runner image by pushing it to the local registry and reading back the
+# populated RepoDigests field.  The resulting ref is written to allowed-images.txt
+# and exported as RUNSECURE_TEST_RUNNER_REF.
 #
-# Exports RUNSECURE_TEST_RUNNER_REF as the full ref the orchestrator will
-# pass to socket-proxy's containers/create — must match the allowlist entry
-# byte-for-byte.
+# Why not use {{.Id}}?  On native-Linux CI the Docker daemon treats @sha256:
+# refs as manifest digests (from a registry push), not image config digests.
+# Locally-built images have empty RepoDigests, so docker create with
+# @sha256:<config-id> fails with "No such image".  Pushing to a local
+# registry:2 instance populates RepoDigests with a real manifest digest that
+# resolves on every platform.
 #
 # If RUNSECURE_TEST_OVERRIDE_ALLOWLIST is set, the file is NOT overwritten
 # (the caller has set up a deliberately-empty allowlist for the
@@ -105,15 +175,15 @@ EOF
 # tries to spawn (and gets refused by the empty allowlist).
 ensure_test_allowlist() {
   build_test_runner_image
-  local id
-  id=$(docker image inspect runsecure-test-runner:local --format '{{.Id}}')
-  local ref="runsecure-test-runner:local@${id}"
+  start_local_registry
+  local ref
+  ref=$(push_and_get_digest "runsecure-test-runner:local" "runsecure-test-runner")
   # RUNSECURE_TEST_OVERRIDE_ALLOWLIST: skip file write when the caller has
   # pre-populated the allowlist (e.g. ensure_egress_allowlist with both runner
   # and proxy refs) or deliberately set an empty list (leak-cleanup test).
   if [[ -z "${RUNSECURE_TEST_OVERRIDE_ALLOWLIST:-}" ]]; then
     cat > "${TESTDATA_DIR}/allowed-images.txt" <<EOF
-# Test allowlist generated by _lib.sh.
+# Test allowlist generated by _lib.sh (runner via local registry).
 ${ref}
 EOF
   fi
@@ -159,20 +229,24 @@ build_real_proxy_image() {
 # image digest so socket-proxy accepts both runner and proxy spawns.
 # Also rebuilds the orchestrator and socket-proxy stack images to ensure
 # they reflect the current source (stale images cause spawn failures).
+#
+# Both images are pushed to the local registry so that their RepoDigests are
+# populated with TRUE manifest digests. On native-Linux CI, locally-built
+# images have empty RepoDigests; using {{.Id}} (config digest) in a @sha256:
+# ref causes docker create to fail with "No such image" because the daemon
+# only resolves config digests as @sha256: refs for registry-pushed images.
 ensure_egress_allowlist() {
   build_orchestrator_stack_images
   build_real_proxy_image
-  local proxy_id
-  proxy_id=$(docker image inspect runsecure-proxy:itest --format '{{.Id}}')
-  local proxy_ref="runsecure-proxy:itest@${proxy_id}"
-
   build_test_runner_image
-  local runner_id
-  runner_id=$(docker image inspect runsecure-test-runner:local --format '{{.Id}}')
-  local runner_ref="runsecure-test-runner:local@${runner_id}"
+  start_local_registry
+
+  local proxy_ref runner_ref
+  proxy_ref=$(push_and_get_digest "runsecure-proxy:itest" "runsecure-proxy")
+  runner_ref=$(push_and_get_digest "runsecure-test-runner:local" "runsecure-test-runner")
 
   cat > "${TESTDATA_DIR}/allowed-images.txt" <<EOF
-# Egress-test allowlist generated by _lib.sh (real proxy + test runner).
+# Egress-test allowlist generated by _lib.sh (real proxy + test runner via local registry).
 ${runner_ref}
 ${proxy_ref}
 EOF
@@ -416,6 +490,7 @@ setup_real_proxy_stack() {
 # teardown_real_proxy_stack stops and removes all test containers and networks.
 teardown_real_proxy_stack() {
   docker rm -f "${REAL_PROXY_CONTAINER}" rs-egress-runner rs-test-backend >/dev/null 2>&1 || true
+  docker rm -f "${LOCAL_REGISTRY_CONTAINER}" >/dev/null 2>&1 || true
   docker network rm "${REAL_PROXY_NETWORK}" spawn-egress >/dev/null 2>&1 || true
   restore_runner_yml 2>/dev/null || true
   rm -rf "${TESTDATA_DIR}/egress-itest" 2>/dev/null || true
@@ -456,6 +531,7 @@ stack_down() {
   local pname; pname="$(project_name)"
   $DC -f "${COMPOSE_FILE}" -p "${pname}" down --volumes --remove-orphans 2>/dev/null || true
   # Spawn-sibling containers live OUTSIDE the compose project — reap by label.
+  # This also removes the local registry (labelled runsecure.scope=test).
   docker ps -a --filter "label=runsecure.scope=test" --format '{{.ID}}' \
     | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network ls --filter "name=rs-net-" --format '{{.ID}}' \
