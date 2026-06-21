@@ -12,6 +12,13 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 )
 
+// egressNetworkName is the well-known Docker network name the proxy container
+// is attached to for outbound internet access. The runner is never attached to
+// this network — it reaches the internet only through the proxy on the internal
+// network. This name must match what the infrastructure creates externally
+// (e.g. docker-compose or the host bootstrap).
+const egressNetworkName = "runsecure-egress"
+
 // SpawnWorker is the per-intent worker. One instance is shared by all
 // goroutines in the spawn-worker pool.
 type SpawnWorker struct {
@@ -99,19 +106,27 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
-	// Step 4+5: create+start the four containers.
+	// Step 4+5: create+start the two containers (proxy + runner).
+	// The proxy is dual-homed on the internal net and the egress net.
+	// The runner is internal-only — it never touches the egress net.
 	memBytes, nanoCPUs := parseResources(snapshot.YML.Resources.Memory, snapshot.YML.Resources.CPUs)
+	r := snapshot.YML
+	// EnableDNSMasq when dns.host is explicitly set to false, meaning the
+	// project wants the proxy to resolve DNS rather than using the host resolver.
+	enableDNSMasq := r.DNS.Host != nil && !*r.DNS.Host
 	containerIDs, err := docker.Spawn(ctx, w.deps.Docker(), docker.SpawnInputs{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		NetworkID:          netID,
+		EgressNetwork:      egressNetworkName,
 		RunnerImage:        imageDigest,
 		ProxyImage:         w.deps.ProxyImageDigest(),
-		SeccompProfilePath: w.deps.SeccompProfileHostPath(snapshot.YML.Orchestrator.SeccompProfile),
+		SeccompProfilePath: w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
 		ResourcesMemory:    memBytes,
 		ResourcesNanoCPUs:  nanoCPUs,
-		ResourcesPIDs:      int64(snapshot.YML.Resources.PIDs),
+		ResourcesPIDs:      int64(r.Resources.PIDs),
 		JITConfigB64:       jit.EncodedJITConfig,
 		EgressConfigDir:    egressDir,
+		EnableDNSMasq:      enableDNSMasq,
 	})
 	if err != nil {
 		_ = w.deps.Docker().DeleteNetwork(ctx, netID)

@@ -34,9 +34,7 @@ func TestSpawn_HappyPath(t *testing.T) {
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"}))
 
 	require.True(t, d.dc.created["runner"], "runner container created")
-	require.True(t, d.dc.created["squid"], "squid container created")
-	require.True(t, d.dc.created["haproxy"], "haproxy container created")
-	require.True(t, d.dc.created["dnsmasq"], "dnsmasq container created")
+	require.True(t, d.dc.created["proxy"], "proxy container created")
 	require.Equal(t, 0, d.st.InFlight("o/r"), "in-flight decremented after teardown")
 
 	d.requireEmitted(t,
@@ -61,7 +59,7 @@ func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
 func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Make all docker.Spawn container creates fail to trigger A1 leak path.
-	d.dc.createErr["squid"] = errors.New("simulated docker error after JIT")
+	d.dc.createErr["proxy"] = errors.New("simulated docker error after JIT")
 	w := NewSpawnWorker(d)
 
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
@@ -119,7 +117,7 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 // to Open. Previously the return values from RecordFailure were dropped.
 func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["squid"] = errors.New("force failure")
+	d.dc.createErr["proxy"] = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
@@ -131,14 +129,14 @@ func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 
 func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
 	d := newSpawnDeps(t)
-	d.dc.createErr["squid"] = errors.New("force failure")
+	d.dc.createErr["proxy"] = errors.New("force failure")
 	w := NewSpawnWorker(d)
 	for i := 0; i < 5; i++ {
 		_ = w.Execute(context.Background(), SpawnIntent{
 			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
 		})
 	}
-	delete(d.dc.createErr, "squid")
+	delete(d.dc.createErr, "proxy")
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "ok",
 	}))
@@ -189,7 +187,7 @@ func TestSpawn_FailAndLeak_OnlyCallsDeleteForValidID(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Force step-3 failure (network create) AFTER JIT success → triggers
 	// failAndLeak. The fake mock-github default returns runnerID=42.
-	d.dc.createErr["squid"] = errors.New("force post-JIT failure")
+	d.dc.createErr["proxy"] = errors.New("force post-JIT failure")
 	w := NewSpawnWorker(d)
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	// runner.leak_cleaned MUST have been emitted.

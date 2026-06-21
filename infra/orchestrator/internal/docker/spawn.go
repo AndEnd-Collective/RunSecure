@@ -12,6 +12,7 @@ import (
 type SpawnInputs struct {
 	Scope, Repo, SpawnID string
 	NetworkID            string // pre-created by caller; Spawn attaches containers to it
+	EgressNetwork        string // external network the proxy is dual-homed onto
 	RunnerImage          string // digest-pinned
 	ProxyImage           string // digest-pinned
 	SeccompProfilePath   string
@@ -21,10 +22,15 @@ type SpawnInputs struct {
 	JITConfigB64         string
 	EgressConfigDir      string // host path bind-mounted into proxy containers
 	Labels               []string // additional labels (key=value) merged onto every container
+	EnableDNSMasq        bool     // when true, inject ENABLE_DNSMASQ=true into proxy env
 }
 
-// Spawn creates and starts the 4-container per-spawn stack: squid + haproxy
-// + dnsmasq + runner. All four are attached to the caller-provided network.
+// Spawn creates and starts a 2-container per-spawn stack: one combined proxy
+// (dual-homed on internal + egress network) and one runner (internal only).
+// The proxy carries all traffic-shaping roles: squid HTTP proxy, haproxy TCP
+// egress, and optionally dnsmasq. The runner reaches the internet only through
+// the proxy; it is never attached to the egress network.
+//
 // Returns map of role → container ID. On any failure, rolls back created
 // containers (caller deletes the network).
 func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, error) {
@@ -53,72 +59,73 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 		AutoRemove:     false,
 	}
 
-	// 1. squid container.
-	squidLabels := merge(commonLabels, map[string]string{"runsecure.role": "squid"})
-	squidHC := hcBase
-	squidHC.Binds = []string{in.EgressConfigDir + "/squid.conf:/etc/squid/squid.conf:ro"}
-	squidName := fmt.Sprintf("rs-%s-squid", in.SpawnID)
-	squidID, err := c.CreateContainer(ctx, CreateContainerRequest{
-		Name: squidName, Image: in.ProxyImage, User: "1001:0",
-		Labels: squidLabels, HostConfig: squidHC,
+	// 1. Combined proxy container (dual-homed: internal net + egress net).
+	proxyEnv := []string{"ENABLE_HAPROXY=true"}
+	if in.EnableDNSMasq {
+		proxyEnv = append(proxyEnv, "ENABLE_DNSMASQ=true")
+	}
+
+	proxyLabels := merge(commonLabels, map[string]string{"runsecure.role": "proxy"})
+	proxyHC := hcBase
+	proxyHC.Binds = []string{
+		in.EgressConfigDir + "/squid.conf:/etc/squid/squid.conf:ro",
+		in.EgressConfigDir + "/haproxy.cfg:/etc/haproxy/haproxy.cfg:ro",
+		in.EgressConfigDir + "/dnsmasq.conf:/etc/dnsmasq.conf:ro",
+	}
+
+	// The proxy is attached to both the internal network (alias "proxy" so
+	// the runner can reach it) and the egress network (for internet access).
+	proxyEndpoints := map[string]EndpointConfig{
+		in.NetworkID: {Aliases: []string{"proxy"}},
+	}
+	if in.EgressNetwork != "" {
+		proxyEndpoints[in.EgressNetwork] = EndpointConfig{}
+	}
+
+	proxyName := fmt.Sprintf("rs-%s-proxy", in.SpawnID)
+	proxyID, err := c.CreateContainer(ctx, CreateContainerRequest{
+		Name: proxyName, Image: in.ProxyImage, User: "1001:0",
+		Env:    proxyEnv,
+		Labels: proxyLabels, HostConfig: proxyHC,
+		NetworkingConfig: &NetworkingConfig{EndpointsConfig: proxyEndpoints},
 	})
 	if err != nil {
 		rollback()
-		return nil, fmt.Errorf("docker: create squid: %w", err)
+		return nil, fmt.Errorf("docker: create proxy: %w", err)
 	}
-	created["squid"] = squidID
+	created["proxy"] = proxyID
 
-	// 2. haproxy container.
-	haLabels := merge(commonLabels, map[string]string{"runsecure.role": "haproxy"})
-	haHC := hcBase
-	haHC.Binds = []string{in.EgressConfigDir + "/haproxy.cfg:/etc/haproxy/haproxy.cfg:ro"}
-	haName := fmt.Sprintf("rs-%s-haproxy", in.SpawnID)
-	haID, err := c.CreateContainer(ctx, CreateContainerRequest{
-		Name: haName, Image: in.ProxyImage, User: "1001:0",
-		Labels: haLabels, HostConfig: haHC,
-	})
-	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("docker: create haproxy: %w", err)
-	}
-	created["haproxy"] = haID
-
-	// 3. dnsmasq container.
-	dnsLabels := merge(commonLabels, map[string]string{"runsecure.role": "dnsmasq"})
-	dnsHC := hcBase
-	dnsHC.Binds = []string{in.EgressConfigDir + "/dnsmasq.conf:/etc/dnsmasq.conf:ro"}
-	dnsName := fmt.Sprintf("rs-%s-dnsmasq", in.SpawnID)
-	dnsID, err := c.CreateContainer(ctx, CreateContainerRequest{
-		Name: dnsName, Image: in.ProxyImage, User: "1001:0",
-		Labels: dnsLabels, HostConfig: dnsHC,
-	})
-	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("docker: create dnsmasq: %w", err)
-	}
-	created["dnsmasq"] = dnsID
-
-	// 4. runner container.
+	// 2. Runner container (internal network only — NEVER attached to EgressNetwork).
 	runnerLabels := merge(commonLabels, map[string]string{"runsecure.role": "runner"})
 	runnerHC := hcBase
 	runnerHC.Memory = in.ResourcesMemory
 	runnerHC.NanoCPUs = in.ResourcesNanoCPUs
 	runnerHC.PidsLimit = in.ResourcesPIDs
 	runnerHC.Tmpfs = map[string]string{"/tmp": "noexec,nosuid,nodev,size=512m"}
-	// Bug #4 fix: thread the seccomp profile path from runner.yml into
-	// HostConfig.SecurityOpt. Without this, runner.yml's
-	// orchestrator.seccomp_profile was silently ignored — a strictness
-	// regression vs. the existing run.sh path.
 	if in.SeccompProfilePath != "" {
 		// Don't mutate hcBase's slice; build a fresh one.
 		runnerHC.SecurityOpt = append(append([]string{}, hcBase.SecurityOpt...),
 			"seccomp="+in.SeccompProfilePath)
 	}
+
+	// Runner routes all traffic through the proxy on the internal network.
+	runnerEnv := []string{
+		"RUNNER_JIT_CONFIG=" + in.JITConfigB64,
+		"HTTP_PROXY=http://proxy:3128",
+		"HTTPS_PROXY=http://proxy:3128",
+		"NO_PROXY=localhost",
+	}
+
 	runnerName := fmt.Sprintf("rs-%s-runner", in.SpawnID)
 	runnerID, err := c.CreateContainer(ctx, CreateContainerRequest{
 		Name: runnerName, Image: in.RunnerImage, User: "1001:0",
-		Env: []string{"RUNNER_JIT_CONFIG=" + in.JITConfigB64},
+		Env:    runnerEnv,
 		Labels: runnerLabels, HostConfig: runnerHC,
+		NetworkingConfig: &NetworkingConfig{
+			EndpointsConfig: map[string]EndpointConfig{
+				in.NetworkID: {},
+			},
+		},
 	})
 	if err != nil {
 		rollback()
@@ -126,8 +133,8 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	}
 	created["runner"] = runnerID
 
-	// Start all four (order matters: proxy stack must be ready before runner).
-	for _, role := range []string{"squid", "haproxy", "dnsmasq", "runner"} {
+	// Start order: proxy first (must be ready before runner registers with GitHub).
+	for _, role := range []string{"proxy", "runner"} {
 		if err := c.StartContainer(ctx, created[role]); err != nil {
 			rollback()
 			return nil, fmt.Errorf("docker: start %s: %w", role, err)
