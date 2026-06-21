@@ -21,7 +21,7 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS base
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS base
 
 # ---- Build arguments --------------------------------------------------------
 # All pins follow a 48-hour freshness rule: the chosen version must be at
@@ -29,11 +29,11 @@ FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f206
 # be yanked for regressions). Renovate's customManager handles ongoing
 # bumps with this same window.
 #
-# RUNNER_VERSION 2.334.0 (2026-04-21): patches Go-stdlib + grpc +
-#   docker/cli + sigstore CVEs from the previous 2.333.1 pin.
-ARG RUNNER_VERSION=2.334.0
-ARG RUNNER_SHA256_ARM64=f44255bd3e80160eb25f71bc83d06ea025f6908748807a584687b3184759f7e4
-ARG RUNNER_SHA256_AMD64=048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271
+# RUNNER_VERSION 2.335.1 (2026-06-09): background steps, Node 24 date
+#   update, Docker v29.5.2 + Buildx v0.34.1, Ubuntu 26.04 compat.
+ARG RUNNER_VERSION=2.335.1
+ARG RUNNER_SHA256_ARM64=6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207
+ARG RUNNER_SHA256_AMD64=4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
 # GH_CLI_VERSION 2.95.0 (2026-06-17) — built with go1.26.4, which clears the
 #   go-stdlib CVEs (CVE-2026-42504 / GO-2026-5038 et al.) that failed the
 #   1.1.9 base scan when gh 2.93.0 was still on go1.26.3.
@@ -183,7 +183,7 @@ ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local
 # only knows about its own image set). That's a known, accepted UI quirk —
 # the values themselves are still informative.
 ENV ImageOS=runsecure-bookworm
-ENV ImageVersion=2.334.0
+ENV ImageVersion=2.335.1
 
 # ---- Job-started diagnostics hook ------------------------------------------
 # When ACTIONS_RUNNER_HOOK_JOB_STARTED is set, the actions-runner executes

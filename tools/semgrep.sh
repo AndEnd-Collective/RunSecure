@@ -27,7 +27,7 @@ fi
 
 # Pin Semgrep to a specific version so every image build is reproducible.
 # Bump this manually when you intend to upgrade.
-SEMGREP_VERSION="1.163.0"
+SEMGREP_VERSION="1.167.0"
 python3 -m pip install --no-cache-dir --break-system-packages "semgrep==${SEMGREP_VERSION}"
 
 # Verify
