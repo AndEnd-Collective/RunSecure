@@ -217,6 +217,10 @@ func (f *fakeDockerClient) ListContainersForScope(ctx context.Context, scope str
 	return nil, nil
 }
 
+func (f *fakeDockerClient) ListNetworksForScope(ctx context.Context, scope string) ([]docker.Network, error) {
+	return nil, nil
+}
+
 // ------------- in-memory emitter + fake breakers/buckets ------------------
 
 type fakeBreakers struct {

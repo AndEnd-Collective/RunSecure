@@ -24,6 +24,10 @@ func TestRouteAllowed_ContainersAndNetworks(t *testing.T) {
 		{http.MethodDelete, "/v1.43/networks/xyz", true},
 		{http.MethodGet, "/v1.44/info", true},
 
+		// GET /networks is allowed for cold-start orphan cleanup (#54 fix 4).
+		{http.MethodGet, "/v1.43/networks", true},
+		{http.MethodGet, "/v1.44/networks", true},
+
 		// blocked
 		{http.MethodPost, "/v1.43/networks/xyz/connect", false}, // removed: unused + egress bypass risk
 		{http.MethodPost, "/v1.43/containers/abc/exec", false},

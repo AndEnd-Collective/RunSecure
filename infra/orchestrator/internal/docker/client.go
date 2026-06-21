@@ -37,6 +37,17 @@ type Client interface {
 	CreateNetwork(ctx context.Context, req CreateNetworkRequest) (id string, err error)
 	DeleteNetwork(ctx context.Context, id string) error
 	ListContainersForScope(ctx context.Context, scope string) ([]Container, error)
+	// ListNetworksForScope returns all Docker networks carrying
+	// runsecure.scope=<scope> in their Labels. Used at cold-start to clean up
+	// per-spawn networks left from a previous orchestrator run (#54 fix 4).
+	ListNetworksForScope(ctx context.Context, scope string) ([]Network, error)
+}
+
+// Network is a minimal representation of a Docker network.
+type Network struct {
+	ID     string
+	Name   string
+	Labels map[string]string
 }
 
 type CreateContainerRequest struct {
@@ -347,6 +358,39 @@ func (c *httpClient) ListContainersForScope(ctx context.Context, scope string) (
 			name = strings.TrimPrefix(cj.Names[0], "/")
 		}
 		out = append(out, Container{ID: cj.ID, Name: name, Labels: cj.Labels})
+	}
+	return out, nil
+}
+
+type networkJSON struct {
+	ID     string            `json:"Id"`
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// ListNetworksForScope lists Docker networks whose runsecure.scope label
+// matches scope. Used at cold-start to delete per-spawn internal networks
+// (rs-net-<repo>-<spawnID>) that were not torn down before the previous
+// orchestrator restart (#54 fix 4).
+func (c *httpClient) ListNetworksForScope(ctx context.Context, scope string) ([]Network, error) {
+	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"]}`, scope)
+	path := "/networks?filters=" + url.QueryEscape(filter)
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("docker: networks: status %d: %s", resp.StatusCode, string(b))
+	}
+	var arr []networkJSON
+	if err := json.NewDecoder(resp.Body).Decode(&arr); err != nil {
+		return nil, err
+	}
+	out := make([]Network, 0, len(arr))
+	for _, nj := range arr {
+		out = append(out, Network{ID: nj.ID, Name: nj.Name, Labels: nj.Labels})
 	}
 	return out, nil
 }

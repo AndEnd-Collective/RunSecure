@@ -605,3 +605,63 @@ func TestNewClient_HTTP_PlaintextUnchanged(t *testing.T) {
 	err := c.StartContainer(context.Background(), "abc")
 	require.NoError(t, err)
 }
+
+// ─── ListNetworksForScope tests (issue #54 fix 4) ────────────────────────────
+
+func TestListNetworksForScope_HappyPath(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1.44/networks", r.URL.Path)
+		q, _ := url.QueryUnescape(r.URL.RawQuery)
+		require.Contains(t, q, "runsecure.scope=test")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"Id":     "net-abc123",
+				"Name":   "rs-net-owner_repo-sp1",
+				"Labels": map[string]string{"runsecure.scope": "test", "runsecure.spawn_id": "sp1"},
+			},
+		})
+	})
+	nets, err := c.ListNetworksForScope(context.Background(), "test")
+	require.NoError(t, err)
+	require.Len(t, nets, 1)
+	require.Equal(t, "net-abc123", nets[0].ID)
+	require.Equal(t, "rs-net-owner_repo-sp1", nets[0].Name)
+	require.Equal(t, "test", nets[0].Labels["runsecure.scope"])
+}
+
+func TestListNetworksForScope_EmptyResult(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	nets, err := c.ListNetworksForScope(context.Background(), "test")
+	require.NoError(t, err)
+	require.Empty(t, nets)
+}
+
+func TestListNetworksForScope_500(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	_, err := c.ListNetworksForScope(context.Background(), "test")
+	require.Error(t, err)
+}
+
+func TestListNetworksForScope_MalformedResponse(t *testing.T) {
+	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	})
+	_, err := c.ListNetworksForScope(context.Background(), "test")
+	require.Error(t, err)
+}
+
+// TestDo_NetworkError_ListNetworks verifies that ListNetworksForScope also
+// propagates transport-level errors (regression guard for the new method).
+func TestDo_NetworkError_ListNetworks(t *testing.T) {
+	c, err := NewClient("http://127.0.0.1:1")
+	require.NoError(t, err)
+	_, err = c.ListNetworksForScope(context.Background(), "s")
+	require.Error(t, err)
+}

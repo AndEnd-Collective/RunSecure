@@ -57,6 +57,10 @@ func (f *fakeClient) ListContainersForScope(_ context.Context, _ string) ([]Cont
 	return nil, nil
 }
 
+func (f *fakeClient) ListNetworksForScope(_ context.Context, _ string) ([]Network, error) {
+	return nil, nil
+}
+
 // hasEnv reports whether kv (e.g. "HTTP_PROXY=http://proxy:3128") is present
 // in the env slice.
 func hasEnv(env []string, kv string) bool {

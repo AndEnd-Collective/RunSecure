@@ -114,6 +114,10 @@ func (f *fakeDocker) ListContainersForScope(_ context.Context, _ string) ([]dock
 	return f.listResult, f.listErr
 }
 
+func (f *fakeDocker) ListNetworksForScope(_ context.Context, _ string) ([]docker.Network, error) {
+	return nil, nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -289,6 +293,10 @@ func (f *failNetworkDocker) DeleteContainer(ctx context.Context, id string, forc
 }
 func (f *failNetworkDocker) ListContainersForScope(ctx context.Context, scope string) ([]docker.Container, error) {
 	return f.inner.ListContainersForScope(ctx, scope)
+}
+
+func (f *failNetworkDocker) ListNetworksForScope(ctx context.Context, scope string) ([]docker.Network, error) {
+	return f.inner.ListNetworksForScope(ctx, scope)
 }
 
 // ---------------------------------------------------------------------------
