@@ -1019,6 +1019,12 @@ func assertPodSecurity(t *testing.T, name string, pod *corev1.Pod) {
 	if psc.RunAsUser == nil || *psc.RunAsUser != 1001 {
 		t.Errorf("%s: RunAsUser must be 1001, got %v", name, psc.RunAsUser)
 	}
+	// FSGroup must be set to 1001 so that Secret volume files (defaultMode 0o400)
+	// are owned 1001:1001 at mount time and readable by the non-root process.
+	// Without FSGroup, files are root:root and 0o400 is unreadable by UID 1001.
+	if psc.FSGroup == nil || *psc.FSGroup != 1001 {
+		t.Errorf("%s: FSGroup must be 1001 (ensures Secret volume files are readable by UID 1001), got %v", name, psc.FSGroup)
+	}
 	if psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("%s: SeccompProfile.Type must be RuntimeDefault", name)
 	}

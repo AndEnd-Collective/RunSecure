@@ -105,10 +105,17 @@ func ptr[T any](v T) *T { return &v }
 
 // hardPodSecCtx returns the pod-level PodSecurityContext shared by every pod
 // in the stack.
+//
+// FSGroup is set to runnerUID (1001) so that k8s chowns Secret and ConfigMap
+// volume files to GID 1001 at mount time. Without FSGroup, Secret volume files
+// are owned by root:root; a defaultMode of 0o400 would then be unreadable by
+// UID 1001 (EPERM). Setting FSGroup=1001 makes mounted files 1001:1001 with
+// mode 0o400 (-r--------), which UID 1001 can read as the file owner.
 func hardPodSecCtx() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
 		RunAsNonRoot: ptr(true),
 		RunAsUser:    ptr(runnerUID),
+		FSGroup:      ptr(runnerUID),
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
