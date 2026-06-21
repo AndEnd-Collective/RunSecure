@@ -17,6 +17,10 @@ setup_real_proxy_stack
 # Give HAProxy a moment to start inside the proxy container.
 sleep 5
 
+# Guard: verify the proxy container is running and HAProxy is accepting
+# connections on the allowed port (5432) before testing the negative case.
+# Without this, a missing proxy makes port 6379 also unreachable, causing the
+# negative test to pass for the wrong reason (no proxy vs. no HAProxy frontend).
 echo "=== TCP positive: proxy:5432 (HAProxy -> test-backend:5432) must accept ==="
 if docker exec "${EGRESS_RUNNER}" \
     sh -c 'nc -z -w 8 proxy 5432' \
@@ -29,6 +33,9 @@ else
   exit 1
 fi
 
+# The positive path above confirms the proxy is reachable and HAProxy is up.
+# A refusal on port 6379 now meaningfully asserts no HAProxy frontend exists
+# for that port (not a hollow kernel-refusal from a missing proxy).
 echo "=== TCP negative: proxy:6379 (no HAProxy frontend) must be refused ==="
 if docker exec "${EGRESS_RUNNER}" \
     sh -c 'nc -z -w 3 proxy 6379' \

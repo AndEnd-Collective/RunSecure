@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 # compose-egress-attacker: five attacker scenarios that must all be BLOCKED.
 #
-# A1: Cloud metadata via proxy (169.254.169.254) — Squid blocks private IPs.
-# A2: Direct-to-IP bypass (curl 1.1.1.1 without proxy) — runner on internal
-#     network only; no route to the internet.
-# A3: Runner reaching test-backend on spawn-egress network by name — no route
-#     since runner is internal-only (not attached to spawn-egress).
-# A4: Runner reaching socket-proxy:2375 — no such host on internal network.
+# A1: Cloud metadata via proxy (169.254.169.254) — Squid blocks private IPs via
+#     an explicit "http_access deny rs_private_dst" ACL placed before the domain
+#     allowlist. This covers DNS-rebinding: even an allowed hostname that
+#     resolves to a private IP will be denied based on the resolved destination.
+#
+# A2: Direct-to-IP bypass (curl 1.1.1.1 without proxy) — asserts NETWORK
+#     ISOLATION (topology), not proxy policy. The runner container is attached
+#     only to the internal network and has no route to the internet. This test
+#     would pass even if the proxy were misconfigured, because the block comes
+#     from Docker network topology, not from any proxy rule.
+#
+# A3: Runner reaching test-backend on spawn-egress network by name — asserts
+#     NETWORK ISOLATION (topology). The runner is internal-only and cannot reach
+#     spawn-egress hosts by name or address. This would pass even if the proxy
+#     allowed all destinations.
+#
+# A4: Runner reaching socket-proxy:2375 — asserts NETWORK ISOLATION (topology).
+#     The socket-proxy is on the compose test-net, not the internal network.
+#     This would pass even if the proxy were misconfigured.
+#
 # A5: CONNECT to port 22 on allowed domain — Squid denies non-443 CONNECT.
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_lib.sh"
