@@ -143,6 +143,30 @@ func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventBreakerClosed)
 }
 
+// --- Task 8: egressNetworkName env lookup + fallback -------------------------
+
+// TestEgressNetworkName_EnvSet verifies that RUNSECURE_EGRESS_NETWORK overrides
+// the hardcoded fallback. This keeps compose.scope.yml and the orchestrator in
+// sync: compose sets RUNSECURE_EGRESS_NETWORK=${RUNSECURE_SCOPE}-spawn-egress,
+// and the orchestrator reads it here.
+func TestEgressNetworkName_EnvSet(t *testing.T) {
+	t.Setenv("RUNSECURE_EGRESS_NETWORK", "myscope-spawn-egress")
+	require.Equal(t, "myscope-spawn-egress", egressNetworkName())
+}
+
+// TestEgressNetworkName_EnvEmpty_UsesFallback verifies the fallback constant is
+// returned when RUNSECURE_EGRESS_NETWORK is absent (e.g. bare-docker / tests).
+func TestEgressNetworkName_EnvEmpty_UsesFallback(t *testing.T) {
+	t.Setenv("RUNSECURE_EGRESS_NETWORK", "") // ensure env is clear for this test
+	require.Equal(t, egressNetworkFallback, egressNetworkName())
+}
+
+// TestEgressNetworkName_FallbackValue asserts the constant matches the legacy
+// bare-docker name so that any rename must update this test explicitly.
+func TestEgressNetworkName_FallbackValue(t *testing.T) {
+	require.Equal(t, "runsecure-egress", egressNetworkFallback)
+}
+
 type denyingBucket struct{}
 
 func (denyingBucket) TryTake() bool { return false }

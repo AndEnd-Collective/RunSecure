@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -12,12 +13,26 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 )
 
-// egressNetworkName is the well-known Docker network name the proxy container
-// is attached to for outbound internet access. The runner is never attached to
-// this network — it reaches the internet only through the proxy on the internal
-// network. This name must match what the infrastructure creates externally
-// (e.g. docker-compose or the host bootstrap).
-const egressNetworkName = "runsecure-egress"
+// egressNetworkFallback is the fallback egress network name used when
+// RUNSECURE_EGRESS_NETWORK is not set in the environment. The compose stack
+// sets RUNSECURE_EGRESS_NETWORK to "${RUNSECURE_SCOPE}-spawn-egress"; this
+// constant covers bare docker / integration-test environments that do not run
+// through compose.
+const egressNetworkFallback = "runsecure-egress"
+
+// egressNetworkName returns the Docker network name the proxy container is
+// attached to for outbound internet access. It reads RUNSECURE_EGRESS_NETWORK
+// from the environment (set by compose.scope.yml) and falls back to the
+// well-known constant for non-compose deployments.
+//
+// The runner is never attached to this network — it reaches the internet only
+// through the proxy on the internal network.
+func egressNetworkName() string {
+	if v := os.Getenv("RUNSECURE_EGRESS_NETWORK"); v != "" {
+		return v
+	}
+	return egressNetworkFallback
+}
 
 // SpawnWorker is the per-intent worker. One instance is shared by all
 // goroutines in the spawn-worker pool.
@@ -117,7 +132,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	containerIDs, err := docker.Spawn(ctx, w.deps.Docker(), docker.SpawnInputs{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		NetworkID:          netID,
-		EgressNetwork:      egressNetworkName,
+		EgressNetwork:      egressNetworkName(),
 		RunnerImage:        imageDigest,
 		ProxyImage:         w.deps.ProxyImageDigest(),
 		SeccompProfilePath: w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
