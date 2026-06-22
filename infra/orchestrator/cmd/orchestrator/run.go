@@ -72,6 +72,17 @@ func Run(ctx context.Context, scopePath string) error {
 		}
 	}
 
+	// Cold-start per-spawn network cleanup (#54 fix 4): remove any rs-net-*
+	// networks from a previous orchestrator run. These are created per-spawn and
+	// normally deleted by Teardown, but a hard restart or crash leaves them
+	// behind. The address-pool exhausts after ~31 unreleased bridge networks.
+	// We list only runsecure.scope-labelled networks so the scope is precise.
+	if nets, err := dc.ListNetworksForScope(ctx, s.Name); err == nil {
+		for _, n := range nets {
+			_ = dc.DeleteNetwork(ctx, n.ID)
+		}
+	}
+
 	// Build everything the poll + spawn deps need.
 	intentCh := make(chan orchestrator.SpawnIntent, 32)
 	// B1 rate limiter — token bucket protecting against unbounded burst.

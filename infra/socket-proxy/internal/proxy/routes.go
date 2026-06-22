@@ -26,6 +26,11 @@ var allowedRoutes = []struct {
 	{"POST", regexp.MustCompile(`^/containers/create$`)},
 	{"POST", regexp.MustCompile(`^/containers/[^/]+/start$`)},
 	{"DELETE", regexp.MustCompile(`^/containers/[^/]+$`)},
+	// GET /networks is allowed for cold-start orphan cleanup: the orchestrator
+	// lists networks with a runsecure.scope label filter on restart to remove
+	// per-spawn networks left from a previous run. The route is read-only and
+	// narrowly used; write access (create/delete) is unchanged (#54 fix 4).
+	{"GET", regexp.MustCompile(`^/networks$`)},
 	{"POST", regexp.MustCompile(`^/networks/create$`)},
 	{"DELETE", regexp.MustCompile(`^/networks/[^/]+$`)},
 	// POST /networks/{id}/connect is intentionally absent: the orchestrator

@@ -326,6 +326,150 @@ func TestRenderSquid_AllowedPrivateCIDR_IPv6(t *testing.T) {
 	}
 }
 
+// ─── GitHub core baseline tests (issue #54, Fix #5) ────────────────────────
+
+// TestRenderSquid_GitHubCoreBaseline_EmptyHTTPEgress verifies that even when
+// runner.yml http_egress is empty, RenderSquid unconditionally emits every
+// GitHubCoreDomain as an rs_github_core ACL line AND the corresponding
+// http_access allow rule, and that they appear BEFORE http_access deny all.
+func TestRenderSquid_GitHubCoreBaseline_EmptyHTTPEgress(t *testing.T) {
+	r := &runneryml.Runner{} // no http_egress entries
+	policy := security.Defaults("strict")
+	policy.AllowWildcards = false
+
+	out := string(RenderSquid(r, policy))
+
+	// Every domain in the constant must appear.
+	for _, d := range GitHubCoreDomains {
+		acl := "acl rs_github_core dstdomain " + d
+		if !strings.Contains(out, acl) {
+			t.Errorf("GitHub core domain %q missing from squid config:\n%s", d, out)
+		}
+	}
+
+	// The allow rule must be present.
+	const allowLine = "http_access allow rs_github_core"
+	if !strings.Contains(out, allowLine) {
+		t.Fatalf("expected %q in squid config:\n%s", allowLine, out)
+	}
+
+	// The allow rule must come before deny all.
+	allowIdx := strings.Index(out, allowLine)
+	denyIdx := strings.Index(out, "http_access deny all")
+	if denyIdx < 0 {
+		t.Fatalf("http_access deny all missing from squid config:\n%s", out)
+	}
+	if allowIdx >= denyIdx {
+		t.Fatalf("rs_github_core allow (pos %d) must precede http_access deny all (pos %d):\n%s",
+			allowIdx, denyIdx, out)
+	}
+}
+
+// TestRenderSquid_GitHubCoreBaseline_PrivateDenyFirst verifies the ordering
+// invariant: the private-IP deny is emitted BEFORE the GitHub core allow.
+// The rs_private_dst deny is dst-IP based (resolved address); rs_github_core
+// is dstdomain (CONNECT hostname). Keeping private deny first ensures a
+// GitHub hostname that accidentally DNS-resolves to a private IP is caught
+// by the IP-based rule before the hostname-based allow fires.
+func TestRenderSquid_GitHubCoreBaseline_PrivateDenyFirst(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+
+	privateDenyIdx := strings.Index(out, "http_access deny rs_private_dst")
+	githubAllowIdx := strings.Index(out, "http_access allow rs_github_core")
+
+	if privateDenyIdx < 0 {
+		t.Fatalf("http_access deny rs_private_dst missing:\n%s", out)
+	}
+	if githubAllowIdx < 0 {
+		t.Fatalf("http_access allow rs_github_core missing:\n%s", out)
+	}
+	if privateDenyIdx >= githubAllowIdx {
+		t.Fatalf("private-IP deny (pos %d) must precede github_core allow (pos %d):\n%s",
+			privateDenyIdx, githubAllowIdx, out)
+	}
+}
+
+// TestRenderSquid_GitHubCoreBaseline_WithProjectDomains verifies that when
+// runner.yml http_egress has project-specific domains too, both the
+// rs_github_core AND allowed_domains ACLs are emitted correctly.
+func TestRenderSquid_GitHubCoreBaseline_WithProjectDomains(t *testing.T) {
+	r := &runneryml.Runner{Egress: runneryml.Egress{AllowDomains: []string{"example.com"}}}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+
+	// GitHub core baseline must be present.
+	if !strings.Contains(out, "acl rs_github_core dstdomain .github.com") {
+		t.Fatalf("rs_github_core baseline missing when project domains present:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access allow rs_github_core") {
+		t.Fatalf("http_access allow rs_github_core missing:\n%s", out)
+	}
+
+	// Project-specific domains must also be present.
+	if !strings.Contains(out, "acl allowed_domains dstdomain .example.com") {
+		t.Fatalf("project domain missing from squid config:\n%s", out)
+	}
+	if !strings.Contains(out, "http_access allow allowed_domains") {
+		t.Fatalf("http_access allow allowed_domains missing:\n%s", out)
+	}
+
+	// Both allows must precede deny all.
+	denyIdx := strings.Index(out, "http_access deny all")
+	for _, allow := range []string{"http_access allow rs_github_core", "http_access allow allowed_domains"} {
+		idx := strings.Index(out, allow)
+		if idx < 0 {
+			t.Errorf("expected %q in output:\n%s", allow, out)
+			continue
+		}
+		if idx >= denyIdx {
+			t.Errorf("%q (pos %d) must precede deny all (pos %d):\n%s", allow, idx, denyIdx, out)
+		}
+	}
+}
+
+// TestRenderSquid_GitHubCoreConstant_MatchesBaseConf is a static consistency
+// check: GitHubCoreDomains must contain all 11 domains from base.conf's
+// github_core ACL. If a domain is added to base.conf and not here (or vice
+// versa) a runner in the compose backend will have a different allowlist than
+// one running through run.sh, creating a latent divergence.
+func TestRenderSquid_GitHubCoreConstant_MatchesBaseConf(t *testing.T) {
+	// These are the domains from infra/squid/base.conf's github_core ACL.
+	// Sync: if base.conf changes, update this test AND GitHubCoreDomains.
+	wantDomains := []string{
+		".github.com",
+		"api.github.com",
+		".githubusercontent.com",
+		".actions.githubusercontent.com",
+		".objects.githubusercontent.com",
+		".github.githubassets.com",
+		".ghcr.io",
+		".pkg.github.com",
+		".pipelines.actions.githubusercontent.com",
+		".results-receiver.actions.githubusercontent.com",
+		".vstoken.actions.githubusercontent.com",
+	}
+
+	inConst := map[string]bool{}
+	for _, d := range GitHubCoreDomains {
+		inConst[d] = true
+	}
+
+	for _, want := range wantDomains {
+		if !inConst[want] {
+			t.Errorf("domain %q is in base.conf github_core but missing from GitHubCoreDomains", want)
+		}
+	}
+
+	if len(GitHubCoreDomains) != len(wantDomains) {
+		t.Errorf("GitHubCoreDomains has %d entries, base.conf github_core has %d; they must match",
+			len(GitHubCoreDomains), len(wantDomains))
+	}
+}
+
 // TestRenderSquid_AllowedPrivateCIDR_MalformedSkipped verifies that a
 // *net.IPNet whose String() returns a non-canonical value (e.g. "<nil>") is
 // silently skipped rather than injected into the squid config. This exercises

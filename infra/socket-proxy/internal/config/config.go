@@ -14,7 +14,18 @@ import (
 type Config struct {
 	DockerSock        string // path to docker.sock on the host (bind-mounted)
 	ListenAddr        string // tcp listen address (default :2375)
-	AllowedImagesFile string // path to digest allowlist file
+	AllowedImagesFile string // path to digest allowlist file (baked into image)
+	// AllowedImagesExtraFile is an optional operator-supplied allowlist that is
+	// merged with AllowedImagesFile at startup. It follows the same format (one
+	// digest reference per line). If the path is non-empty but the file does not
+	// exist the socket-proxy starts normally with only the baked allowlist.
+	//
+	// This solves the release bootstrap problem (#54 fix 3): at release time the
+	// published proxy/runner image digests are not yet known, so they cannot be
+	// baked into the allowlist. Operators can mount a file with the release-specific
+	// digests via a volume in compose.scope.yml and set RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE
+	// to its path, without modifying or rebuilding the socket-proxy image itself.
+	AllowedImagesExtraFile string
 
 	TLSMode         string // "plaintext" (default) | "mtls"
 	TLSCertFile     string // server certificate (PEM)
@@ -32,9 +43,10 @@ const (
 
 func FromEnv() (Config, error) {
 	c := Config{
-		DockerSock:        os.Getenv("RUNSECURE_DOCKER_SOCK"),
-		ListenAddr:        envOr("RUNSECURE_LISTEN_ADDR", defaultListen),
-		AllowedImagesFile: envOr("RUNSECURE_ALLOWED_IMAGES_FILE", defaultAllowedImages),
+		DockerSock:             os.Getenv("RUNSECURE_DOCKER_SOCK"),
+		ListenAddr:             envOr("RUNSECURE_LISTEN_ADDR", defaultListen),
+		AllowedImagesFile:      envOr("RUNSECURE_ALLOWED_IMAGES_FILE", defaultAllowedImages),
+		AllowedImagesExtraFile: os.Getenv("RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE"),
 
 		TLSMode:         envOr("RUNSECURE_SP_TLS_MODE", defaultTLSMode),
 		TLSCertFile:     os.Getenv("RUNSECURE_SP_TLS_CERT"),

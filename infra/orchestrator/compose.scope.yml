@@ -31,6 +31,14 @@ services:
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
       # Egress-volume gate: only role=proxy may mount this named volume.
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
+      # Optional: operator-supplied extra allowlist for release-specific digests.
+      # At release time the newly-published image digests are not yet baked into
+      # the socket-proxy image (bootstrap problem, #54 fix 3). Mount a file with
+      # the release digest(s) and set this env var to its container path:
+      #   RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
+      # with a corresponding volume entry pointing at the host file:
+      #   - /path/to/extra-images.txt:/run/secrets/extra-images.txt:ro
+      # The file must follow the same digest-reference format as allowed-images.txt.
 
   orch-egress:
     image: ${RUNSECURE_PROXY_IMAGE}
@@ -39,8 +47,32 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # Run as the runsecure non-root user (UID 1001) — matches the USER in
+    # infra/squid/Dockerfile and the uid= in the tmpfs mounts below.
+    user: "1001:1001"
+    # Squid needs three writable runtime dirs even on a read-only rootfs.
+    # The proxy image creates these dirs with chown 1001:1001 during build
+    # (see infra/squid/Dockerfile), but read_only: true means the overlay
+    # is immutable — squid fatals on the pidfile write without writable tmpfs.
+    # Per-spawn proxies get these via docker.Spawn's HostConfig.Tmpfs map;
+    # this service (orch-egress) is brought up by compose directly and was
+    # missing the equivalent mounts, causing crash-loops (#54 fix 1).
+    # uid=1001 matches the runsecure user the image runs as; mode=750 matches
+    # the chown in the Dockerfile so squid's non-root process can write.
+    tmpfs:
+      - /var/run/squid:noexec,nosuid,nodev,uid=1001,gid=1001,mode=750
+      - /var/log/squid:noexec,nosuid,nodev,uid=1001,gid=1001,mode=750
+      - /var/spool/squid:noexec,nosuid,nodev,uid=1001,gid=1001,mode=750
     networks:
       orch-internal:
+      # Attach orch-egress to spawn-egress so compose creates this network
+      # at stack bring-up time. Per-spawn proxies join at runtime; without
+      # this attachment compose never creates the network and every spawn
+      # fails with "network not found" (#54 fix 2). Attaching orch-egress
+      # does NOT give runners or the orchestrator access to spawn-egress —
+      # runners only see the per-spawn internal network; the orchestrator
+      # only sees orch-internal. Spawn isolation is preserved.
+      spawn-egress:
       orch-external:
 
   egress-init:

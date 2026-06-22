@@ -118,3 +118,106 @@ func TestParse_AllowsAndDenies(t *testing.T) {
 	require.True(t, a.Allows("ghcr.io/img@sha256:deadbeef"))
 	require.False(t, a.Allows("ghcr.io/img:latest"))
 }
+
+// ─── LoadWithExtra tests (issue #54 fix 3) ────────────────────────────────────
+
+// TestLoadWithExtra_MergesBothFiles verifies that entries from both the base
+// and extra files are present in the merged allowlist.
+func TestLoadWithExtra_MergesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.txt")
+	extraPath := filepath.Join(dir, "extra.txt")
+
+	require.NoError(t, os.WriteFile(basePath, []byte(
+		"ghcr.io/runsecure/proxy@sha256:aabbcc\n"+
+			"ghcr.io/runsecure/runner-node@sha256:ddeeff\n",
+	), 0o644))
+	require.NoError(t, os.WriteFile(extraPath, []byte(
+		"# release-specific digests\n"+
+			"ghcr.io/runsecure/proxy@sha256:112233\n",
+	), 0o644))
+
+	a, err := LoadWithExtra(basePath, extraPath)
+	require.NoError(t, err)
+	require.Equal(t, 3, a.Size())
+	require.True(t, a.Allows("ghcr.io/runsecure/proxy@sha256:aabbcc"))
+	require.True(t, a.Allows("ghcr.io/runsecure/runner-node@sha256:ddeeff"))
+	require.True(t, a.Allows("ghcr.io/runsecure/proxy@sha256:112233"))
+}
+
+// TestLoadWithExtra_EmptyExtraPath_ReturnsBase verifies that an empty extraPath
+// behaves identically to Load (no merge attempt, no error).
+func TestLoadWithExtra_EmptyExtraPath_ReturnsBase(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.txt")
+	require.NoError(t, os.WriteFile(basePath, []byte(
+		"ghcr.io/runsecure/proxy@sha256:aabbcc\n",
+	), 0o644))
+
+	a, err := LoadWithExtra(basePath, "")
+	require.NoError(t, err)
+	require.Equal(t, 1, a.Size())
+	require.True(t, a.Allows("ghcr.io/runsecure/proxy@sha256:aabbcc"))
+}
+
+// TestLoadWithExtra_MissingExtraFile_NotAnError verifies that when extraPath is
+// set but the file does not exist, LoadWithExtra succeeds with only the base
+// entries. Operators may set RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE before the
+// file is created; the socket-proxy must still start.
+func TestLoadWithExtra_MissingExtraFile_NotAnError(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.txt")
+	require.NoError(t, os.WriteFile(basePath, []byte(
+		"ghcr.io/runsecure/proxy@sha256:aabbcc\n",
+	), 0o644))
+
+	a, err := LoadWithExtra(basePath, filepath.Join(dir, "nonexistent.txt"))
+	require.NoError(t, err)
+	require.Equal(t, 1, a.Size())
+}
+
+// TestLoadWithExtra_ExtraFileHasTagEntry_Errors verifies that a tag-only entry
+// in the extra file is rejected (same format requirement as the base file).
+func TestLoadWithExtra_ExtraFileHasTagEntry_Errors(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.txt")
+	extraPath := filepath.Join(dir, "extra.txt")
+	require.NoError(t, os.WriteFile(basePath, []byte(
+		"ghcr.io/runsecure/proxy@sha256:aabbcc\n",
+	), 0o644))
+	require.NoError(t, os.WriteFile(extraPath, []byte(
+		"ghcr.io/runsecure/proxy:latest\n",
+	), 0o644))
+
+	_, err := LoadWithExtra(basePath, extraPath)
+	require.ErrorContains(t, err, "@sha256:")
+}
+
+// TestLoadWithExtra_BaseFileMissing_Errors verifies that an error loading the
+// base allowlist propagates (extra file is irrelevant when base fails).
+func TestLoadWithExtra_BaseFileMissing_Errors(t *testing.T) {
+	_, err := LoadWithExtra("/nonexistent/base.txt", "")
+	require.Error(t, err)
+}
+
+// TestLoadWithExtra_ExtraFileUnreadable_Errors covers the branch in LoadWithExtra
+// where os.Open(extraPath) fails with a non-IsNotExist error (e.g. permission denied).
+// Without this test, the "imageallow: open extra %s" error message is unreachable.
+func TestLoadWithExtra_ExtraFileUnreadable_Errors(t *testing.T) {
+	if os.Getuid() == 0 {
+		// Root bypasses permission checks; skip rather than create a fragile workaround.
+		t.Skip("cannot test permission denied as root")
+	}
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.txt")
+	extraPath := filepath.Join(dir, "extra.txt")
+	require.NoError(t, os.WriteFile(basePath, []byte(
+		"ghcr.io/runsecure/proxy@sha256:aabbcc\n",
+	), 0o644))
+	// Create the extra file then chmod 000 so it exists but is unreadable.
+	require.NoError(t, os.WriteFile(extraPath, []byte(""), 0o000))
+	defer os.Chmod(extraPath, 0o644) // restore so TempDir cleanup can remove it
+
+	_, err := LoadWithExtra(basePath, extraPath)
+	require.ErrorContains(t, err, "imageallow: open extra")
+}

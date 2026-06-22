@@ -145,6 +145,57 @@ assert_in_service "${SCOPE_COMPOSE}" "socket-proxy" \
     'RUNSECURE_EGRESS_NETWORK' \
     "T8: socket-proxy service has RUNSECURE_EGRESS_NETWORK env"
 
+# --- Issue #54 fix 1: orch-egress must have tmpfs for squid runtime dirs ----
+# Without these, squid FATALs with "Read-only file system" on pidfile write
+# when running under read_only: true (#54 fix 1).
+# The orch-egress service block in compose.scope.yml lists tmpfs entries as
+#   "- /var/run/squid:..."
+# so we check for each dir in the file directly (they only appear in the
+# orch-egress tmpfs block; the orchestrator's tmpfs only has /tmp).
+EGRESS_RANGE=$(_service_range "${SCOPE_COMPOSE}" "orch-egress")
+if [[ -n "$EGRESS_RANGE" ]]; then
+    e_start="${EGRESS_RANGE%:*}"; e_end="${EGRESS_RANGE#*:}"
+    for squid_dir in /var/run/squid /var/log/squid /var/spool/squid; do
+        if sed -n "${e_start},${e_end}p" "${SCOPE_COMPOSE}" | grep -qF "$squid_dir"; then
+            pass "Issue54-F1: orch-egress has tmpfs for $squid_dir"
+        else
+            fail "Issue54-F1: orch-egress must have tmpfs mount for $squid_dir (squid pidfile/log write fails without it)"
+        fi
+    done
+else
+    fail "Issue54-F1: orch-egress service not found in ${SCOPE_COMPOSE}"
+fi
+
+# --- Issue #54 fix 2: orch-egress must be attached to spawn-egress ----------
+# Without this, compose never creates the spawn-egress network and every
+# per-spawn proxy attach fails with 404 "network not found" (#54 fix 2).
+assert_in_service "${SCOPE_COMPOSE}" "orch-egress" \
+    'spawn-egress' \
+    "Issue54-F2: orch-egress is attached to spawn-egress (ensures compose creates the network)"
+
+# --- Issue #54 fix 2: orchestrator must NOT be attached to spawn-egress ----
+# Verify the orchestrator is confined to orch-internal; attaching it to
+# spawn-egress would break the network-isolation model.
+# We check the networks: key of the orchestrator service specifically —
+# RUNSECURE_EGRESS_NETWORK env var contains "spawn-egress" in its value
+# which is expected and correct; we must not match that.
+# The orchestrator service uses "networks: [orch-internal]" (inline list)
+# so we look for the inline list form, not a networks block with spawn-egress.
+ORCH_RANGE=$(_service_range "${SCOPE_COMPOSE}" "orchestrator")
+if [[ -n "$ORCH_RANGE" ]]; then
+    o_start="${ORCH_RANGE%:*}"; o_end="${ORCH_RANGE#*:}"
+    # Extract only lines under the "networks:" key of the orchestrator block
+    # (stop at the next unindented key). Filter out environment variable values
+    # that happen to contain "spawn-egress" as a string value.
+    if sed -n "${o_start},${o_end}p" "${SCOPE_COMPOSE}" \
+           | awk '/^    networks:/{p=1;next} p && /^    [a-zA-Z]/{exit} p' \
+           | grep -q 'spawn-egress'; then
+        fail "Issue54-F2: orchestrator must NOT be attached to spawn-egress (isolation breach)"
+    else
+        pass "Issue54-F2: orchestrator is not attached to spawn-egress (isolation preserved)"
+    fi
+fi
+
 # --- Print results -----------------------------------------------------------
 echo ""
 echo "=== Compose Hardening Assertions ==="

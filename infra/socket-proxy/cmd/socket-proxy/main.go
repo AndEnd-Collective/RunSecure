@@ -26,9 +26,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	allow, err := imageallow.Load(cfg.AllowedImagesFile)
+	// LoadWithExtra merges the baked allowlist with an optional operator-supplied
+	// file (RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE). The extra file solves the
+	// release bootstrap problem: newly-published image digests can't be baked
+	// into the socket-proxy image before that image exists (#54 fix 3).
+	allow, err := imageallow.LoadWithExtra(cfg.AllowedImagesFile, cfg.AllowedImagesExtraFile)
 	if err != nil {
 		return err
+	}
+	if cfg.AllowedImagesExtraFile != "" {
+		log.Printf("socket-proxy: extra allowlist=%s", cfg.AllowedImagesExtraFile)
 	}
 	log.Printf("socket-proxy: listening on %s (image-allowlist=%d entries)", cfg.ListenAddr, allow.Size())
 
