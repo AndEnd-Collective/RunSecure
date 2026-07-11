@@ -51,11 +51,16 @@ type Network struct {
 }
 
 type CreateContainerRequest struct {
-	Name             string            `json:"-"`
-	Image            string            `json:"Image"`
-	User             string            `json:"User"`
-	Env              []string          `json:"Env,omitempty"`
-	Cmd              []string          `json:"Cmd,omitempty"`
+	Name  string   `json:"-"`
+	Image string   `json:"Image"`
+	User  string   `json:"User"`
+	Env   []string `json:"Env,omitempty"`
+	Cmd   []string `json:"Cmd,omitempty"`
+	// Entrypoint overrides the image's ENTRYPOINT when non-empty. Used as a
+	// belt-and-suspenders launcher pin for the runner container (fix G2/G3):
+	// even if a future image build omits or overrides ENTRYPOINT, the
+	// container still starts the JIT launcher script.
+	Entrypoint       []string          `json:"Entrypoint,omitempty"`
 	Labels           map[string]string `json:"Labels,omitempty"`
 	HostConfig       HostConfig        `json:"HostConfig"`
 	NetworkingConfig *NetworkingConfig `json:"NetworkingConfig,omitempty"`

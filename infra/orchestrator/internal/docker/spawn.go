@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+// RunnerEntrypoint is the path to the JIT-launcher script baked into every
+// RunSecure runner image (images/base.Dockerfile COPYs it to this path and
+// sets it as the image ENTRYPOINT). Spawn also sets it explicitly on the
+// runner container's CreateContainerRequest.Entrypoint as belt-and-suspenders
+// (fix G2/G3): if a downstream image build ever overrides ENTRYPOINT, the
+// runner still launches the JIT agent instead of falling back to a shell.
+const RunnerEntrypoint = "/home/runner/entrypoint.sh"
+
 // SpawnInputs is the complete parameter set for a per-spawn container stack.
 //
 // Field names here match what orchestrator/spawn.go passes — keep them
@@ -128,6 +136,15 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	// 2. Runner container (internal network only — NEVER attached to EgressNetwork).
 	runnerLabels := merge(commonLabels, map[string]string{"runsecure.role": "runner"})
 	runnerHC := hcBase
+	// G1: the actions-runner writes run-helper.sh (and other files) into its
+	// own install directory at job start; a read-only rootfs breaks every
+	// job. The proxy stays read-only (hcBase's default); only the runner's
+	// rootfs is relaxed. All other hardening (cap_drop ALL, seccomp,
+	// non-root user, no-new-privileges, resource limits, internal-only
+	// network, no host binds) remains intact — this matches the behavior of
+	// the infra/docker-compose.yml (run.sh) path, which has never set
+	// read_only on the runner service for the same reason.
+	runnerHC.ReadonlyRootfs = false
 	runnerHC.Memory = in.ResourcesMemory
 	runnerHC.NanoCPUs = in.ResourcesNanoCPUs
 	runnerHC.PidsLimit = in.ResourcesPIDs
@@ -139,18 +156,27 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	}
 
 	// Runner routes all traffic through the proxy on the internal network.
+	// G4: emit BOTH upper- and lower-case proxy vars — some tools (curl
+	// without --proxy, certain Python libs, apt in some configs) only
+	// consult the lowercase form. NO_PROXY/no_proxy include 127.0.0.1 in
+	// addition to localhost so IP-literal loopback traffic also bypasses
+	// the proxy. This mirrors infra/docker-compose.yml (the run.sh path).
 	runnerEnv := []string{
 		"RUNNER_JIT_CONFIG=" + in.JITConfigB64,
 		"HTTP_PROXY=http://proxy:3128",
 		"HTTPS_PROXY=http://proxy:3128",
-		"NO_PROXY=localhost",
+		"NO_PROXY=localhost,127.0.0.1",
+		"http_proxy=http://proxy:3128",
+		"https_proxy=http://proxy:3128",
+		"no_proxy=localhost,127.0.0.1",
 	}
 
 	runnerName := fmt.Sprintf("rs-%s-runner", in.SpawnID)
 	runnerID, err := c.CreateContainer(ctx, CreateContainerRequest{
 		Name: runnerName, Image: in.RunnerImage, User: "1001:0",
-		Env:    runnerEnv,
-		Labels: runnerLabels, HostConfig: runnerHC,
+		Env:        runnerEnv,
+		Entrypoint: []string{RunnerEntrypoint},
+		Labels:     runnerLabels, HostConfig: runnerHC,
 		NetworkingConfig: &NetworkingConfig{
 			EndpointsConfig: map[string]EndpointConfig{
 				in.NetworkID: {},
