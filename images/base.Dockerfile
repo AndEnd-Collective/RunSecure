@@ -197,9 +197,22 @@ RUN chmod 755 /opt/runsecure-hooks/job-started.sh /opt/runsecure-hooks/job-compl
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/runsecure-hooks/job-started.sh
 ENV ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/runsecure-hooks/job-completed.sh
 
+# ---- JIT entrypoint (fix G2/G3) ---------------------------------------------
+# Bake the JIT-launcher script into every runner image so orchestrator-spawned
+# containers actually start the actions-runner. Previously this image shipped
+# neither the script nor an ENTRYPOINT, so a container created directly via
+# the Docker API (as the Compose-backend orchestrator does, bypassing
+# infra/docker-compose.yml's own entrypoint override + bind-mount) would
+# start with no process at all. Node/Python/Rust layers and any composed
+# project image inherit this — no per-project entrypoint hack required.
+# Mode 0555 (read+execute, no write) matches the read-only-by-default
+# posture of everything else copied into the image; owned runner:0 so the
+# non-root runner user can execute it under `--user 1001:0`.
+COPY --chown=runner:0 --chmod=0555 infra/scripts/entrypoint.sh /home/runner/entrypoint.sh
+
 # ---- Final setup ------------------------------------------------------------
 USER runner
 WORKDIR /home/runner
 
-# Entrypoint is set by the language layer or orchestrator
+ENTRYPOINT ["/home/runner/entrypoint.sh"]
 CMD ["bash"]

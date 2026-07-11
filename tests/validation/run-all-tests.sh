@@ -76,6 +76,12 @@ HARDENING_FLAGS=(
     --memory-swap=4g
     --cpus=2
     --pids-limit=512
+    # G2/G3: images/base.Dockerfile now bakes an ENTRYPOINT that launches the
+    # JIT agent (expects RUNNER_JIT_CONFIG[_FILE]). These validation/functional
+    # checks run arbitrary ad hoc commands against the image instead — clear
+    # the entrypoint so the command below fully replaces the container's
+    # process, exactly like before the image shipped an ENTRYPOINT.
+    --entrypoint ""
 )
 
 echo -e "${BOLD}=== RunSecure Validation Suite ===${NC}"
@@ -244,6 +250,7 @@ step "Container cleanup (--rm)" bash -c "
         --cap-drop=ALL \
         --tmpfs /tmp:rw,noexec,nosuid \
         --rm \
+        --entrypoint \"\" \
         runner-base:latest sleep 1)
     sleep 3
     if docker inspect \$CONTAINER_ID &>/dev/null; then

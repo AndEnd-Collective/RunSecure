@@ -459,6 +459,7 @@ If `revision` doesn't match a commit on `main` of the source repo, the image isn
 - **Don't run the container with `--user 0` or `--cap-add`.** The image is designed to run as UID 1001 with `cap_drop: ALL`. Re-adding privileges defeats every claim in SECURITY.md.
 - **Don't pull `:latest` in production.** It moves silently. Pin to `:X.Y.Z[-langver]` and bump deliberately.
 - **Don't reuse a container across jobs.** The whole security model relies on `--rm` after every job. If you need warm caches, use volume mounts for the cache directory, not container reuse.
+- **Note:** every runner image bakes `infra/scripts/entrypoint.sh` as its `ENTRYPOINT` — it expects `RUNNER_JIT_CONFIG` or `RUNNER_JIT_CONFIG_FILE` and launches the actions-runner. If you're `docker run`-ing the image directly to shell in or run an ad hoc command (debugging, CI smoke tests), pass `--entrypoint ""` to replace it, the same way `tests/validation/run-all-tests.sh` does.
 
 ## Self-hosting RunSecure for its own CI
 
