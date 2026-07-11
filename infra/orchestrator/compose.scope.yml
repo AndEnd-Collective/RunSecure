@@ -22,8 +22,6 @@ services:
     # preserved by cap_drop:ALL + no-new-privileges + read_only rootfs.
     user: "0:0"
     networks: [orch-internal]
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       RUNSECURE_DOCKER_SOCK: /var/run/docker.sock
       RUNSECURE_LISTEN_ADDR: ":2375"
@@ -33,12 +31,16 @@ services:
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
       # Optional: operator-supplied extra allowlist for release-specific digests.
       # At release time the newly-published image digests are not yet baked into
-      # the socket-proxy image (bootstrap problem, #54 fix 3). Mount a file with
-      # the release digest(s) and set this env var to its container path:
-      #   RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
-      # with a corresponding volume entry pointing at the host file:
-      #   - /path/to/extra-images.txt:/run/secrets/extra-images.txt:ro
-      # The file must follow the same digest-reference format as allowed-images.txt.
+      # the socket-proxy image (bootstrap problem, #54 fix 3). The container path
+      # is fixed; point RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST (in the scope
+      # .env file, gitignored) at a real host file to populate it — the volume
+      # mount below defaults to /dev/null (parses as zero extra entries) when
+      # unset, so this is a no-op until an operator opts in. Never hardcode a
+      # host path here; see install.md.
+      RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST:-/dev/null}:/run/secrets/extra-images.txt:ro
 
   orch-egress:
     image: ${RUNSECURE_PROXY_IMAGE}
@@ -130,8 +132,14 @@ services:
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
       - egress-configs:/var/run/runsecure/egress:rw
-      # Add per-repo project bindings here, e.g.:
-      # - /Users/foo/Code/datacentric:/projects/datacentric:ro
+      # Operator-provided projects root (fix G6): point RUNSECURE_PROJECTS_ROOT
+      # (in the scope .env file, gitignored) at the local directory that
+      # contains all of this scope's repo checkouts. Each repo's project_dir
+      # in scopes/<name>.yml should then be /projects/<repo>, matching a
+      # subdirectory under this root. Defaults to /dev/null (a harmless
+      # single-file mount) when unset — never edit this line to hardcode a
+      # host path; see install.md.
+      - ${RUNSECURE_PROJECTS_ROOT:-/dev/null}:/projects:ro
     ports:
       # Localhost-only by design — never publish externally.
       - "127.0.0.1:8080:8080"

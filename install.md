@@ -131,8 +131,9 @@ repos:
     max_concurrent: 3
 ```
 
-Create a `.env` file (gitignored — see `.gitignore:69`) that points the
-compose stack at your local images, PAT, and project workspace:
+Create a `.env` file (gitignored — see `infra/orchestrator/scopes/*` in
+`.gitignore`) that points the compose stack at your local images, PAT, and
+project workspace:
 
 ```sh
 cat > infra/orchestrator/scopes/datacentric.env <<EOF
@@ -142,18 +143,22 @@ RUNSECURE_ORCHESTRATOR_IMAGE=runsecure-orchestrator:local
 RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
 RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/runner-node:24
 RUNSECURE_PAT_FILE=$HOME/.config/runsecure/datacentric.pat
+RUNSECURE_PROJECTS_ROOT=$HOME/Code/Naor
 EOF
 ```
 
-Add a project bind-mount to `infra/orchestrator/compose.scope.yml` under
-`orchestrator.volumes`:
+`RUNSECURE_PROJECTS_ROOT` is the *parent* directory holding every repo
+checkout this scope will serve — `compose.scope.yml` mounts it once,
+read-only, at `/projects` inside the orchestrator container (the mount
+defaults to a harmless `/dev/null` when the variable is unset, so nothing
+breaks if you don't set it). Each repo's `project_dir` in the scope YAML
+must then point at the matching subdirectory, e.g. a checkout at
+`$RUNSECURE_PROJECTS_ROOT/datacentric` is `project_dir: /projects/datacentric`.
 
-```yaml
-      - $HOME/Code/Naor/datacentric:/projects/datacentric:ro
-```
-
-(Per-repo bind paths must match each repo's `project_dir` in the scope
-YAML.)
+This means `infra/orchestrator/compose.scope.yml` never needs hand-editing
+per repo or per operator — the tracked file stays untouched, and everything
+operator- or project-specific lives in the gitignored `.env` file and scope
+YAML instead.
 
 ---
 
@@ -232,7 +237,7 @@ runsecure.orchestrator.spawn.completed
 | Orchestrator exits with `auth.pat_file ... mode 0400` | PAT file has wrong perms | `chmod 0400 <pat>` |
 | `auth.pat_file ... no such file` | Bind-mount in compose.scope.yml is wrong | Verify `RUNSECURE_PAT_FILE` in .env points at the real file |
 | Many `runsecure.orchestrator.auth.degraded` events | PAT lacks Administration:RW for one or more listed repos | Re-issue with correct permissions; the orchestrator reloads on PAT-file mtime change |
-| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need |
+| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need. As a stopgap for a just-released digest not yet baked into the socket-proxy image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it in automatically, no tracked-file edits needed. |
 | Breaker stuck open (no spawns) | 5 consecutive spawn failures | `docker logs rs-orch-* \| grep breaker.opened` — fix the upstream cause; the breaker enters half-open after 5min cooldown |
 | Lots of `ratelimit.paused` events | GitHub API quota exhausted (rare at 15s polling) | Increase `poll_interval_seconds` or reduce scope size |
 | Runner containers accumulate (`docker ps` shows many) | Orchestrator died mid-flight without graceful drain | Restart it; A4 cold-start reconciliation re-counts in-flight; orphan proxy containers are torn down on the same path |
