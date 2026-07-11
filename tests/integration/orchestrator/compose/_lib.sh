@@ -147,11 +147,22 @@ build_test_runner_image() {
   fi
   local builddir
   builddir=$(mktemp -d)
+  # The stub mirrors the REAL runner image contract (fix G2/G3): the
+  # orchestrator's docker.Spawn pins the runner container's Entrypoint to
+  # /home/runner/entrypoint.sh as belt-and-suspenders. A stub without that
+  # path would fail to start when spawned via the orchestrator (the
+  # compose-egress-spawn-e2e path). Ship the script — it just sleeps so
+  # tests can exec probes into a long-running container — and set it as the
+  # image ENTRYPOINT so the start_real_runner path (own docker run, no
+  # Entrypoint override) behaves identically to before.
   cat > "${builddir}/Dockerfile" <<'EOF'
 FROM alpine:3.20
 RUN apk add --no-cache curl bind-tools iproute2 netcat-openbsd
+RUN mkdir -p /home/runner \
+    && printf '#!/bin/sh\nexec sleep 120\n' > /home/runner/entrypoint.sh \
+    && chmod 0555 /home/runner/entrypoint.sh
 USER 1001:0
-ENTRYPOINT ["sleep", "120"]
+ENTRYPOINT ["/home/runner/entrypoint.sh"]
 EOF
   docker build -t runsecure-test-runner:local "$builddir" >/dev/null
   rm -rf "$builddir"
