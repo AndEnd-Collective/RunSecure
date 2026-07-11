@@ -15,6 +15,24 @@ import (
 // orchestrator.EgressMountPath re-exports this value for backward compat.
 const EgressMountPath = "/var/run/runsecure/egress"
 
+// RunnerEntrypoint is the in-image path of the JIT-launcher script that every
+// RunSecure runner image bakes (images/base.Dockerfile COPYs it here and sets
+// it as the image ENTRYPOINT). Both backends pin the runner container to this
+// path as belt-and-suspenders — the Compose backend via CreateContainerRequest
+// Entrypoint, the Kubernetes backend via the runner container's Command — so a
+// runner still launches the JIT agent even if a (custom) image omits or
+// overrides its ENTRYPOINT.
+//
+// This is the canonical custom-image contract: a bring-your-own runner image
+// MUST ship this launcher at this path (and the GitHub Actions runner at
+// /home/runner/actions-runner). The easiest way to satisfy it is to add tools
+// via a project's runner.yml `tools:` block, which layers onto a RunSecure
+// base image and inherits both automatically.
+//
+// Defined here — a leaf package imported by both backends — to keep one source
+// of truth and avoid import cycles.
+const RunnerEntrypoint = "/home/runner/entrypoint.sh"
+
 // SpawnInput is everything a backend needs to create one per-spawn stack.
 type SpawnInput struct {
 	Scope, Repo, SpawnID                              string

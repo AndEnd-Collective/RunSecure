@@ -55,7 +55,10 @@ its own install directory at job start, and a read-only rootfs breaks every
 job. This is the one hardening axis relaxed on the runner; the proxy
 container's rootfs remains read-only, and every other runner control below
 (non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, resource
-limits, internal-only network, no host binds) stays intact.
+limits, internal-only network, no host binds) stays intact. This holds on
+**both** backends — Compose sets `HostConfig.ReadonlyRootfs=false` on the
+runner only, and Kubernetes sets `readOnlyRootFilesystem: false` on the
+runner container only (proxy Pod containers stay read-only).
 
 | Flag | What it prevents | Verified by |
 |------|-----------------|-------------|

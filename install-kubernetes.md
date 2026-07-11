@@ -238,9 +238,25 @@ For each CI job the orchestrator spawns:
 - **Runner Pod** — the hardened GitHub Actions runner. `HTTP_PROXY` is set to
   the proxy Service DNS name; the runner has no other network path.
 
-All per-spawn Pods run with the same securityContext as the orchestrator
-itself (PSS Restricted, `runAsUser: 1001`, `cap_drop: ALL`,
-`readOnlyRootFilesystem: true`, `seccompProfile: RuntimeDefault`).
+All per-spawn Pods run under PSS Restricted with `runAsUser: 1001`,
+`cap_drop: ALL`, `seccompProfile: RuntimeDefault`, no host namespaces, and
+`automountServiceAccountToken: false`. `readOnlyRootFilesystem: true` holds
+for every container **except the runner container**, whose rootfs is
+writable-by-necessity: the GitHub Actions runner writes `run-helper.sh` into
+its own install dir at job start, so a read-only rootfs breaks every job.
+This is the single relaxed axis on the runner (the proxy Pod stays fully
+read-only) and mirrors the Compose backend — see SECURITY.md.
+
+### Runner images and bringing your own
+
+The runner image per `runtime:` is resolved from `RUNSECURE_RUNNER_IMAGE_<RUNTIME>`
+(falling back to `RUNSECURE_RUNNER_IMAGE_DEFAULT`), set via the chart's
+orchestrator env. Custom images work with no code changes and follow the same
+contract as the Compose backend (ship the actions-runner at
+`/home/runner/actions-runner` and the launcher at `/home/runner/entrypoint.sh`;
+the orchestrator pins the runner Pod's `command` to that path). See the
+"Choosing runner images (and bringing your own)" section in
+[`install.md`](install.md) — the contract is backend-independent.
 
 ---
 

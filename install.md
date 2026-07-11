@@ -160,6 +160,41 @@ per repo or per operator — the tracked file stays untouched, and everything
 operator- or project-specific lives in the gitignored `.env` file and scope
 YAML instead.
 
+### Choosing runner images (and bringing your own)
+
+Each project's `.github/runner.yml` `runtime:` field selects which runner
+image the orchestrator spawns. The orchestrator resolves it from an env var
+in your scope `.env` file:
+
+- `runtime: node` → `RUNSECURE_RUNNER_IMAGE_NODE`
+- `runtime: python` → `RUNSECURE_RUNNER_IMAGE_PYTHON`
+- `runtime: rust` → `RUNSECURE_RUNNER_IMAGE_RUST`
+- anything else / unset → `RUNSECURE_RUNNER_IMAGE_DEFAULT`
+
+Point any of these at a **custom runner image** (your own registry digest)
+and it works on both backends with no code changes — the orchestrator
+applies the identical hardening to whatever image you name. Two requirements:
+
+1. **Allowlist it.** The socket-proxy only lets the daemon create containers
+   from digests in its allowlist. Add your image's `@sha256:…` digest to
+   `infra/socket-proxy/allowed-images.txt` (rebuild the socket-proxy image),
+   or use the `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` stopgap (see
+   Troubleshooting).
+2. **Satisfy the runner-image contract.** Your image MUST ship:
+   - the GitHub Actions runner at `/home/runner/actions-runner`, and
+   - RunSecure's JIT launcher at `/home/runner/entrypoint.sh`
+     (the orchestrator pins the runner's entrypoint/command to this path on
+     both backends, so it must exist and be executable by UID 1001).
+
+   **Easiest path — don't hand-roll an image.** Add your extra tools via the
+   project's `runner.yml` `tools:` block instead. `compose-image.sh` layers
+   them onto a RunSecure base image *before* finalize-hardening, so the
+   result inherits the runner binary, the baked entrypoint, and every
+   hardening property automatically. Only reach for a fully custom image ref
+   when the `tools:` block genuinely can't express what you need — and if you
+   do, the cleanest way to meet the contract is to build `FROM` your own base
+   and `COPY infra/scripts/entrypoint.sh /home/runner/entrypoint.sh` yourself.
+
 ---
 
 ## 6. Bring up the stack

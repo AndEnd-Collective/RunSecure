@@ -86,6 +86,34 @@ fi
 echo ""
 
 # ============================================================================
+# G1/G2/G3 backend parity — Kubernetes runner Pod matches the Compose backend
+# ============================================================================
+# The Go unit tests (internal/kube) assert the rendered Pod objects; these are
+# cheap source-level guards so a refactor that silently drops the runner's
+# writable rootfs or entrypoint pin from the kube backend is caught here too.
+echo -e "${BOLD}--- G1/G2/G3: Kubernetes backend parity (internal/kube/objects.go) ---${NC}"
+
+KUBE_OBJECTS="${RUNSECURE_ROOT}/infra/orchestrator/internal/kube/objects.go"
+if [[ ! -f "$KUBE_OBJECTS" ]]; then
+    fail "internal/kube/objects.go not found"
+else
+    if grep -q 'func runnerContainerSecCtx()' "$KUBE_OBJECTS" \
+        && grep -q 'sc.ReadOnlyRootFilesystem = ptr(false)' "$KUBE_OBJECTS"; then
+        pass "kube runner container uses a writable-rootfs SecurityContext (G1)"
+    else
+        fail "kube runner container must set ReadOnlyRootFilesystem=false (G1)"
+    fi
+
+    if grep -q 'Command:         \[\]string{backend.RunnerEntrypoint}' "$KUBE_OBJECTS" \
+        || grep -q 'Command: *\[\]string{backend.RunnerEntrypoint}' "$KUBE_OBJECTS"; then
+        pass "kube runner container pins Command to backend.RunnerEntrypoint (G2/G3)"
+    else
+        fail "kube runner container must pin Command to backend.RunnerEntrypoint (G2/G3)"
+    fi
+fi
+echo ""
+
+# ============================================================================
 # G8 — .gitignore ignores operator scope artifacts, keeps the template
 # ============================================================================
 echo -e "${BOLD}--- G8: .gitignore hygiene for infra/orchestrator/scopes/ ---${NC}"

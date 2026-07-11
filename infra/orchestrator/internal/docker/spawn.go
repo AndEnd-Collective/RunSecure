@@ -3,15 +3,19 @@ package docker
 import (
 	"context"
 	"fmt"
+
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 )
 
 // RunnerEntrypoint is the path to the JIT-launcher script baked into every
-// RunSecure runner image (images/base.Dockerfile COPYs it to this path and
-// sets it as the image ENTRYPOINT). Spawn also sets it explicitly on the
-// runner container's CreateContainerRequest.Entrypoint as belt-and-suspenders
-// (fix G2/G3): if a downstream image build ever overrides ENTRYPOINT, the
-// runner still launches the JIT agent instead of falling back to a shell.
-const RunnerEntrypoint = "/home/runner/entrypoint.sh"
+// RunSecure runner image. Spawn sets it explicitly on the runner container's
+// CreateContainerRequest.Entrypoint as belt-and-suspenders (fix G2/G3): if a
+// downstream/custom image build ever overrides ENTRYPOINT, the runner still
+// launches the JIT agent instead of falling back to a shell.
+//
+// It aliases backend.RunnerEntrypoint so the Compose and Kubernetes backends
+// pin the identical path from one source of truth.
+const RunnerEntrypoint = backend.RunnerEntrypoint
 
 // SpawnInputs is the complete parameter set for a per-spawn container stack.
 //

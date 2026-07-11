@@ -225,6 +225,38 @@ func TestRunnerPod_SecurityContext(t *testing.T) {
 	assertPodSecurity(t, "RunnerPod", pod)
 }
 
+// TestRunnerPod_RootfsWritable verifies G1 for the Kubernetes backend: the
+// runner container's rootfs is explicitly writable (the actions-runner writes
+// run-helper.sh into its install dir at job start), while the proxy Pod's
+// containers stay read-only (covered by TestProxyPod_SecurityContext).
+func TestRunnerPod_RootfsWritable(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	sc := pod.Spec.Containers[0].SecurityContext
+	if sc == nil || sc.ReadOnlyRootFilesystem == nil {
+		t.Fatal("runner SecurityContext.ReadOnlyRootFilesystem must be set explicitly")
+	}
+	if *sc.ReadOnlyRootFilesystem {
+		t.Error("G1: runner ReadOnlyRootFilesystem must be false (writable rootfs)")
+	}
+}
+
+// TestRunnerPod_CommandIsEntrypoint verifies G2/G3 for the Kubernetes backend:
+// the runner container pins Command to the baked JIT-launcher path so a custom
+// image that omits/overrides ENTRYPOINT still launches the agent. Args stays
+// empty (preserving the baked default behavior).
+func TestRunnerPod_CommandIsEntrypoint(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	c := pod.Spec.Containers[0]
+	if len(c.Command) != 1 || c.Command[0] != backend.RunnerEntrypoint {
+		t.Errorf("runner Command = %v, want [%q]", c.Command, backend.RunnerEntrypoint)
+	}
+	if len(c.Args) != 0 {
+		t.Errorf("runner Args must be empty, got %v", c.Args)
+	}
+}
+
 func TestRunnerPod_HTTPProxy(t *testing.T) {
 	in := testInput()
 	proxyDNS := "rs-proxy-svc-spawn-abc123.runsecure-ci.svc.cluster.local"
@@ -1042,7 +1074,15 @@ func assertPodSecurity(t *testing.T, name string, pod *corev1.Pod) {
 		if sc.Privileged != nil && *sc.Privileged {
 			t.Errorf("%s container %s: Privileged must not be true", name, c.Name)
 		}
-		if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		// G1: the runner container's rootfs is writable-by-necessity (the
+		// actions-runner writes run-helper.sh into its install dir). Every
+		// OTHER container (squid/haproxy/dnsmasq) must stay read-only. Assert
+		// each explicitly so a regression that flips the wrong container fails.
+		if c.Name == "runner" {
+			if sc.ReadOnlyRootFilesystem == nil || *sc.ReadOnlyRootFilesystem {
+				t.Errorf("%s container %s: ReadOnlyRootFilesystem must be explicitly false (G1)", name, c.Name)
+			}
+		} else if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
 			t.Errorf("%s container %s: ReadOnlyRootFilesystem must be true", name, c.Name)
 		}
 		if sc.Capabilities == nil {
