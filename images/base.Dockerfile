@@ -34,12 +34,15 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 ARG RUNNER_VERSION=2.335.1
 ARG RUNNER_SHA256_ARM64=6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207
 ARG RUNNER_SHA256_AMD64=4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
-# GH_CLI_VERSION 2.95.0 (2026-06-17) — built with go1.26.4, which clears the
-#   go-stdlib CVEs (CVE-2026-42504 / GO-2026-5038 et al.) that failed the
-#   1.1.9 base scan when gh 2.93.0 was still on go1.26.3.
-ARG GH_CLI_VERSION=2.95.0
-ARG GH_CLI_SHA256_AMD64=51bfe66877d592c8b1865b6512824d84d4ca8f9584eb2468841ad63d9011034f
-ARG GH_CLI_SHA256_ARM64=1cf7a80c00a53eba54d2c3b1aefebb711f23d58e8e627bf6c8f9d968c6549bc1
+# GH_CLI_VERSION 2.96.0 (2026-07-02) — latest stable. Still built with
+#   go1.26.4 (verified: `go version` on the released binary reports go1.26.4),
+#   so it clears the older go-stdlib CVEs but NOT GO-2026-4970
+#   (CVE-2026-39822, "os symlink escape", first fixed in go1.26.5). No gh
+#   release ships on go1.26.5+ yet, so that one is carried as a justified
+#   allow in .grype.yaml until a gh build on go1.26.5+ exists.
+ARG GH_CLI_VERSION=2.96.0
+ARG GH_CLI_SHA256_AMD64=11a731f4e0ca8c3db96ef6d2cc404dcab3d78247ce0e07c53e07117e7627d6a1
+ARG GH_CLI_SHA256_ARM64=334dd9c6704fc1656a48e475c5a3a9aa32bbadb87fa1777513bc626af4a99e89
 
 ARG TARGETARCH
 
