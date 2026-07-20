@@ -11,17 +11,22 @@ from pathlib import Path
 
 EXPECTED_IMAGES = {
     "release-digest-base": "base",
+    "release-digest-node-build-22": "node-build",
+    "release-digest-node-build-24": "node-build",
     "release-digest-node-22": "node",
     "release-digest-node-24": "node",
     "release-digest-orchestrator": "orchestrator",
     "release-digest-proxy": "proxy",
+    "release-digest-python-build-3.12": "python-build",
     "release-digest-python-3.12": "python",
+    "release-digest-rust-build-stable": "rust-build",
     "release-digest-rust-stable": "rust",
     "release-digest-socket-proxy": "socket-proxy",
 }
 REFERENCE = re.compile(
     r"^ghcr\.io/andend-collective/runsecure/"
-    r"(?P<package>base|node|orchestrator|proxy|python|rust|socket-proxy)"
+    r"(?P<package>base|node(?:-build)?|orchestrator|proxy|"
+    r"python(?:-build)?|rust(?:-build)?|socket-proxy)"
     r"@sha256:[0-9a-f]{64}$"
 )
 RELEASE = re.compile(r"^(?:[0-9]+\.[0-9]+\.[0-9]+|manual-build)$")
@@ -86,7 +91,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(f"missing release image digests: {', '.join(missing)}")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "release": args.release,
         "build_sha": args.build_sha,
         "publish_run_id": int(args.publish_run_id),

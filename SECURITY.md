@@ -37,7 +37,7 @@ Reduces the attack surface inside the container by removing tools and capabiliti
 | `su`/`sudo` binaries removed | Privilege escalation via user switching | `validate-runner.sh` |
 | All setuid/setgid bits stripped | Privilege escalation via setuid binaries | `validate-runner.sh` |
 | Root account locked, shell set to nologin | Login as root | `validate-runner.sh` |
-| Package manager removed (apt/dpkg) in final images | Installing attack tools at runtime | `validate-runner.sh` |
+| Package-manager executables and mutable state removed; inert dpkg inventory retained read-only | Installing attack tools at runtime while preserving Syft/Grype visibility | `validate-runner.sh`, H03 acceptance |
 | Network recon tools removed (ping, nc, ssh, wget) | Network reconnaissance, lateral movement | `validate-runner.sh` |
 | Persistence tools removed (crontab, at) | Surviving job completion | `validate-runner.sh` |
 | SHA256-verified binary downloads | Supply chain attacks on runner binary | `base.Dockerfile` |
@@ -154,7 +154,11 @@ the policies are created but silently ignored.**
 
 ### Accepted Risks
 
-- **apt binary exists in intermediate images** (language layers). It is removed in final composed images via `finalize-hardening.sh`. In intermediate images, the runner user (UID 1001) cannot install system packages without root/capabilities.
+- **apt exists in build-only inputs** (base and the published, digest-pinned
+  `*-build` packages). Those packages never enter the socket-proxy runtime
+  allowlist. `finalize-hardening.sh` removes package-manager functionality from
+  every runnable language/project image; UID 1001 cannot install system
+  packages in the intermediate images without root/capabilities.
 - **Container filesystem is writable by the runner user** in its home directory. The GH Actions runner requires this to write config, diagnostic logs, and download actions at runtime. System paths (`/usr`, `/etc`) are protected by root ownership and `chmod 555`. The container is ephemeral (`--rm`) so nothing persists.
 - **`/proc/self/environ` is readable.** This is standard in containers. The environment should contain only non-secret configuration. GitHub Actions injects secrets at runtime and they are redacted from logs (though this is not a security boundary).
 

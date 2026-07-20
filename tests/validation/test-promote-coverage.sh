@@ -36,7 +36,9 @@ fi
 # Every image kind that publish-images builds + pushes must have at least one
 # `kind: <name>` entry in the promote-to-stable matrix. If you add a new
 # published image, add it to promote-to-stable.yml AND list it here.
-for img in base proxy orchestrator socket-proxy node python rust; do
+for img in \
+    base proxy orchestrator socket-proxy \
+    node node-build python python-build rust rust-build; do
     if grep -qE "^[[:space:]]*-?[[:space:]]*kind:[[:space:]]*${img}\b" "$PROMOTE_WF"; then
         pass "promote-to-stable.yml: '${img}' image is promoted canary→stable"
     else

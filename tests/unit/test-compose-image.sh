@@ -269,6 +269,109 @@ else
 fi
 
 # ============================================================================
+# Test 10: Versioned composition is bound to the terminal image's builder
+# ============================================================================
+echo -e "\n${BOLD}--- 10. Immutable versioned composition ---${NC}"
+
+FAKE_BIN="${TMPDIR}/fake-bin"
+FAKE_LOG="${TMPDIR}/fake-docker.log"
+GENERATED_DOCKERFILE="${TMPDIR}/generated.Dockerfile"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/docker" <<'SH'
+#!/bin/bash
+set -u
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [[ "$1 $2" == "image inspect" && "${3:-}" == "--format" ]]; then
+    if [[ "$4" == *"composition-base"* ]]; then
+        case "${FAKE_LABEL_MODE:-valid}" in
+            valid) printf '%s\n' 'ghcr.io/andend-collective/runsecure/node-build@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ;;
+            wrong) printf '%s\n' 'ghcr.io/andend-collective/runsecure/python-build@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ;;
+            missing) printf '%s\n' '<no value>' ;;
+        esac
+    else
+        printf '%s\n' 'ghcr.io/andend-collective/runsecure/node@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    exit 0
+fi
+if [[ "$1" == "pull" && "$2" == *"node-build@sha256:"* ]]; then
+    [[ "${FAKE_BUILDER_PULL_FAIL:-0}" == "1" ]] && exit 1
+    exit 0
+fi
+if [[ "$1" == "pull" || "$1" == "tag" ]]; then
+    exit 0
+fi
+if [[ "$1 $2" == "image inspect" ]]; then
+    exit 1
+fi
+if [[ "$1" == "build" ]]; then
+    previous=""
+    for argument in "$@"; do
+        if [[ "$previous" == "-f" ]]; then
+            cp "$argument" "$FAKE_GENERATED_DOCKERFILE"
+            break
+        fi
+        previous="$argument"
+    done
+    exit 0
+fi
+exit 0
+SH
+chmod 0755 "$FAKE_BIN/docker"
+
+PROJECT_PINNED="${TMPDIR}/project-pinned"
+mkdir -p "$PROJECT_PINNED/.github"
+cat > "$PROJECT_PINNED/.github/runner.yml" <<'YAML'
+runtime: node:24
+version: "2.1.8"
+tools: [cypress]
+YAML
+
+if PATH="$FAKE_BIN:$PATH" \
+    FAKE_DOCKER_LOG="$FAKE_LOG" \
+    FAKE_GENERATED_DOCKERFILE="$GENERATED_DOCKERFILE" \
+    "$COMPOSE_SCRIPT" "$PROJECT_PINNED" >/dev/null 2>&1; then
+    if grep -qF 'pull ghcr.io/andend-collective/runsecure/node-build@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$FAKE_LOG" \
+        && grep -qF 'FROM runner-node-build:2.1.8-24' "$GENERATED_DOCKERFILE"; then
+        pass "Uses the exact composition-stage digest recorded on the terminal image"
+    else
+        fail "Did not pull/use the terminal image's exact composition-stage digest"
+    fi
+    if grep -qF '/opt/runsecure/composition/tools/cypress.sh' "$GENERATED_DOCKERFILE" \
+        && grep -qF '/opt/runsecure/composition/finalize-hardening.sh' "$GENERATED_DOCKERFILE" \
+        && ! grep -qE '^COPY (tools|infra/scripts)' "$GENERATED_DOCKERFILE"; then
+        pass "Uses release-embedded recipes and finalizer without checkout COPY inputs"
+    else
+        fail "Versioned composition still consumes mutable checkout assets"
+    fi
+else
+    fail "Valid immutable versioned composition failed"
+fi
+
+for bad_mode in missing wrong; do
+    : > "$FAKE_LOG"
+    if PATH="$FAKE_BIN:$PATH" \
+        FAKE_DOCKER_LOG="$FAKE_LOG" \
+        FAKE_GENERATED_DOCKERFILE="$GENERATED_DOCKERFILE" \
+        FAKE_LABEL_MODE="$bad_mode" \
+        "$COMPOSE_SCRIPT" "$PROJECT_PINNED" >/dev/null 2>&1; then
+        fail "Accepted $bad_mode composition-base provenance"
+    else
+        pass "Rejects $bad_mode composition-base provenance"
+    fi
+done
+
+: > "$FAKE_LOG"
+if PATH="$FAKE_BIN:$PATH" \
+    FAKE_DOCKER_LOG="$FAKE_LOG" \
+    FAKE_GENERATED_DOCKERFILE="$GENERATED_DOCKERFILE" \
+    FAKE_BUILDER_PULL_FAIL=1 \
+    "$COMPOSE_SCRIPT" "$PROJECT_PINNED" >/dev/null 2>&1; then
+    fail "Fell back locally after immutable builder pull failure"
+else
+    pass "Builder digest pull failure is fail-closed"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo -e "\n${BOLD}=== compose-image.sh Test Results ===${NC}"

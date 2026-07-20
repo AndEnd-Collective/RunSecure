@@ -140,6 +140,26 @@ jobs:
             canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
             stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
             also_alias: latest
+          - manifest_key: node-build-24
+            kind: node-build
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-24'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-24'
+            also_alias: latest-24
+          - manifest_key: node-build-22
+            kind: node-build
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-22'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-22'
+            also_alias: latest-22
+          - manifest_key: python-build-3.12
+            kind: python-build
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-3.12'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-3.12'
+            also_alias: latest-3.12
+          - manifest_key: rust-build-stable
+            kind: rust-build
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-stable'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-stable'
+            also_alias: latest-stable
           - manifest_key: node-24
             kind: node
             canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-24'

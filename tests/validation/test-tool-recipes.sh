@@ -12,7 +12,7 @@
 #
 # Prerequisites:
 #   - Docker running
-#   - runner-base:latest and runner-node:24 images built
+#   - runner-base:latest built
 # ============================================================================
 
 set -uo pipefail
@@ -53,14 +53,29 @@ skip() {
 
 echo -e "\n${BOLD}=== Tool Recipe Smoke Tests ===${NC}\n"
 
-# Verify base images exist
-if ! docker image inspect runner-node:24 &>/dev/null; then
-    echo -e "${RED}ERROR: runner-node:24 not found. Build it first.${NC}"
+# Published language images are terminal (apt/dpkg removed), so tool recipes
+# must be tested against the private node-build target and then finalized.
+TOOL_BUILD_BASE="runner-node-build:tool-tests-24"
+if ! docker image inspect runner-base:latest &>/dev/null; then
+    echo -e "${RED}ERROR: runner-base:latest not found. Build it first.${NC}"
     exit 1
 fi
 
 TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"; docker rmi runsecure-test-cypress runsecure-test-playwright runsecure-test-semgrep 2>/dev/null || true' EXIT
+trap 'rm -rf "$TMPDIR"; docker rmi runsecure-test-cypress runsecure-test-playwright runsecure-test-semgrep "$TOOL_BUILD_BASE" 2>/dev/null || true' EXIT
+
+if [[ "$SKIP_BUILD" == false ]] || ! docker image inspect "$TOOL_BUILD_BASE" &>/dev/null; then
+    echo "  Building private Node composition stage..."
+    if ! docker build \
+        -f "${RUNSECURE_ROOT}/images/node.Dockerfile" \
+        --target node-build \
+        --build-arg NODE_VERSION=24 \
+        -t "$TOOL_BUILD_BASE" \
+        "$RUNSECURE_ROOT"; then
+        echo -e "${RED}ERROR: failed to build private Node composition stage.${NC}"
+        exit 1
+    fi
+fi
 
 # ============================================================================
 # Helper: build a test image with a tool recipe
@@ -78,8 +93,10 @@ build_tool_image() {
     cat > "$TMPDIR/Dockerfile.${tool}" <<EOF
 FROM ${base_image}
 USER root
-COPY tools/${tool}.sh /tmp/install-${tool}.sh
-RUN chmod +x /tmp/install-${tool}.sh && /tmp/install-${tool}.sh && rm /tmp/install-${tool}.sh
+RUN test -f /opt/runsecure/composition/tools/${tool}.sh \
+    && /opt/runsecure/composition/tools/${tool}.sh
+RUN /opt/runsecure/composition/finalize-hardening.sh \
+    && rm -rf /opt/runsecure/composition
 USER runner
 EOF
 
@@ -108,15 +125,17 @@ echo -e "${BOLD}--- 1. Cypress ---${NC}"
 
 if [[ -f "${TOOLS_DIR}/cypress.sh" ]]; then
     echo "  Building cypress test image..."
-    if build_tool_image "cypress" "runner-node:24"; then
+    if build_tool_image "cypress" "$TOOL_BUILD_BASE"; then
         pass "Cypress image built successfully"
 
-        # Verify cypress binary exists
-        if docker run "${HARDENING_FLAGS[@]}" runsecure-test-cypress \
-            bash -c "npx cypress --version" 2>&1 | grep -q "Cypress"; then
+        # Capture output before matching so `set -o pipefail` cannot turn
+        # grep -q's early close into a false Docker/SIGPIPE failure.
+        CYPRESS_OUTPUT=$(docker run "${HARDENING_FLAGS[@]}" \
+            runsecure-test-cypress bash -c "npx cypress --version" 2>&1)
+        if grep -q "Cypress" <<<"$CYPRESS_OUTPUT"; then
             pass "cypress --version works"
         else
-            fail "cypress --version failed"
+            fail "cypress --version failed: $CYPRESS_OUTPUT"
         fi
 
         # Verify the Cypress binary was actually downloaded into the cache
@@ -144,15 +163,18 @@ echo -e "\n${BOLD}--- 2. Playwright ---${NC}"
 
 if [[ -f "${TOOLS_DIR}/playwright.sh" ]]; then
     echo "  Building playwright test image..."
-    if build_tool_image "playwright" "runner-node:24"; then
+    if build_tool_image "playwright" "$TOOL_BUILD_BASE"; then
         pass "Playwright image built successfully"
 
-        # Verify playwright is installed
-        if docker run "${HARDENING_FLAGS[@]}" runsecure-test-playwright \
-            bash -c "npx playwright --version" 2>&1 | grep -q "[0-9]"; then
+        # Verify the globally installed binary directly. Capture output before
+        # matching so `set -o pipefail` cannot turn grep -q's early close into
+        # a false Docker/SIGPIPE failure.
+        PLAYWRIGHT_OUTPUT=$(docker run "${HARDENING_FLAGS[@]}" \
+            runsecure-test-playwright bash -c "playwright --version" 2>&1)
+        if grep -q "[0-9]" <<<"$PLAYWRIGHT_OUTPUT"; then
             pass "playwright --version works"
         else
-            fail "playwright --version failed"
+            fail "playwright --version failed: $PLAYWRIGHT_OUTPUT"
         fi
 
         # Verify chromium browser binary is present
@@ -166,9 +188,9 @@ if [[ -f "${TOOLS_DIR}/playwright.sh" ]]; then
         # Verify file ownership (runner user should own .cache)
         if docker run "${HARDENING_FLAGS[@]}" runsecure-test-playwright \
             bash -c "test -O /home/runner/.cache && echo OWNED" 2>&1 | grep -q "OWNED"; then
-            pass "~/.cache owned by runner user"
+            pass "/home/runner/.cache owned by runner user"
         else
-            fail "~/.cache not owned by runner user"
+            fail "/home/runner/.cache not owned by runner user"
         fi
     else
         fail "Playwright image build failed"
@@ -184,7 +206,7 @@ echo -e "\n${BOLD}--- 3. Semgrep ---${NC}"
 
 if [[ -f "${TOOLS_DIR}/semgrep.sh" ]]; then
     echo "  Building semgrep test image..."
-    if build_tool_image "semgrep" "runner-node:24"; then
+    if build_tool_image "semgrep" "$TOOL_BUILD_BASE"; then
         pass "Semgrep image built successfully (on node base — tests python auto-install)"
 
         # Verify semgrep binary exists

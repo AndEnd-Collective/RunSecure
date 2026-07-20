@@ -61,14 +61,26 @@ EOF
 cat > "${tmp}/release-digest-node-24.txt" <<EOF
 ghcr.io/andend-collective/runsecure/node@sha256:$(digest b)
 EOF
+cat > "${tmp}/release-digest-node-build-24.txt" <<EOF
+ghcr.io/andend-collective/runsecure/node-build@sha256:$(digest 2)
+EOF
 cat > "${tmp}/release-digest-node-22.txt" <<EOF
 ghcr.io/andend-collective/runsecure/node@sha256:$(digest c)
+EOF
+cat > "${tmp}/release-digest-node-build-22.txt" <<EOF
+ghcr.io/andend-collective/runsecure/node-build@sha256:$(digest 3)
 EOF
 cat > "${tmp}/release-digest-python-3.12.txt" <<EOF
 ghcr.io/andend-collective/runsecure/python@sha256:$(digest d)
 EOF
+cat > "${tmp}/release-digest-python-build-3.12.txt" <<EOF
+ghcr.io/andend-collective/runsecure/python-build@sha256:$(digest 4)
+EOF
 cat > "${tmp}/release-digest-rust-stable.txt" <<EOF
 ghcr.io/andend-collective/runsecure/rust@sha256:$(digest e)
+EOF
+cat > "${tmp}/release-digest-rust-build-stable.txt" <<EOF
+ghcr.io/andend-collective/runsecure/rust-build@sha256:$(digest 5)
 EOF
 cat > "${tmp}/release-digest-orchestrator.txt" <<EOF
 ghcr.io/andend-collective/runsecure/orchestrator@sha256:$(digest f)
@@ -90,16 +102,20 @@ import pathlib
 import sys
 
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["schema_version"] == 1
+assert manifest["schema_version"] == 2
 assert manifest["release"] == "2.1.8"
 assert manifest["publish_run_id"] == 123456
 assert set(manifest["images"]) == {
     "base",
+    "node-build-22",
+    "node-build-24",
     "node-22",
     "node-24",
     "orchestrator",
     "proxy",
+    "python-build-3.12",
     "python-3.12",
+    "rust-build-stable",
     "rust-stable",
     "socket-proxy",
 }
@@ -124,10 +140,15 @@ if python3 "$MANIFEST_GENERATOR" \
     --publish-run-id 123456 \
     --output "${tmp}/must-not-exist.json" \
     "${tmp}/release-digest-base.txt" \
-    "${tmp}"/release-digest-node-*.txt \
+    "${tmp}/release-digest-node-build-22.txt" \
+    "${tmp}/release-digest-node-build-24.txt" \
+    "${tmp}/release-digest-node-22.txt" \
+    "${tmp}/release-digest-node-24.txt" \
     "${tmp}"/release-digest-orchestrator.txt \
     "${tmp}"/release-digest-proxy.txt \
+    "${tmp}/release-digest-python-build-3.12.txt" \
     "${tmp}"/release-digest-python-3.12.txt \
+    "${tmp}/release-digest-rust-build-stable.txt" \
     "${tmp}"/release-digest-rust-stable.txt 2>/dev/null; then
   echo "FAIL: release manifest accepted a missing socket-proxy digest" >&2
   exit 1
@@ -138,10 +159,15 @@ if python3 "$MANIFEST_GENERATOR" \
     --build-sha "$(digest 1 | cut -c1-40)" \
     --publish-run-id 123456 \
     --output "${tmp}/must-not-exist.json" \
-    "${tmp}"/release-digest-node-*.txt \
+    "${tmp}/release-digest-node-build-22.txt" \
+    "${tmp}/release-digest-node-build-24.txt" \
+    "${tmp}/release-digest-node-22.txt" \
+    "${tmp}/release-digest-node-24.txt" \
     "${tmp}"/release-digest-orchestrator.txt \
     "${tmp}"/release-digest-proxy.txt \
+    "${tmp}/release-digest-python-build-3.12.txt" \
     "${tmp}"/release-digest-python-3.12.txt \
+    "${tmp}/release-digest-rust-build-stable.txt" \
     "${tmp}"/release-digest-rust-stable.txt \
     "${tmp}"/release-digest-socket-proxy.txt 2>/dev/null; then
   echo "FAIL: release manifest accepted a missing base digest" >&2
@@ -161,19 +187,43 @@ publish = yaml.safe_load(publish_path.read_text())
 weekly = yaml.safe_load(weekly_path.read_text())
 jobs = publish["jobs"]
 
+assert publish["concurrency"] == {
+    "group": "publish-images",
+    "cancel-in-progress": False,
+}
+assert jobs["base"]["outputs"]["digest"] == "${{ steps.build.outputs.digest }}"
 assert set(jobs["release-allowlist"]["needs"]) == {"gate", "proxy", "languages"}
 assert set(jobs["socket-proxy"]["needs"]) == {"gate", "release-allowlist"}
 
-for job_name in ("base", "languages", "proxy", "orchestrator", "socket-proxy"):
+for job_name in ("base", "proxy", "orchestrator", "socket-proxy"):
     builds = [step for step in jobs[job_name]["steps"] if "docker/build-push-action@" in step.get("uses", "")]
     assert len(builds) == 1
     assert builds[0].get("id") == "build"
 
-for job_name in ("base", "languages", "proxy", "orchestrator", "socket-proxy"):
+language_builds = [
+    step
+    for step in jobs["languages"]["steps"]
+    if "docker/build-push-action@" in step.get("uses", "")
+]
+assert {step.get("id") for step in language_builds} == {"build-stage", "build"}
+builder = next(step for step in language_builds if step["id"] == "build-stage")
+terminal = next(step for step in language_builds if step["id"] == "build")
+assert builder["with"]["target"] == "${{ matrix.name }}-build"
+assert "${{ matrix.name }}-build" in builder["with"]["tags"]
+assert "BASE_REF=${{ env.IMAGE_PREFIX }}/base@${{ needs.base.outputs.digest }}" in builder["with"]["build-args"]
+assert "BASE_TAG=" not in builder["with"]["build-args"]
+assert terminal["with"]["file"] == "images/finalize-language.Dockerfile"
+assert "BUILD_DIGEST=${{ steps.build-stage.outputs.digest }}" in terminal["with"]["build-args"]
+assert "COMPOSITION_BASE=" in terminal["with"]["build-args"]
+
+for job_name in ("base", "proxy", "orchestrator", "socket-proxy"):
     builds = [step for step in jobs[job_name]["steps"] if "docker/build-push-action@" in step.get("uses", "")]
     assert len(builds) == 1
     assert builds[0]["with"]["push"] is True
     assert builds[0]["with"]["no-cache"] is True
+for build in language_builds:
+    assert build["with"]["push"] is True
+    assert build["with"]["no-cache"] is True
 
 orchestrator_build = next(
     step
@@ -195,6 +245,13 @@ for artifact in (
     "release-digest-rust-stable",
 ):
     assert artifact in release_steps
+for build_only_artifact in (
+    "release-digest-node-build-24",
+    "release-digest-node-build-22",
+    "release-digest-python-build-3.12",
+    "release-digest-rust-build-stable",
+):
+    assert build_only_artifact not in release_steps
 assert "release-allowlist-" in socket_steps
 manifest_steps = "\n".join(str(step) for step in jobs["release-manifest"]["steps"])
 assert set(jobs["release-manifest"]["needs"]) == {
@@ -206,6 +263,8 @@ assert set(jobs["release-manifest"]["needs"]) == {
 assert "generate-release-manifest.py" in manifest_steps
 assert "--publish-run-id '${{ github.run_id }}'" in manifest_steps
 assert "release-image-manifest-" in manifest_steps
+assert set(jobs["grype-scan-languages"]["needs"]) == {"gate", "languages"}
+assert len(jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]) == 4
 
 assert "Refresh socket-proxy allowed-images.txt" not in weekly_path.read_text()
 for step in weekly["jobs"]["bump"]["steps"]:
@@ -226,6 +285,8 @@ assert '"$SOURCE_REF"' in promote_text
 assert '"${REPO}/${KIND}:${CANARY}"' in promote_text
 assert "gh release upload" in promote_text
 assert "runsecure-v${VERSION}-release-images.json" in promote_text
+for builder_kind in ("node-build", "python-build", "rust-build"):
+    assert f"kind: {builder_kind}" in promote_text
 
 accept_text = accept_path.read_text()
 assert "github.event.workflow_run.id || inputs.publish_run_id" in accept_text

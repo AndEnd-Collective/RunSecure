@@ -15,9 +15,8 @@
 #   - finalize-hardening fail-closed properties
 #   - H2 stub/remove behavior
 #
-# The Docker-required tests (test-tool-recipes.sh, test-hardening-
-# idempotency.sh) are run by smoke-test.yml's image-build path instead;
-# they would double-run here without adding signal.
+# Docker-required tests are skipped in this host-only loop. Scanner inventory
+# validation runs in grype-scan.yml after the finalized Node image is built.
 # ============================================================================
 
 name: validate
@@ -56,10 +55,10 @@ jobs:
           FAIL=0
           for t in tests/validation/test-*.sh; do
             [ -f "$t" ] || continue
-            # Skip Docker-required tests — those run in smoke-test.yml
+            # Skip Docker-required tests — image workflows run these.
             case "$(basename "$t")" in
-              test-tool-recipes.sh|test-hardening-idempotency.sh)
-                echo "::group::SKIP $t (Docker-only, runs in smoke-test)"
+              test-tool-recipes.sh|test-hardening-idempotency.sh|test-scanner-package-inventory.sh)
+                echo "::group::SKIP $t (Docker-only, runs in an image workflow)"
                 echo "::endgroup::"
                 continue ;;
             esac

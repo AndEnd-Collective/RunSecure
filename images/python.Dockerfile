@@ -1,7 +1,9 @@
 # ============================================================================
 # RunSecure — Python Language Layer
 # ============================================================================
-# Adds Python runtime on top of runner-base.
+# Adds Python runtime on top of runner-base. The default (final) stage is a
+# terminal runtime image; python-build exists only so compose-image.sh can add
+# project-requested packages/tools before applying the same final hardening.
 #
 # We DO NOT use Debian's `python3` package because Debian Bookworm ships
 # 3.11.2 — installing it would silently make `runner-python:3.12` ship 3.11,
@@ -25,19 +27,21 @@
 
 ARG BASE_IMAGE=runner-base
 ARG BASE_TAG=latest
-FROM ${BASE_IMAGE}:${BASE_TAG} AS python
+ARG BASE_REF=${BASE_IMAGE}:${BASE_TAG}
+FROM ${BASE_REF} AS python-build
 
 ARG PYTHON_VERSION=3.12
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
-LABEL org.opencontainers.image.title="RunSecure Python"
-LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions runner with Python (astral-sh/python-build-standalone, SHA256-verified). One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.title="RunSecure Python Composition Stage"
+LABEL org.opencontainers.image.description="Build-only Python composition input. Contains package-manager functionality and must never be launched as a CI runner."
 LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
 LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="AndEnd Collective"
-LABEL security.hardening="full"
+LABEL security.hardening="build-only"
+LABEL io.runsecure.image-role="composition"
 
 USER root
 
@@ -93,6 +97,31 @@ RUN INSTALLED=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.ve
 RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Embed the release's composition assets in the build-only stage. Versioned
+# project images execute these exact bytes from the builder digest recorded on
+# the terminal image; they never copy recipes from a mutable local checkout.
+COPY tools/ /opt/runsecure/composition/tools/
+COPY infra/scripts/finalize-hardening.sh /opt/runsecure/composition/finalize-hardening.sh
+RUN find /opt/runsecure/composition/tools -type f -exec chmod 0555 {} + \
+    && chmod 0555 /opt/runsecure/composition/finalize-hardening.sh
+
+USER runner
+WORKDIR /home/runner
+
+# ---- TERMINAL RUNTIME STAGE -------------------------------------------------
+# Nothing may be layered onto this stage that needs apt/dpkg or modifies /etc.
+# Project composition targets python-build above and finalizes after additions.
+FROM python-build AS python
+
+LABEL org.opencontainers.image.title="RunSecure Python"
+LABEL org.opencontainers.image.description="Hardened terminal GitHub Actions runner with Python. One job per container, then destroyed."
+LABEL security.hardening="full"
+LABEL io.runsecure.image-role="runtime"
+
+USER root
+RUN /opt/runsecure/composition/finalize-hardening.sh \
+    && rm -rf /opt/runsecure/composition
 
 USER runner
 WORKDIR /home/runner

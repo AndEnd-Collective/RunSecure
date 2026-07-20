@@ -11,17 +11,22 @@ from pathlib import Path
 
 EXPECTED_IMAGES = {
     "base": "base",
+    "node-build-22": "node-build",
+    "node-build-24": "node-build",
     "node-22": "node",
     "node-24": "node",
     "orchestrator": "orchestrator",
     "proxy": "proxy",
+    "python-build-3.12": "python-build",
     "python-3.12": "python",
+    "rust-build-stable": "rust-build",
     "rust-stable": "rust",
     "socket-proxy": "socket-proxy",
 }
 REFERENCE = re.compile(
     r"^ghcr\.io/andend-collective/runsecure/"
-    r"(?P<package>base|node|orchestrator|proxy|python|rust|socket-proxy)"
+    r"(?P<package>base|node(?:-build)?|orchestrator|proxy|"
+    r"python(?:-build)?|rust(?:-build)?|socket-proxy)"
     r"@sha256:[0-9a-f]{64}$"
 )
 RELEASE = re.compile(r"^(?:[0-9]+\.[0-9]+\.[0-9]+|manual-build)$")
@@ -53,8 +58,8 @@ def validate_manifest(manifest: dict[str, object], args: argparse.Namespace) -> 
         "images",
     }
     if set(manifest) != expected_fields:
-        raise ValueError("manifest fields do not match schema version 1")
-    if manifest["schema_version"] != 1:
+        raise ValueError("manifest fields do not match schema version 2")
+    if manifest["schema_version"] != 2:
         raise ValueError("unsupported manifest schema version")
 
     release = manifest["release"]

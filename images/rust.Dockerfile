@@ -1,7 +1,9 @@
 # ============================================================================
 # RunSecure — Rust Language Layer
 # ============================================================================
-# Adds Rust toolchain on top of runner-base.
+# Adds Rust toolchain on top of runner-base. The default (final) stage is a
+# terminal runtime image; rust-build exists only so compose-image.sh can add
+# project-requested packages/tools before applying the same final hardening.
 # Uses rustup for version management, installed under the runner user.
 #
 # Build:
@@ -12,19 +14,21 @@
 
 ARG BASE_IMAGE=runner-base
 ARG BASE_TAG=latest
-FROM ${BASE_IMAGE}:${BASE_TAG} AS rust
+ARG BASE_REF=${BASE_IMAGE}:${BASE_TAG}
+FROM ${BASE_REF} AS rust-build
 
 ARG RUST_VERSION=stable
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
-LABEL org.opencontainers.image.title="RunSecure Rust"
-LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions runner with Rust toolchain. One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.title="RunSecure Rust Composition Stage"
+LABEL org.opencontainers.image.description="Build-only Rust composition input. Contains package-manager functionality and must never be launched as a CI runner."
 LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
 LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="AndEnd Collective"
-LABEL security.hardening="full"
+LABEL security.hardening="build-only"
+LABEL io.runsecure.image-role="composition"
 
 USER root
 
@@ -83,4 +87,31 @@ RUN . "$HOME/.cargo/env" \
 
 ENV PATH="/home/runner/.cargo/bin:/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"
 
+# Embed the release's composition assets in the build-only stage. Versioned
+# project images execute these exact bytes from the builder digest recorded on
+# the terminal image; they never copy recipes from a mutable local checkout.
+USER root
+COPY tools/ /opt/runsecure/composition/tools/
+COPY infra/scripts/finalize-hardening.sh /opt/runsecure/composition/finalize-hardening.sh
+RUN find /opt/runsecure/composition/tools -type f -exec chmod 0555 {} + \
+    && chmod 0555 /opt/runsecure/composition/finalize-hardening.sh
+
+USER runner
+WORKDIR /home/runner
+
+# ---- TERMINAL RUNTIME STAGE -------------------------------------------------
+# Nothing may be layered onto this stage that needs apt/dpkg or modifies /etc.
+# Project composition targets rust-build above and finalizes after additions.
+FROM rust-build AS rust
+
+LABEL org.opencontainers.image.title="RunSecure Rust"
+LABEL org.opencontainers.image.description="Hardened terminal GitHub Actions runner with Rust. One job per container, then destroyed."
+LABEL security.hardening="full"
+LABEL io.runsecure.image-role="runtime"
+
+USER root
+RUN /opt/runsecure/composition/finalize-hardening.sh \
+    && rm -rf /opt/runsecure/composition
+
+USER runner
 WORKDIR /home/runner

@@ -8,8 +8,11 @@
 # The resulting image is tagged with a hash of the configuration so that
 # identical configs across projects share the same image (deduplication).
 #
-# If runner.yml specifies a `version:` field, images are pulled from GHCR
-# instead of built locally. Falls back to local build on pull failure.
+# If runner.yml specifies a `version:` field, an exact release terminal image
+# is pulled from GHCR when no additions are requested. Project additions start
+# from that release's separately published build-only language stage, then
+# apply final hardening. Versioned pulls fail closed instead of silently mixing
+# a released base with mutable language/tool inputs from the local checkout.
 #
 # Usage:
 #   ./infra/scripts/compose-image.sh /path/to/project
@@ -89,6 +92,15 @@ for _name in ${HARDENING_REMOVE//,/ } ${HARDENING_STUB//,/ }; do
     fi
 done
 
+# Published language images are terminal: apt/dpkg are gone and /etc is
+# locked. Any project-requested package, tool, or H2 override must therefore
+# start from the language Dockerfile's build-only *-build stage and run the
+# finalizer only after those additions have been applied.
+NEEDS_COMPOSITION=false
+if [[ -n "$TOOLS" || -n "$APT_PACKAGES" || -n "$HARDENING_REMOVE" || -n "$HARDENING_STUB" ]]; then
+    NEEDS_COMPOSITION=true
+fi
+
 # Parse runtime into language and version
 LANG=$(echo "$RUNTIME" | cut -d: -f1)
 LANG_VERSION=$(echo "$RUNTIME" | cut -d: -f2)
@@ -101,22 +113,11 @@ echo "[RunSecure] RunSecure version: $RUNSECURE_VERSION"
 USE_REGISTRY=false
 if [[ "$RUNSECURE_VERSION" != "local" && "$RUNSECURE_VERSION" != "null" ]]; then
     USE_REGISTRY=true
-    REGISTRY_BASE="${REGISTRY_PREFIX}/base:${RUNSECURE_VERSION}"
     REGISTRY_LANG="${REGISTRY_PREFIX}/${LANG}:${RUNSECURE_VERSION}-${LANG_VERSION}"
     echo "[RunSecure] Registry mode: pulling from $REGISTRY_PREFIX"
 fi
 
 # --- Ensure base image exists ------------------------------------------------
-if [[ "$USE_REGISTRY" == true ]]; then
-    echo "[RunSecure] Pulling base: $REGISTRY_BASE"
-    if docker pull "$REGISTRY_BASE" 2>/dev/null; then
-        docker tag "$REGISTRY_BASE" "runner-base:latest"
-    else
-        echo "[RunSecure] WARNING: Pull failed for $REGISTRY_BASE. Falling back to local build."
-        USE_REGISTRY=false
-    fi
-fi
-
 if [[ "$USE_REGISTRY" == false ]]; then
     if ! docker image inspect "runner-base:latest" &>/dev/null; then
         echo "[RunSecure] Building runner-base..."
@@ -124,27 +125,81 @@ if [[ "$USE_REGISTRY" == false ]]; then
     fi
 fi
 
-# --- Ensure language image exists --------------------------------------------
+# --- Ensure language image/build stage exists --------------------------------
 LANG_IMAGE="runner-${LANG}:${LANG_VERSION}"
 LANG_DOCKERFILE="${IMAGES_DIR}/${LANG}.Dockerfile"
+BUILD_SOURCE_VERSION="$RUNSECURE_VERSION"
+[[ "$BUILD_SOURCE_VERSION" == "null" ]] && BUILD_SOURCE_VERSION="local"
+BUILD_SOURCE_ID="$BUILD_SOURCE_VERSION"
 
-if [[ "$USE_REGISTRY" == true ]]; then
-    echo "[RunSecure] Pulling language image: $REGISTRY_LANG"
-    if docker pull "$REGISTRY_LANG" 2>/dev/null; then
-        docker tag "$REGISTRY_LANG" "$LANG_IMAGE"
-    else
-        echo "[RunSecure] WARNING: Pull failed for $REGISTRY_LANG. Falling back to local build."
-        USE_REGISTRY=false
-    fi
+if [[ ! -f "$LANG_DOCKERFILE" ]]; then
+    echo "[RunSecure] ERROR: No Dockerfile for language '$LANG' at $LANG_DOCKERFILE"
+    exit 1
 fi
 
-if [[ "$USE_REGISTRY" == false ]] && ! docker image inspect "$LANG_IMAGE" &>/dev/null; then
-    if [[ ! -f "$LANG_DOCKERFILE" ]]; then
-        echo "[RunSecure] ERROR: No Dockerfile for language '$LANG' at $LANG_DOCKERFILE"
+if [[ "$USE_REGISTRY" == false ]]; then
+    BASE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' runner-base:latest)
+    BUILD_SOURCE_ID=$(
+        {
+            printf '%s\n' "$BASE_IMAGE_ID"
+            sha256sum "$LANG_DOCKERFILE" \
+                "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh" \
+                "${TOOLS_DIR}"/*.sh
+        } | sha256sum | cut -d' ' -f1
+    )
+    BUILD_SOURCE_VERSION="local-${BUILD_SOURCE_ID:0:12}"
+fi
+LANG_BUILD_IMAGE="runner-${LANG}-build:${BUILD_SOURCE_VERSION}-${LANG_VERSION}"
+
+# Registry language packages are immutable release inputs. The terminal image
+# carries the exact composition-stage digest that produced it. Never fall back
+# to local Dockerfiles for a versioned request: doing so would produce a hybrid
+# image under a release key.
+if [[ "$USE_REGISTRY" == true ]]; then
+    echo "[RunSecure] Pulling release image: $REGISTRY_LANG"
+    if ! docker pull "$REGISTRY_LANG"; then
+        echo "[RunSecure] ERROR: Required release image unavailable: $REGISTRY_LANG" >&2
+        exit 1
+    fi
+    docker tag "$REGISTRY_LANG" "$LANG_IMAGE"
+    BUILD_SOURCE_ID=$(docker image inspect \
+        --format '{{join .RepoDigests ","}}' "$REGISTRY_LANG")
+    if [[ -z "$BUILD_SOURCE_ID" ]]; then
+        echo "[RunSecure] ERROR: Pulled release image has no immutable RepoDigest: $REGISTRY_LANG" >&2
         exit 1
     fi
 
-    echo "[RunSecure] Building $LANG_IMAGE..."
+    if [[ "$NEEDS_COMPOSITION" == true ]]; then
+        COMPOSITION_BASE=$(docker image inspect \
+            --format '{{index .Config.Labels "io.runsecure.composition-base"}}' \
+            "$REGISTRY_LANG")
+        expected_builder="${REGISTRY_PREFIX}/${LANG}-build"
+        builder_digest="${COMPOSITION_BASE#*@}"
+        if [[ "${COMPOSITION_BASE%@*}" != "$expected_builder" \
+            || ! "$builder_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "[RunSecure] ERROR: $REGISTRY_LANG lacks a valid $LANG composition digest" >&2
+            exit 1
+        fi
+        echo "[RunSecure] Pulling immutable composition stage: $COMPOSITION_BASE"
+        if ! docker pull "$COMPOSITION_BASE"; then
+            echo "[RunSecure] ERROR: Required composition stage unavailable: $COMPOSITION_BASE" >&2
+            exit 1
+        fi
+        docker tag "$COMPOSITION_BASE" "$LANG_BUILD_IMAGE"
+        BUILD_SOURCE_ID="$COMPOSITION_BASE"
+    fi
+fi
+
+IMAGE_TO_BUILD="$LANG_IMAGE"
+BUILD_TARGET_ARGS=()
+if [[ "$NEEDS_COMPOSITION" == true ]]; then
+    IMAGE_TO_BUILD="$LANG_BUILD_IMAGE"
+    BUILD_TARGET_ARGS=(--target "${LANG}-build")
+fi
+
+if [[ "$USE_REGISTRY" == false ]] \
+    && { [[ "$FORCE_REBUILD" == "--force" ]] || ! docker image inspect "$IMAGE_TO_BUILD" &>/dev/null; }; then
+    echo "[RunSecure] Building $IMAGE_TO_BUILD..."
 
     case "$LANG" in
         node)   BUILD_ARG="NODE_VERSION=${LANG_VERSION}" ;;
@@ -155,23 +210,24 @@ if [[ "$USE_REGISTRY" == false ]] && ! docker image inspect "$LANG_IMAGE" &>/dev
 
     docker build \
         -f "$LANG_DOCKERFILE" \
-        --build-arg "BASE_TAG=latest" \
+        "${BUILD_TARGET_ARGS[@]}" \
+        --build-arg "BASE_REF=runner-base:latest" \
         ${BUILD_ARG:+--build-arg "$BUILD_ARG"} \
-        -t "$LANG_IMAGE" \
+        -t "$IMAGE_TO_BUILD" \
         "${RUNSECURE_ROOT}"
 fi
 
 # --- Generate project-specific Dockerfile ------------------------------------
-# If no tools and no extra apt packages, use the language image directly.
-if [[ -z "$TOOLS" && -z "$APT_PACKAGES" ]]; then
-    echo "[RunSecure] No tools or extra packages — using $LANG_IMAGE directly."
+# If there are no additions, use the terminal language image directly.
+if [[ "$NEEDS_COMPOSITION" == false ]]; then
+    echo "[RunSecure] No tools or extra packages or hardening overrides — using $LANG_IMAGE directly."
     echo "$LANG_IMAGE"
     exit 0
 fi
 
 # Create a deterministic hash of the config to tag the image
 # Include RunSecure version so different releases don't collide
-CONFIG_HASH=$(echo "${RUNSECURE_VERSION}|${RUNTIME}|${TOOLS}|${APT_PACKAGES}" | sha256sum | cut -c1-12)
+CONFIG_HASH=$(echo "${RUNSECURE_VERSION}|${BUILD_SOURCE_ID}|${RUNTIME}|${TOOLS}|${APT_PACKAGES}|${HARDENING_REMOVE}|${HARDENING_STUB}" | sha256sum | cut -c1-12)
 PROJECT_IMAGE="runner-project:${CONFIG_HASH}"
 
 # Check if image already exists (skip rebuild unless --force)
@@ -192,7 +248,7 @@ DOCKERFILE="${TMPDIR}/Dockerfile"
 cat > "$DOCKERFILE" <<HEADER
 # Auto-generated by RunSecure compose-image.sh
 # Config hash: ${CONFIG_HASH}
-FROM ${LANG_IMAGE}
+FROM ${LANG_BUILD_IMAGE}
 
 USER root
 HEADER
@@ -236,14 +292,14 @@ if [[ -n "$TOOLS" ]]; then
             exit 1
         fi
         RECIPE="${TOOLS_DIR}/${tool}.sh"
-        if [[ ! -f "$RECIPE" ]]; then
+        if [[ "$USE_REGISTRY" == false && ! -f "$RECIPE" ]]; then
             echo "[RunSecure] WARNING: No recipe for tool '$tool' at $RECIPE — skipping."
             continue
         fi
         echo "" >> "$DOCKERFILE"
-        echo "# --- Tool: ${tool} (from tools/${tool}.sh) ---" >> "$DOCKERFILE"
-        echo "COPY tools/${tool}.sh /tmp/install-${tool}.sh" >> "$DOCKERFILE"
-        echo "RUN chmod +x /tmp/install-${tool}.sh && /tmp/install-${tool}.sh && rm /tmp/install-${tool}.sh" >> "$DOCKERFILE"
+        echo "# --- Tool: ${tool} (embedded in the release composition stage) ---" >> "$DOCKERFILE"
+        echo "RUN test -f /opt/runsecure/composition/tools/${tool}.sh \\" >> "$DOCKERFILE"
+        echo "    && /opt/runsecure/composition/tools/${tool}.sh" >> "$DOCKERFILE"
     done <<< "$TOOLS"
 fi
 
@@ -257,8 +313,8 @@ ARG RUNSECURE_HARDENING_REMOVE=""
 ARG RUNSECURE_HARDENING_STUB=""
 ENV RUNSECURE_HARDENING_REMOVE=\${RUNSECURE_HARDENING_REMOVE}
 ENV RUNSECURE_HARDENING_STUB=\${RUNSECURE_HARDENING_STUB}
-COPY infra/scripts/finalize-hardening.sh /tmp/finalize-hardening.sh
-RUN chmod +x /tmp/finalize-hardening.sh && /tmp/finalize-hardening.sh && rm /tmp/finalize-hardening.sh
+RUN /opt/runsecure/composition/finalize-hardening.sh \
+    && rm -rf /opt/runsecure/composition
 # Don't carry the build-time vars into the runtime image — they're
 # consumed during finalize-hardening only.
 ENV RUNSECURE_HARDENING_REMOVE=""

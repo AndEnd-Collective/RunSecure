@@ -9,6 +9,8 @@
 #   ghcr.io/andend-collective/runsecure/base:nightly
 #   ghcr.io/andend-collective/runsecure/<lang>:<version>-canary-<lang_version>
 #   ghcr.io/andend-collective/runsecure/<lang>:nightly-<lang_version>
+#   ghcr.io/andend-collective/runsecure/<lang>-build:<version>-canary-<lang_version>
+#   ghcr.io/andend-collective/runsecure/<lang>-build:nightly-<lang_version>
 #   ghcr.io/andend-collective/runsecure/proxy:<version>-canary
 #   ghcr.io/andend-collective/runsecure/proxy:nightly
 #
@@ -38,6 +40,13 @@ env:
 
 # Default to no permissions — each job declares its own
 permissions: {}
+
+# Canary tags are mutable staging pointers. Serialize every publication and
+# bind downstream builds to emitted digests so no run can observe another
+# run's tag movement between stages.
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
 
 jobs:
   # --- Single approval gate + version resolver ------------------------------
@@ -84,6 +93,8 @@ jobs:
   base:
     needs: gate
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -178,18 +189,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: build
+      - id: build-stage
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ${{ matrix.file }}
+          target: ${{ matrix.name }}-build
           push: true
           no-cache: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
-            BASE_TAG=${{ needs.gate.outputs.version }}-canary
+            BASE_REF=${{ env.IMAGE_PREFIX }}/base@${{ needs.base.outputs.digest }}
             ${{ matrix.build_arg }}
+          # Build stages are immutable composition inputs and are deliberately
+          # separate packages that never enter the runtime socket allowlist.
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build:nightly-${{ matrix.lang_version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: images/finalize-language.Dockerfile
+          push: true
+          no-cache: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_IMAGE=${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+            BUILD_DIGEST=${{ steps.build-stage.outputs.digest }}
+            COMPOSITION_BASE=${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build@${{ steps.build-stage.outputs.digest }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:nightly-${{ matrix.lang_version }}
@@ -212,11 +245,32 @@ jobs:
           printf '%s@%s\n' "$IMAGE" "$DIGEST" \
             > "release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt"
 
+      - name: Record immutable composition-stage manifest digest
+        env:
+          DIGEST: ${{ steps.build-stage.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable composition-stage digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" \
+            > "release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt"
+
       - name: Upload immutable runtime manifest digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}
           path: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload immutable composition-stage manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}
+          path: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -531,6 +585,68 @@ jobs:
         with:
           sarif_file: grype-base.sarif
           category: grype-base
+
+  # Scan every pushed terminal language image. The finalizer preserves the
+  # read-only dpkg inventory specifically so Syft/Grype can still enumerate
+  # Debian packages after apt/dpkg executables and mutable state are removed.
+  grype-scan-languages:
+    needs: [gate, languages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: node
+            lang_version: "24"
+            sarif_name: node-24
+          - name: node
+            lang_version: "22"
+            sarif_name: node-22
+          - name: python
+            lang_version: "3.12"
+            sarif_name: python-3.12
+          - name: rust
+            lang_version: stable
+            sarif_name: rust-stable
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Grype (latest, fresh CVE DB)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Grype scan (terminal language image) — fail on HIGH/CRITICAL with fix
+        env:
+          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}"
+          SARIF_FILE: "grype-${{ matrix.sarif_name }}.sarif"
+        run: |
+          set -euo pipefail
+          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
+            || GRYPE_FAILED=1
+          grype "$IMAGE_REF" --output sarif --file "$SARIF_FILE" --only-fixed
+          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
+            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+            exit 1
+          fi
+
+      - name: Upload Grype scan results (terminal language image)
+        if: always() && hashFiles(format('grype-{0}.sarif', matrix.sarif_name)) != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: grype-${{ matrix.sarif_name }}.sarif
+          category: grype-${{ matrix.sarif_name }}
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
   grype-scan-proxy:

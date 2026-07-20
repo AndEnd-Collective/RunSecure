@@ -9,7 +9,13 @@ If you're an LLM proposing changes to this project, read this file first. The ru
 ## Architecture decisions that are NOT up for re-litigation
 
 - **No permanent runner daemon.** Self-CI uses the one-shot `infra/scripts/dev/bootstrap-self-runner.sh` script, invoked on demand. A long-running orchestrator wrapper (`while true; do run.sh; sleep 10; done`) was tried, generated continuous `git-credential-manager` and polling noise, and was explicitly retired. Do not propose re-introducing it.
-- **Images are terminal.** Don't `FROM ghcr.io/.../runsecure/*` in user Dockerfiles to layer tools on top. The hardening (`apt` removed, root locked, setuid stripped, `/etc` 555) is final. Tools that consumers need go in `tools/*.sh` via the project's `runner.yml`, *before* `finalize-hardening.sh` runs.
+- **Runnable images are terminal.** Don't `FROM` a released runtime image in
+  user Dockerfiles to layer tools on top. `base` and the `node-build`,
+  `python-build`, and `rust-build` packages are explicitly labelled build-only
+  composition inputs; they never enter the socket-proxy runtime allowlist.
+  Only `compose-image.sh` may consume them, by the exact digest recorded on the
+  matching terminal image, using release-embedded recipes before
+  `finalize-hardening.sh` runs.
 - **Versions bump weekly via `weekly-version-bump.yml`.** Don't tag manually unless re-cutting after a bug fix (and even then, prefer triggering `weekly-version-bump.yml` with `bump_type=patch` so the same machinery runs).
 - **One approval gate per release.** The `ghcr-publish` environment gates exactly one job (`gate`) in `publish-images.yml`. Don't add `environment: ghcr-publish` to additional jobs — that re-introduces the multi-prompt UX we already fixed.
 - **`apt-get upgrade -y` in every Dockerfile is load-bearing.** Without it, grype flags HIGH CVEs in unpatched debian:bookworm-slim packages even on a fresh digest. Don't remove it for "build speed."

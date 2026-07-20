@@ -80,8 +80,8 @@ else
 fi
 
 # 4. Package manager cannot function
-# In finalized images (via compose-image.sh), apt is removed entirely.
-# In intermediate images, the runner user (UID 1001) lacks permissions to install.
+# In published language and composed project images, apt is removed entirely.
+# In private intermediate stages, UID 1001 lacks permissions to install.
 echo -e "\n${BOLD}--- Package Manager ---${NC}"
 if command -v apt-get &>/dev/null; then
     # Binary exists — check if it can actually do anything
