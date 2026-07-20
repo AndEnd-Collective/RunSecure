@@ -13,9 +13,9 @@
 #   ghcr.io/andend-collective/runsecure/proxy:nightly
 #
 # Production tags (`<version>` and `latest`) are NOT created here.
-# They are added by promote-to-stable.yml after post-publish-acceptance.yml
-# validates the canary build against documented security claims. Same
-# digest, server-side retag — no rebuild.
+# They are added manually by promote-to-stable.yml after automatic
+# post-publish acceptance and live multi-runner acceptance. Same digest,
+# server-side retag — no rebuild.
 # ============================================================================
 
 name: Publish Images
@@ -102,11 +102,11 @@ jobs:
         with:
           context: .
           file: images/base.Dockerfile
-          # Push to GHCR on real semver tag pushes only. Manual dispatch
-          # builds locally for the post-build Grype scan (no-cache so
-          # Debian package updates are picked up).
-          push: ${{ github.event_name == 'push' }}
-          no-cache: ${{ github.event_name != 'push' }}
+          # Every approved invocation publishes a coherent canary set. Manual
+          # dispatch uses the explicit `manual-build` tag; without publishing
+          # base first, the runtime matrix cannot resolve its FROM image.
+          push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           # Canary-first publish. Acceptance suite (post-publish-acceptance.yml)
           # validates these tags; on success, promote-to-stable.yml retags
@@ -157,11 +157,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ${{ matrix.file }}
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           build-args: |
             BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
@@ -175,6 +177,27 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable runtime manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" \
+            > "release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt"
+
+      - name: Upload immutable runtime manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}
+          path: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # --- Build proxy image (independent of base — runs in parallel) ------------
   proxy:
@@ -194,11 +217,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/squid
           file: infra/squid/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary
@@ -208,6 +233,26 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable proxy manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/proxy
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-proxy.txt
+
+      - name: Upload immutable proxy manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-proxy
+          path: release-digest-proxy.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # --- Build orchestrator image (long-running orchestrator) -----------------
   # SECURITY: this job uses only `needs.gate.outputs.*` (job-internal),
@@ -227,12 +272,17 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/orchestrator
           file: infra/orchestrator/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            RUNSECURE_VERSION=${{ needs.gate.outputs.version }}
+            RUNSECURE_BUILD_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/orchestrator:nightly
@@ -241,26 +291,108 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  # --- Build socket-proxy image (Compose backend) --------------------------
+      - name: Record immutable orchestrator manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/orchestrator
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-orchestrator.txt
+
+      - name: Upload immutable orchestrator manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-orchestrator
+          path: release-digest-orchestrator.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Generate same-release digest allowlist ------------------------------
+  release-allowlist:
+    runs-on: ubuntu-latest
+    needs: [gate, proxy, languages]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable proxy digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-proxy
+          path: .release-digests
+
+      - name: Download immutable Node 24 digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-node-24
+          path: .release-digests
+
+      - name: Download immutable Node 22 digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-node-22
+          path: .release-digests
+
+      - name: Download immutable Python digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-python-3.12
+          path: .release-digests
+
+      - name: Download immutable Rust digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-rust-stable
+          path: .release-digests
+
+      - name: Generate fail-closed release allowlist
+        run: |
+          infra/socket-proxy/generate-release-allowlist.sh \
+            .release-allowlist/allowed-images.txt \
+            .release-digests/release-digest-*.txt
+
+      - name: Upload same-release allowlist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-allowlist-${{ needs.gate.outputs.version }}
+          path: .release-allowlist/allowed-images.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Build socket-proxy after the release allowlist exists ---------------
   socket-proxy:
     runs-on: ubuntu-latest
-    needs: gate
+    needs: [gate, release-allowlist]
     permissions:
+      actions: read
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install same-release image allowlist into build context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-allowlist-${{ needs.gate.outputs.version }}
+          path: infra/socket-proxy
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/socket-proxy
           file: infra/socket-proxy/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary
@@ -269,6 +401,59 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable socket-proxy manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/socket-proxy
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-socket-proxy.txt
+
+      - name: Upload immutable socket-proxy manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-socket-proxy
+          path: release-digest-socket-proxy.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Publish an auditable manifest for downstream operator locks ----------
+  release-manifest:
+    runs-on: ubuntu-latest
+    needs: [gate, orchestrator, socket-proxy]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download every immutable release digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-digest-*
+          path: .release-digests
+          merge-multiple: true
+
+      - name: Generate fail-closed release image manifest
+        run: |
+          python3 infra/scripts/generate-release-manifest.py \
+            --release '${{ needs.gate.outputs.version }}' \
+            --build-sha '${{ github.sha }}' \
+            --output .release-manifest/release-images.json \
+            .release-digests/release-digest-*.txt
+
+      - name: Upload release image manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-image-manifest-${{ needs.gate.outputs.version }}
+          path: .release-manifest/release-images.json
+          if-no-files-found: error
+          retention-days: 90
 
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs

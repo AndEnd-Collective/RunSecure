@@ -358,10 +358,17 @@ Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
 to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
 PROMOTION: the `-canary` tag exists and consumers can opt into it, but
 the stable `<version>` and `latest` tags are not created until the
-acceptance suite is fully green. The promotion (`promote-to-stable.yml`)
-runs server-side via `docker buildx imagetools create` — no rebuild,
-no pull, the stable tag points at the exact same digest the acceptance
-suite validated.
+acceptance suite is fully green. Promotion is manual so an operator can also
+require the live multi-runner backlog acceptance before releasing stable tags.
+The promotion (`promote-to-stable.yml`) runs server-side via
+`docker buildx imagetools create` — no rebuild, no pull, the stable tag points
+at the exact same digest the acceptance suite validated.
+
+Each successful publish also uploads a 90-day
+`release-image-manifest-<version>` artifact. Its JSON maps the proxy,
+orchestrator, socket-proxy, and language variants to the immutable manifest
+digests produced by their build steps, so downstream operator locks do not
+need to resolve moving tags.
 
 To run the same suite locally against your dev images:
 

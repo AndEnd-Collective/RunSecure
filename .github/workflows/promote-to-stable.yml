@@ -1,9 +1,9 @@
 # ============================================================================
 # RunSecure — Promote Canary to Stable
 # ============================================================================
-# After post-publish-acceptance.yml validates a -canary release against
-# documented security claims, this workflow promotes the same image
-# digest to the stable tag.
+# After post-publish-acceptance.yml validates a -canary release and an operator
+# verifies the live three-runner Vladislav backlog, this workflow promotes the
+# same image digest to the stable tag.
 #
 # Promotion is server-side via `docker buildx imagetools create` —
 # no rebuild, no scan re-run. The bytes that consumers pull from
@@ -18,20 +18,15 @@
 #   proxy:1.1.2-canary           ───retag──>  proxy:1.1.2
 #   proxy:nightly                             proxy:latest
 #
-# Triggered:
-#   - workflow_run on post-publish-acceptance success (auto-promote)
-#   - workflow_dispatch with `image_version` for ad-hoc promotion
-#
-# To switch to manual-only approval, delete the workflow_run trigger
-# below — operators would then promote via `gh workflow run promote-to-stable.yml -f image_version=1.1.2`.
+# Triggered manually only. Automatic post-publish acceptance remains enabled,
+# but stable tags and the GitHub Release must wait for both that workflow and
+# live multi-runner acceptance. Operators promote with:
+#   gh workflow run promote-to-stable.yml -f image_version=1.1.2
 # ============================================================================
 
 name: promote-to-stable
 
 on:
-  workflow_run:
-    workflows: ["post-publish-acceptance"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       image_version:
@@ -48,7 +43,6 @@ permissions:
 jobs:
   resolve-version:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
@@ -60,17 +54,12 @@ jobs:
       - name: Resolve version to promote
         id: v
         env:
-          DISPATCH_VERSION: ${{ github.event.inputs.image_version }}
+          DISPATCH_VERSION: ${{ inputs.image_version }}
         run: |
           set -euo pipefail
-          if [ -n "$DISPATCH_VERSION" ]; then
-            VERSION="$DISPATCH_VERSION"
-          else
-            # Triggered by acceptance success — derive from latest tag.
-            VERSION=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
-          fi
-          if [ -z "$VERSION" ]; then
-            echo "::error::could not resolve version to promote"
+          VERSION="$DISPATCH_VERSION"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::image_version must be an exact semver without v or -canary"
             exit 1
           fi
           echo "Promoting canary-$VERSION → stable $VERSION"

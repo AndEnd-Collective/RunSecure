@@ -306,6 +306,7 @@ type fakeBackend struct {
 	teardownCalls []struct {
 		handle backend.Handle
 		force  bool
+		ctxErr error
 	}
 	// inspectExitDelay simulates a runner that never exits (WaitForExit blocks
 	// until timeout fires). When non-zero WaitForExit returns (-1, true).
@@ -350,13 +351,14 @@ func (f *fakeBackend) WaitForExit(_ context.Context, h backend.Handle, _ time.Du
 	return f.waitExitCode, f.waitTimedOut
 }
 
-func (f *fakeBackend) Teardown(_ context.Context, h backend.Handle, force bool) error {
+func (f *fakeBackend) Teardown(ctx context.Context, h backend.Handle, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.teardownCalls = append(f.teardownCalls, struct {
 		handle backend.Handle
 		force  bool
-	}{h, force})
+		ctxErr error
+	}{h, force, ctx.Err()})
 	return nil
 }
 

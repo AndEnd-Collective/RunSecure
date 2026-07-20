@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKFLOWS_DIR="${RUNSECURE_ROOT}/.github/workflows"
 PROMOTE_WF="${WORKFLOWS_DIR}/promote-to-stable.yml"
+ACCEPT_WF="${WORKFLOWS_DIR}/post-publish-acceptance.yml"
 
 PASS=0
 FAIL=0
@@ -42,6 +43,25 @@ for img in base proxy orchestrator socket-proxy node python rust; do
         fail "promote-to-stable.yml: '${img}' image is published but NOT promoted (stuck at -canary)"
     fi
 done
+
+if grep -qE '^[[:space:]]+workflow_run:' "$PROMOTE_WF"; then
+    fail "promote-to-stable.yml: automatic workflow_run promotion is forbidden"
+else
+    pass "promote-to-stable.yml: stable promotion requires manual dispatch"
+fi
+
+if grep -qE '^[[:space:]]+workflow_dispatch:' "$PROMOTE_WF"; then
+    pass "promote-to-stable.yml: manual dispatch trigger is present"
+else
+    fail "promote-to-stable.yml: manual dispatch trigger is missing"
+fi
+
+if grep -qE '^[[:space:]]+workflow_run:' "$ACCEPT_WF" \
+    && grep -q 'workflows: \["Publish Images"\]' "$ACCEPT_WF"; then
+    pass "post-publish acceptance remains automatic after image publication"
+else
+    fail "post-publish acceptance must run automatically after Publish Images"
+fi
 
 echo ""
 echo "=== Promote-to-Stable Coverage ==="

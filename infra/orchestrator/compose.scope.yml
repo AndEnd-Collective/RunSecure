@@ -98,6 +98,10 @@ services:
     image: ${RUNSECURE_ORCHESTRATOR_IMAGE}
     container_name: rs-orch-${RUNSECURE_SCOPE}
     restart: unless-stopped
+    # The binary stops polling, drains active runners for 60s, then allows a
+    # bounded forced-cleanup window. Compose's default 10s grace would SIGKILL
+    # it before either phase completed, leaking per-spawn containers/networks.
+    stop_grace_period: 90s
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -126,20 +130,19 @@ services:
       # and mounted read-only into each proxy at the same path.
       RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
+      RUNSECURE_DRAIN_SECONDS: ${RUNSECURE_DRAIN_SECONDS:-60}
     volumes:
-      - ./scopes/${RUNSECURE_SCOPE}.yml:/etc/runsecure/scope.yml:ro
+      # Operator state is mounted explicitly from outside this checkout. Both
+      # variables are required so `docker compose config` fails before launch
+      # instead of silently substituting a file that cannot serve the scope.
+      - ${RUNSECURE_SCOPE_FILE_HOST:?RUNSECURE_SCOPE_FILE_HOST is required}:/etc/runsecure/scope.yml:ro
       - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
       - egress-configs:/var/run/runsecure/egress:rw
-      # Operator-provided projects root (fix G6): point RUNSECURE_PROJECTS_ROOT
-      # (in the scope .env file, gitignored) at the local directory that
-      # contains all of this scope's repo checkouts. Each repo's project_dir
-      # in scopes/<name>.yml should then be /projects/<repo>, matching a
-      # subdirectory under this root. Defaults to /dev/null (a harmless
-      # single-file mount) when unset — never edit this line to hardcode a
-      # host path; see install.md.
-      - ${RUNSECURE_PROJECTS_ROOT:-/dev/null}:/projects:ro
+      # RUNSECURE_PROJECTS_ROOT is the directory containing every checkout in
+      # this scope; project_dir values resolve below /projects in-container.
+      - ${RUNSECURE_PROJECTS_ROOT:?RUNSECURE_PROJECTS_ROOT is required}:/projects:ro
     ports:
       # Localhost-only by design — never publish externally.
       - "127.0.0.1:8080:8080"

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
@@ -92,6 +93,23 @@ func TestSpawn_WallClockTimeout(t *testing.T) {
 	forceVal := d.be.teardownCalls[0].force
 	d.be.mu.Unlock()
 	require.True(t, forceVal, "Teardown must be called with force=true on timeout")
+}
+
+func TestTeardownSpawn_CancelledRunUsesFreshContextAndForce(t *testing.T) {
+	be := newFakeBackend()
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	teardownSpawn(runCtx, be, backend.Handle{SpawnID: "s1"}, false)
+
+	require.Len(t, be.teardownCalls, 1)
+	require.True(t, be.teardownCalls[0].force)
+	require.NoError(t, be.teardownCalls[0].ctxErr,
+		"cleanup must not inherit the cancelled runner context")
+}
+
+func TestTeardownGracePeriod(t *testing.T) {
+	require.Equal(t, 15*time.Second, teardownGracePeriod())
 }
 
 func TestSpawn_RateLimitBackoff(t *testing.T) {

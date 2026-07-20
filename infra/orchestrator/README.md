@@ -13,21 +13,25 @@ backend). For the full design see
 docker build -t runsecure-socket-proxy:local infra/socket-proxy
 docker build -t runsecure-orchestrator:local  infra/orchestrator
 
-# 2. Copy the scope template and edit it.
-cp infra/orchestrator/scopes/example.yml infra/orchestrator/scopes/my.yml
+# 2. Keep operator state outside the checkout.
+mkdir -p "$HOME/.config/runsecure"
+cp infra/orchestrator/scopes/example.yml "$HOME/.config/runsecure/my.scope.yml"
+# Edit my.scope.yml so each project_dir is below /projects.
 
-# 3. Create a per-scope .env (paths to images + PAT secret).
-cat > infra/orchestrator/scopes/my.env <<EOF
+# 3. Create a per-scope .env (paths only; never put the PAT value here).
+cat > "$HOME/.config/runsecure/my.env" <<EOF
 RUNSECURE_SCOPE=my
+RUNSECURE_SCOPE_FILE_HOST=$HOME/.config/runsecure/my.scope.yml
 RUNSECURE_SOCKET_PROXY_IMAGE=runsecure-socket-proxy:local
 RUNSECURE_ORCHESTRATOR_IMAGE=runsecure-orchestrator:local
 RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
-RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/runner-node:24
+RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/node:latest-24
 RUNSECURE_PAT_FILE=/path/to/your/0400-mode/pat
+RUNSECURE_PROJECTS_ROOT=/path/to/parent/of/project/checkouts
 EOF
 
 # 4. Bring up the scope stack.
-docker compose -f infra/orchestrator/compose.scope.yml --env-file infra/orchestrator/scopes/my.env up -d
+docker compose -f infra/orchestrator/compose.scope.yml --env-file "$HOME/.config/runsecure/my.env" up -d
 ```
 
 ## See also

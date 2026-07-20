@@ -132,18 +132,38 @@ func Run(ctx context.Context, scopePath string) error {
 
 	// Spawn worker pool.
 	worker := orchestrator.NewSpawnWorker(pdeps)
+	pollCtx, stopPolling := context.WithCancel(ctx)
+	defer stopPolling()
+	workerCtx, stopWorkers := context.WithCancel(ctx)
+	defer stopWorkers()
+	var draining atomic.Bool
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for intent := range intentCh {
-				_ = worker.Execute(ctx, intent)
+				// Once shutdown begins, discard queued-but-not-started intents.
+				// An intent whose load won the race immediately before Store(true)
+				// is already admitted work and participates in the drain deadline.
+				if draining.Load() {
+					continue
+				}
+				_ = worker.Execute(workerCtx, intent)
 			}
 		}()
 	}
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
 
-	go poll.Run(ctx)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		poll.Run(pollCtx)
+	}()
 
 	// Wait for SIGTERM / SIGINT.
 	sigCh := make(chan os.Signal, 1)
@@ -153,18 +173,22 @@ func Run(ctx context.Context, scopePath string) error {
 	case sig := <-sigCh:
 		fmt.Fprintln(os.Stderr, "orchestrator: caught", sig, "— draining…")
 	}
+	signal.Stop(sigCh)
 
-	// A3 drain: stop polling, wait for in-flight to settle, then force cleanup.
-	close(intentCh)
-	drainTimeout := envIntOr("RUNSECURE_DRAIN_SECONDS", 60)
-	drainDeadline := time.Now().Add(time.Duration(drainTimeout) * time.Second)
-	for time.Now().Before(drainDeadline) {
-		if st.GlobalInFlight() == 0 {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
+	// Stop and join the sole channel producer before closing intentCh. The old
+	// order closed the channel while Poll was still live, allowing a send on a
+	// closed channel. Active runners drain until the deadline; only then is their
+	// context cancelled so SpawnWorker can force-teardown with a fresh cleanup
+	// context rather than the already-cancelled worker context.
+	drainTimeout := time.Duration(envIntOr("RUNSECURE_DRAIN_SECONDS", 60)) * time.Second
+	result := drainAndStop(drainTimeout, stopPolling, pollDone, intentCh,
+		&draining, stopWorkers, workersDone)
+	if result.Forced {
+		fmt.Fprintln(os.Stderr, "orchestrator: drain deadline reached — forced runner cleanup requested")
 	}
-	wg.Wait()
+	if !result.WorkersStopped {
+		return errors.New("orchestrator: workers did not stop within forced-cleanup grace")
+	}
 	return nil
 }
 

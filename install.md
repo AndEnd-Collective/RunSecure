@@ -102,13 +102,16 @@ domains as needed.
 
 ## 5. Create the scope config
 
-Copy the template:
+Keep the rendered scope outside the RunSecure checkout so repository cleanup,
+branch switches, and fresh clones cannot remove operator state:
 
 ```sh
-cp infra/orchestrator/scopes/example.yml infra/orchestrator/scopes/datacentric.yml
+mkdir -p "$HOME/.config/runsecure"
+cp infra/orchestrator/scopes/example.yml \
+  "$HOME/.config/runsecure/datacentric.scope.yml"
 ```
 
-Edit `infra/orchestrator/scopes/datacentric.yml`:
+Edit `$HOME/.config/runsecure/datacentric.scope.yml`:
 
 ```yaml
 apiVersion: runsecure.io/v1alpha1
@@ -131,17 +134,18 @@ repos:
     max_concurrent: 3
 ```
 
-Create a `.env` file (gitignored — see `infra/orchestrator/scopes/*` in
-`.gitignore`) that points the compose stack at your local images, PAT, and
-project workspace:
+Create an external `.env` file that points the Compose stack at the scope,
+local images, PAT file, and project workspace. It contains paths, never the PAT
+value itself:
 
 ```sh
-cat > infra/orchestrator/scopes/datacentric.env <<EOF
+cat > "$HOME/.config/runsecure/datacentric.env" <<EOF
 RUNSECURE_SCOPE=datacentric
+RUNSECURE_SCOPE_FILE_HOST=$HOME/.config/runsecure/datacentric.scope.yml
 RUNSECURE_SOCKET_PROXY_IMAGE=runsecure-socket-proxy:local
 RUNSECURE_ORCHESTRATOR_IMAGE=runsecure-orchestrator:local
 RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
-RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/runner-node:24
+RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/node:latest-24
 RUNSECURE_PAT_FILE=$HOME/.config/runsecure/datacentric.pat
 RUNSECURE_PROJECTS_ROOT=$HOME/Code/Naor
 EOF
@@ -149,10 +153,10 @@ EOF
 
 `RUNSECURE_PROJECTS_ROOT` is the *parent* directory holding every repo
 checkout this scope will serve — `compose.scope.yml` mounts it once,
-read-only, at `/projects` inside the orchestrator container (the mount
-defaults to a harmless `/dev/null` when the variable is unset, so nothing
-breaks if you don't set it). Each repo's `project_dir` in the scope YAML
-must then point at the matching subdirectory, e.g. a checkout at
+read-only, at `/projects` inside the orchestrator container. Both it and
+`RUNSECURE_SCOPE_FILE_HOST` are required; Compose fails during configuration
+if either is absent. Each repo's `project_dir` in the scope YAML must then
+point at the matching subdirectory, e.g. a checkout at
 `$RUNSECURE_PROJECTS_ROOT/datacentric` is `project_dir: /projects/datacentric`.
 
 This means `infra/orchestrator/compose.scope.yml` never needs hand-editing
@@ -176,10 +180,10 @@ and it works on both backends with no code changes — the orchestrator
 applies the identical hardening to whatever image you name. Two requirements:
 
 1. **Allowlist it.** The socket-proxy only lets the daemon create containers
-   from digests in its allowlist. Add your image's `@sha256:…` digest to
-   `infra/socket-proxy/allowed-images.txt` (rebuild the socket-proxy image),
-   or use the `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` stopgap (see
-   Troubleshooting).
+   from digests in its allowlist. Released RunSecure images are baked into the
+   same release's socket-proxy from immutable build outputs. For a custom
+   image, point `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` at a local file
+   containing its `@sha256:…` reference (see Troubleshooting).
 2. **Satisfy the runner-image contract.** Your image MUST ship:
    - the GitHub Actions runner at `/home/runner/actions-runner`, and
    - RunSecure's JIT launcher at `/home/runner/entrypoint.sh`
@@ -211,7 +215,7 @@ Launch the scope:
 ```sh
 docker compose \
   -f infra/orchestrator/compose.scope.yml \
-  --env-file infra/orchestrator/scopes/datacentric.env \
+  --env-file "$HOME/.config/runsecure/datacentric.env" \
   up -d
 ```
 
@@ -272,7 +276,7 @@ runsecure.orchestrator.spawn.completed
 | Orchestrator exits with `auth.pat_file ... mode 0400` | PAT file has wrong perms | `chmod 0400 <pat>` |
 | `auth.pat_file ... no such file` | Bind-mount in compose.scope.yml is wrong | Verify `RUNSECURE_PAT_FILE` in .env points at the real file |
 | Many `runsecure.orchestrator.auth.degraded` events | PAT lacks Administration:RW for one or more listed repos | Re-issue with correct permissions; the orchestrator reloads on PAT-file mtime change |
-| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need. As a stopgap for a just-released digest not yet baked into the socket-proxy image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it in automatically, no tracked-file edits needed. |
+| Many `socket_proxy_denied` in `spawn.failed` events | Runner image digest is absent from the baked release allowlist and optional operator allowlist | Verify the runner and socket-proxy came from the same release. For a custom image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it automatically, with no tracked-file edit. |
 | Breaker stuck open (no spawns) | 5 consecutive spawn failures | `docker logs rs-orch-* \| grep breaker.opened` — fix the upstream cause; the breaker enters half-open after 5min cooldown |
 | Lots of `ratelimit.paused` events | GitHub API quota exhausted (rare at 15s polling) | Increase `poll_interval_seconds` or reduce scope size |
 | Runner containers accumulate (`docker ps` shows many) | Orchestrator died mid-flight without graceful drain | Restart it; A4 cold-start reconciliation re-counts in-flight; orphan proxy containers are torn down on the same path |
@@ -302,7 +306,7 @@ Stop and remove the stack:
 
 ```sh
 docker compose -f infra/orchestrator/compose.scope.yml \
-  --env-file infra/orchestrator/scopes/datacentric.env \
+  --env-file "$HOME/.config/runsecure/datacentric.env" \
   down --volumes --remove-orphans
 ```
 
@@ -317,6 +321,8 @@ Delete the local PAT file:
 
 ```sh
 rm ~/.config/runsecure/datacentric.pat
+rm ~/.config/runsecure/datacentric.scope.yml \
+   ~/.config/runsecure/datacentric.env
 ```
 
 Revoke the PAT on GitHub for completeness.

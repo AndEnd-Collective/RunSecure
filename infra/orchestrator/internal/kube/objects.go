@@ -7,7 +7,8 @@
 //   - Pod securityContext: runAsNonRoot=true, runAsUser=1001,
 //     seccompProfile.type=RuntimeDefault.
 //   - Container securityContext: allowPrivilegeEscalation=false,
-//     capabilities drop ALL, readOnlyRootFilesystem=true, NOT privileged.
+//     capabilities drop ALL, NOT privileged. Proxy root filesystems are
+//     read-only; the runner root filesystem is writable by necessity.
 //   - automountServiceAccountToken=false on every Pod.
 //   - No host namespaces (hostNetwork/hostPID/hostIPC all false).
 //   - No hostPath volumes.
@@ -352,7 +353,8 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		{Name: "RUNNER_JIT_CONFIG_FILE", Value: "/var/run/runsecure/jit-config"},
 	}
 
-	// tmpfs so the runner can write to /tmp (readOnlyRootFilesystem=true).
+	// Memory-backed /tmp keeps transient job data bounded and off the writable
+	// runner image layer.
 	tmpVolume := corev1.Volume{
 		Name: "tmp",
 		VolumeSource: corev1.VolumeSource{

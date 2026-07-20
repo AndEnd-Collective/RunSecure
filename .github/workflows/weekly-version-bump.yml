@@ -59,6 +59,7 @@ jobs:
       # Required to push the new tag back to the repo. No write access
       # to any other ref — branch protection on main is unaffected.
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -147,48 +148,6 @@ jobs:
           echo "$NEXT_VERSION" > "$GITHUB_STEP_SUMMARY"
 
       # ----------------------------------------------------------------------
-      # Refresh socket-proxy's image-digest allowlist when runner images
-      # publish. The allowlist is baked into the socket-proxy image at build
-      # time, so this step opens a PR with the updated digests that the
-      # publish-images workflow will then pick up.
-      # ----------------------------------------------------------------------
-      - name: Refresh socket-proxy allowed-images.txt
-        if: github.event.inputs.dry_run != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
-        run: |
-          set -euo pipefail
-          ALLOW="infra/socket-proxy/allowed-images.txt"
-          {
-            sed '/^# Initial entries/,$d' "$ALLOW"
-            echo ""
-            echo "# Auto-refreshed by weekly-version-bump.yml at $NEXT_VERSION."
-            for img in proxy runner-node runner-python runner-rust; do
-              # Resolve the latest digest from GHCR. If the image isn't
-              # published yet (greenfield), skip silently.
-              DIGEST=$(gh api -H "Accept: application/vnd.github+json" \
-                "/users/AndEnd-Collective/packages/container/runsecure%2F${img}/versions" \
-                --jq '.[0].name' 2>/dev/null || true)
-              if [[ -n "$DIGEST" && "$DIGEST" =~ ^sha256: ]]; then
-                echo "ghcr.io/andend-collective/runsecure/${img}@${DIGEST}"
-              fi
-            done
-          } > "${ALLOW}.new"
-          mv "${ALLOW}.new" "$ALLOW"
-          if git diff --quiet "$ALLOW"; then
-            echo "no digest changes; skipping PR"
-            exit 0
-          fi
-          git add "$ALLOW"
-          git commit -m "chore(socket-proxy): refresh allowed-images.txt for $NEXT_VERSION"
-          git push origin "HEAD:refs/heads/bot/allowed-images-${NEXT_VERSION}"
-          gh pr create \
-            --title "chore(socket-proxy): refresh allowed-images for $NEXT_VERSION" \
-            --body "Automated refresh of infra/socket-proxy/allowed-images.txt; the socket-proxy rebuild on this PR will bake in the updated digests." \
-            --base main --head "bot/allowed-images-${NEXT_VERSION}" || true
-
-      # ----------------------------------------------------------------------
       # Refresh Go module dependencies weekly so they never go stale between
       # releases. Without this, a freshly-published CVE in a transitive dep
       # (e.g. golang.org/x/net pulled by client-go) only surfaces at the
@@ -225,4 +184,4 @@ jobs:
           gh pr create \
             --title "chore(deps): weekly Go dependency refresh for $NEXT_VERSION" \
             --body "Automated 'go get -u ./... && go mod tidy' on both Go modules so dependencies never go stale between releases. CI — including the per-image Grype scans — gates this PR." \
-            --base main --head "$BRANCH" || true
+            --base main --head "$BRANCH"

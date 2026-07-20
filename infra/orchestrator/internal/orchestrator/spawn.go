@@ -202,7 +202,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	exitCode, timedOut := w.deps.Backend().WaitForExit(ctx, h, timeout)
 
 	// Step 7: teardown.
-	_ = w.deps.Backend().Teardown(ctx, h, timedOut)
+	teardownSpawn(ctx, w.deps.Backend(), h, timedOut)
 
 	if timedOut {
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
@@ -236,6 +236,19 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 	return fmt.Errorf("runner exited %d", exitCode)
 }
+
+// teardownSpawn never reuses a cancelled run context for cleanup. Docker and
+// Kubernetes clients reject requests immediately when handed that context,
+// which previously left runner/proxy resources behind during forced shutdown.
+// Context cancellation is itself a force condition because WaitForExit returns
+// without observing a normal runner exit.
+func teardownSpawn(runCtx context.Context, be backend.Backend, h backend.Handle, timedOut bool) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), teardownGracePeriod())
+	defer cancel()
+	_ = be.Teardown(cleanupCtx, h, timedOut || runCtx.Err() != nil)
+}
+
+func teardownGracePeriod() time.Duration { return 15 * time.Second }
 
 // fail emits spawn.failed and returns the error. Used for failures BEFORE
 // JIT generation (no leak cleanup needed).
