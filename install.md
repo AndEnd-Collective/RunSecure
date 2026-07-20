@@ -148,6 +148,9 @@ RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
 RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/node:latest-24
 RUNSECURE_PAT_FILE=$HOME/.config/runsecure/datacentric.pat
 RUNSECURE_PROJECTS_ROOT=$HOME/Code/Naor
+# Optional host ports; use distinct values for concurrent scope stacks.
+RUNSECURE_ORCHESTRATOR_HEALTH_PORT=8080
+RUNSECURE_ORCHESTRATOR_STATE_PORT=8081
 EOF
 ```
 
@@ -192,9 +195,11 @@ applies the identical hardening to whatever image you name. Two requirements:
 
    **Easiest path — don't hand-roll an image.** Add your extra tools via the
    project's `runner.yml` `tools:` block instead. `compose-image.sh` layers
-   them onto a RunSecure base image *before* finalize-hardening, so the
-   result inherits the runner binary, the baked entrypoint, and every
-   hardening property automatically. Only reach for a fully custom image ref
+   them onto the exact release builder digest recorded by the terminal image,
+   using recipes and finalizer bytes embedded in that release. The result
+   inherits the runner binary, baked entrypoint, and every hardening property
+   automatically; a missing or mismatched digest fails closed. Only reach for
+   a fully custom image ref
    when the `tools:` block genuinely can't express what you need — and if you
    do, the cleanest way to meet the contract is to build `FROM` your own base
    and `COPY infra/scripts/entrypoint.sh /home/runner/entrypoint.sh` yourself.
@@ -219,7 +224,8 @@ docker compose \
   up -d
 ```
 
-Three containers come up:
+Four long-running containers come up (plus the one-shot ownership and PAT
+initializers):
 
 - `rs-orch-datacentric-socket-proxy` — the **only** thing mounting
   `/var/run/docker.sock` (read-only).
@@ -227,13 +233,17 @@ Three containers come up:
   (allowlist defaults to `api.github.com` only).
 - `rs-orch-datacentric` — the orchestrator itself (distroless, nonroot,
   RO rootfs, `cap_drop: ALL`).
+- `rs-orch-datacentric-operator-relay` — an unprivileged, path-restricted
+  HAProxy relay that publishes health/state endpoints on loopback. It has no
+  PAT, Docker socket, project mount, or access to the socket-proxy network.
 
 ---
 
 ## 7. Verify
 
-The orchestrator exposes `/healthz` and `/metrics` on localhost ports
-(never published externally):
+The operator relay exposes `/healthz`, `/readyz`, `/metrics`, and the state
+snapshot on localhost ports (never published externally). The orchestrator
+itself remains attached only to Docker-internal networks:
 
 ```sh
 curl -sf http://127.0.0.1:8080/healthz

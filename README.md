@@ -51,7 +51,7 @@ Each CI job runs in a fresh container that:
 | **No privilege escalation** | `no-new-privileges:true`, all setuid bits stripped |
 | **Restricted syscalls** | Custom seccomp profile blocks `ptrace`, `mount`, `bpf`, `keyctl`, `swapon`, etc. |
 | **Read-only system paths** | `/etc` is `chmod 555`; `/etc/passwd` and `/etc/group` are `444` |
-| **No package manager** | `apt`/`dpkg` removed in finalize-hardening; nothing can be installed at runtime |
+| **No package manager** | `apt`/`dpkg` executables and mutable state removed; only read-only dpkg inventory remains for Syft/Grype |
 | **No network recon tools** | `ping`, `nc`, `ssh`, `wget` removed |
 | **Egress allowlist** | Network goes through Squid (HTTP/HTTPS) + HAProxy (raw TCP) + dnsmasq (DNS). Anything not on your allowlist is blocked. |
 | **Cloud-metadata blocked** | `169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254` all refused |
@@ -247,6 +247,12 @@ version: "1.1.1"                       # Pin a published release (skip for
                                        # local-build mode)
 ```
 
+For versioned configs with `tools:`, `apt:`, or hardening overrides, the
+terminal language image identifies the exact immutable `*-build` digest that
+produced it. `compose-image.sh` pulls that digest and runs the recipes and
+finalizer embedded in that release. A missing label, mismatched package, or
+failed digest pull is fatal; it never substitutes the current checkout.
+
 Validate any `runner.yml` against the schema:
 
 ```bash
@@ -329,9 +335,12 @@ Docker network and exercise CI workflows end-to-end:
 ./tests/integration/run-integration-tests.sh --test python    # Python CI lifecycle
 ```
 
-A separate Grype CVE scan runs in CI on every PR that touches
-`images/` or `tools/`. The post-publish workflow re-scans every image
-that gets pushed to GHCR — a HIGH/CRITICAL CVE with an upstream fix
+A separate Grype CVE scan runs in CI on every PR that touches image
+construction, terminal hardening, scanner validation, or `tools/`. For the
+finalized Node image, Syft must still catalogue the language-layer `nodejs`
+Debian package from the read-only `/var/lib/dpkg/status` inventory, and Grype
+must successfully consume that SBOM. The post-publish workflow re-scans every
+image that gets pushed to GHCR — a HIGH/CRITICAL CVE with an upstream fix
 blocks the publish.
 
 ---
@@ -402,7 +411,7 @@ What you see in the Security tab when a claim fails:
 
 | Column | Value |
 |---|---|
-| **Rule** | `H03` — *"Package manager removed (apt/dpkg/aptitude)"* |
+| **Rule** | `H03` — *"Package-manager functionality removed; scanner inventory retained read-only"* |
 | **Severity** | error |
 | **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-canary-24: package manager 'apt' still present at /usr/bin/apt" |
 | **Location** | `SECURITY.md` line 1 (anchor: layer-1-image-hardening-build-time) |
@@ -623,6 +632,11 @@ To consume a release as a project:
 version: "1.1.2"
 runtime: node:24
 ```
+
+Released language packages are terminal images. Their companion
+`node-build`, `python-build`, and `rust-build` packages are immutable
+composition inputs only: they are retained by digest, never admitted by the
+runtime socket-proxy allowlist, and finalized before a project image can run.
 
 To trigger a manual release:
 
