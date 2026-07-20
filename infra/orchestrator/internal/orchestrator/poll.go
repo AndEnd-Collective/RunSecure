@@ -64,6 +64,12 @@ func (p *Poll) Run(ctx context.Context) {
 func (p *Poll) tick(ctx context.Context) {
 	// Bug #2 fix: record this tick to update the /healthz freshness signal.
 	p.deps.RecordPollTick()
+	// Shutdown drain and unresolved teardown debt are scope-wide admission
+	// barriers. TryReserve repeats this check atomically with capacity changes,
+	// closing the race with a teardown failure that lands during this tick.
+	if p.deps.SchedulingBlocked() {
+		return
+	}
 
 	// If we're in a rate-limit pause for this scope, check if it's cleared.
 	if p.deps.IsRateLimited(p.scope.Name) {

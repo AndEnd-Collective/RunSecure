@@ -7,6 +7,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,11 +106,12 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		SpawnID: in.SpawnID,
 		Backend: "kube",
 		Refs: map[string]string{
-			"namespace":    ns,
-			"secret":       secret.Name,
-			"runner_pod":   runnerPod.Name,
-			"proxy_pod":    proxyPod.Name,
-			"network_name": "",
+			"namespace":         ns,
+			"secret":            secret.Name,
+			"runner_pod":        runnerPod.Name,
+			"proxy_pod":         proxyPod.Name,
+			"network_name":      "",
+			"egress_config_dir": in.EgressConfigDir,
 		},
 	}, nil
 }
@@ -149,10 +151,18 @@ func (b *kubeBackend) WaitForExit(ctx context.Context, h backend.Handle, timeout
 func (b *kubeBackend) Teardown(ctx context.Context, h backend.Handle, _ bool) error {
 	ns := h.Refs["namespace"]
 	secretName := h.Refs["secret"]
+	var cleanupErrors []error
 	if err := b.c.DeleteSpawn(ctx, ns, secretName); err != nil {
-		return fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err)
+		cleanupErrors = append(cleanupErrors,
+			fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err))
 	}
-	return nil
+	if egressDir := h.Refs["egress_config_dir"]; egressDir != "" {
+		if err := os.RemoveAll(egressDir); err != nil {
+			cleanupErrors = append(cleanupErrors,
+				fmt.Errorf("kube backend: remove egress config %q: %w", egressDir, err))
+		}
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 // Reconcile lists all active runner pods in the scoped namespace and returns

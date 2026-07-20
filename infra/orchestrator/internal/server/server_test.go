@@ -116,6 +116,12 @@ func TestHealthz_StaleWhenLastPollTooOld(t *testing.T) {
 
 func TestMetrics_RendersTextFormat(t *testing.T) {
 	d := newDeps(t)
+	repoState := d.snap.PerRepo["o/r"]
+	repoState.TeardownBlocked = 1
+	d.snap.PerRepo["o/r"] = repoState
+	d.snap.TeardownBlocked = true
+	d.snap.TeardownFailuresTotal = 2
+	d.snap.TeardownReconciledTotal = 1
 	m := NewMetrics(d)
 	rr := httpRec()
 	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
@@ -135,6 +141,9 @@ func TestMetrics_RendersTextFormat(t *testing.T) {
 	require.Contains(t, body, `runsecure_orchestrator_completed_runners_total 6`)
 	require.Contains(t, body, `runsecure_orchestrator_unassigned_exits_total 1`)
 	require.Contains(t, body, `runsecure_orchestrator_deregistrations_total 6`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_blocked_reservations{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_failures_total 2`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_reconciled_total 1`)
 	require.Contains(t, body, `runsecure_orchestrator_build_info{version="v2.1.8",build_sha="abc123"} 1`)
 }
 

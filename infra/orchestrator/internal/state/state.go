@@ -15,18 +15,24 @@ const (
 	PhasePending  SpawnPhase = "pending"
 	PhaseOnline   SpawnPhase = "online"
 	PhaseAssigned SpawnPhase = "assigned"
+	// PhaseTeardownBlocked is capacity debt: backend teardown returned an
+	// error, so the reservation must remain charged until an exact retry of
+	// that teardown succeeds.
+	PhaseTeardownBlocked SpawnPhase = "teardown_blocked"
 )
 
 // SpawnState correlates an orchestrator spawn with its GitHub runner.
 type SpawnState struct {
-	SpawnID    string     `json:"spawn_id"`
-	Repo       string     `json:"repo"`
-	Phase      SpawnPhase `json:"phase"`
-	RunnerID   int64      `json:"runner_id,omitempty"`
-	RunnerName string     `json:"runner_name,omitempty"`
-	ReservedAt time.Time  `json:"reserved_at"`
-	OnlineAt   time.Time  `json:"online_at,omitempty"`
-	AssignedAt time.Time  `json:"assigned_at,omitempty"`
+	SpawnID           string     `json:"spawn_id"`
+	Repo              string     `json:"repo"`
+	Phase             SpawnPhase `json:"phase"`
+	RunnerID          int64      `json:"runner_id,omitempty"`
+	RunnerName        string     `json:"runner_name,omitempty"`
+	ReservedAt        time.Time  `json:"reserved_at"`
+	OnlineAt          time.Time  `json:"online_at,omitempty"`
+	AssignedAt        time.Time  `json:"assigned_at,omitempty"`
+	TeardownBlockedAt time.Time  `json:"teardown_blocked_at,omitempty"`
+	TeardownFailure   string     `json:"teardown_failure,omitempty"`
 }
 
 type State struct {
@@ -43,10 +49,13 @@ type State struct {
 	buildSHA           string
 	configLoaded       bool
 	draining           bool
+	teardownBlocked    bool
 	assignmentsTotal   int64
 	completedTotal     int64
 	unassignedTotal    int64
 	deregisteredTotal  int64
+	teardownFailures   int64
+	teardownReconciled int64
 }
 
 type RepoState struct {
@@ -55,6 +64,7 @@ type RepoState struct {
 	Pending         int       `json:"pending"`
 	Online          int       `json:"online"`
 	Assigned        int       `json:"assigned"`
+	TeardownBlocked int       `json:"teardown_blocked"`
 	BreakerOpen     bool      `json:"breaker_open"`
 	LastPollAt      time.Time `json:"last_poll_at,omitempty"`
 	LastPollSuccess time.Time `json:"last_poll_success,omitempty"`
@@ -119,6 +129,9 @@ func (s *State) globalInFlightLocked() int {
 func (s *State) TryReserve(spawnID, repo string, repoCap, globalCap int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.draining || s.teardownBlocked {
+		return false
+	}
 	if existing, ok := s.reservations[spawnID]; ok {
 		return existing.Repo == repo
 	}
@@ -173,7 +186,7 @@ func (s *State) MarkAssigned(spawnID string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spawn, ok := s.reservations[spawnID]
-	if !ok || spawn.Phase == PhaseAssigned {
+	if !ok || (spawn.Phase != PhasePending && spawn.Phase != PhaseOnline) {
 		return false
 	}
 	r := s.ensure(spawn.Repo)
@@ -190,19 +203,102 @@ func (s *State) MarkAssigned(spawnID string, now time.Time) bool {
 	return true
 }
 
-// ReleaseReservation removes capacity and its phase component exactly once.
-func (s *State) ReleaseReservation(spawnID string) {
+// MarkTeardownBlocked converts an active reservation into fail-closed capacity
+// debt. It is idempotent so repeated teardown failures do not inflate counters.
+func (s *State) MarkTeardownBlocked(spawnID, repo, detail string, at time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spawn, ok := s.reservations[spawnID]
 	if !ok {
+		r := s.ensure(repo)
+		r.InFlight++
+		r.TeardownBlocked++
+		s.reservations[spawnID] = &SpawnState{
+			SpawnID: spawnID, Repo: repo, Phase: PhaseTeardownBlocked,
+			ReservedAt: at, TeardownBlockedAt: at, TeardownFailure: detail,
+		}
+		s.teardownBlocked = true
+		s.teardownFailures++
+		return true
+	}
+	if spawn.Phase == PhaseTeardownBlocked {
+		spawn.TeardownFailure = detail
+		return false
+	}
+	r := s.ensure(spawn.Repo)
+	s.decrementPhaseLocked(r, spawn.Phase)
+	r.TeardownBlocked++
+	spawn.Phase = PhaseTeardownBlocked
+	spawn.TeardownBlockedAt = at
+	spawn.TeardownFailure = detail
+	s.teardownBlocked = true
+	s.teardownFailures++
+	return true
+}
+
+// UpdateTeardownFailure records the latest exact-retry error without counting
+// the same blocked reservation as a new failure.
+func (s *State) UpdateTeardownFailure(spawnID, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if spawn, ok := s.reservations[spawnID]; ok && spawn.Phase == PhaseTeardownBlocked {
+		spawn.TeardownFailure = detail
+	}
+}
+
+// ResolveTeardown releases a blocked reservation only after its exact backend
+// teardown retry has succeeded.
+func (s *State) ResolveTeardown(spawnID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spawn, ok := s.reservations[spawnID]
+	if !ok || spawn.Phase != PhaseTeardownBlocked {
+		return false
+	}
+	s.releaseReservationLocked(spawnID)
+	s.teardownReconciled++
+	s.teardownBlocked = false
+	for _, reservation := range s.reservations {
+		if reservation.Phase == PhaseTeardownBlocked {
+			s.teardownBlocked = true
+			break
+		}
+	}
+	return true
+}
+
+// SchedulingBlocked reports whether admission is globally stopped for drain
+// or because at least one teardown debt has not been reconciled.
+func (s *State) SchedulingBlocked() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.draining || s.teardownBlocked
+}
+
+// ReleaseReservation removes ordinary capacity and its phase component exactly
+// once. Teardown-blocked reservations deliberately require ResolveTeardown.
+func (s *State) ReleaseReservation(spawnID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spawn, ok := s.reservations[spawnID]
+	if !ok || spawn.Phase == PhaseTeardownBlocked {
 		return
 	}
+	s.releaseReservationLocked(spawnID)
+}
+
+func (s *State) releaseReservationLocked(spawnID string) {
+	spawn := s.reservations[spawnID]
 	r := s.ensure(spawn.Repo)
 	if r.InFlight > 0 {
 		r.InFlight--
 	}
-	switch spawn.Phase {
+	s.decrementPhaseLocked(r, spawn.Phase)
+	delete(s.reservations, spawnID)
+}
+
+func (s *State) decrementPhaseLocked(r *RepoState, phase SpawnPhase) {
+	switch phase {
 	case PhasePending:
 		if r.Pending > 0 {
 			r.Pending--
@@ -215,8 +311,11 @@ func (s *State) ReleaseReservation(spawnID string) {
 		if r.Assigned > 0 {
 			r.Assigned--
 		}
+	case PhaseTeardownBlocked:
+		if r.TeardownBlocked > 0 {
+			r.TeardownBlocked--
+		}
 	}
-	delete(s.reservations, spawnID)
 }
 
 func (s *State) RecordCompleted() {
@@ -278,6 +377,9 @@ func (s *State) SetDraining(draining bool) {
 func (s *State) AcquireSemaphores(repo string, repoCap, globalCap int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.draining || s.teardownBlocked {
+		return false
+	}
 	r := s.ensure(repo)
 	if r.InFlight >= repoCap || s.globalInFlightLocked() >= globalCap {
 		return false
@@ -326,43 +428,49 @@ func (s *State) RateLimit() (remaining, limit int, reset time.Time) {
 
 // Snapshot is the complete operator-visible runtime state.
 type Snapshot struct {
-	PerRepo              map[string]RepoState  `json:"per_repo"`
-	Reservations         map[string]SpawnState `json:"reservations"`
-	GlobalInFlight       int                   `json:"global_in_flight"`
-	RateLimitRemaining   int                   `json:"rate_limit_remaining"`
-	RateLimitLimit       int                   `json:"rate_limit_limit"`
-	RateLimitReset       time.Time             `json:"rate_limit_reset"`
-	ConfiguredCapacity   int                   `json:"configured_capacity"`
-	WorkerCapacity       int                   `json:"worker_capacity"`
-	Version              string                `json:"version"`
-	BuildSHA             string                `json:"build_sha"`
-	ConfigLoaded         bool                  `json:"config_loaded"`
-	Draining             bool                  `json:"draining"`
-	AssignmentsTotal     int64                 `json:"assignments_total"`
-	CompletedTotal       int64                 `json:"completed_total"`
-	UnassignedExitsTotal int64                 `json:"unassigned_exits_total"`
-	DeregistrationsTotal int64                 `json:"deregistrations_total"`
+	PerRepo                 map[string]RepoState  `json:"per_repo"`
+	Reservations            map[string]SpawnState `json:"reservations"`
+	GlobalInFlight          int                   `json:"global_in_flight"`
+	RateLimitRemaining      int                   `json:"rate_limit_remaining"`
+	RateLimitLimit          int                   `json:"rate_limit_limit"`
+	RateLimitReset          time.Time             `json:"rate_limit_reset"`
+	ConfiguredCapacity      int                   `json:"configured_capacity"`
+	WorkerCapacity          int                   `json:"worker_capacity"`
+	Version                 string                `json:"version"`
+	BuildSHA                string                `json:"build_sha"`
+	ConfigLoaded            bool                  `json:"config_loaded"`
+	Draining                bool                  `json:"draining"`
+	TeardownBlocked         bool                  `json:"teardown_blocked"`
+	AssignmentsTotal        int64                 `json:"assignments_total"`
+	CompletedTotal          int64                 `json:"completed_total"`
+	UnassignedExitsTotal    int64                 `json:"unassigned_exits_total"`
+	DeregistrationsTotal    int64                 `json:"deregistrations_total"`
+	TeardownFailuresTotal   int64                 `json:"teardown_failures_total"`
+	TeardownReconciledTotal int64                 `json:"teardown_reconciled_total"`
 }
 
 func (s *State) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snap := Snapshot{
-		PerRepo:              make(map[string]RepoState, len(s.perRepo)),
-		Reservations:         make(map[string]SpawnState, len(s.reservations)),
-		RateLimitRemaining:   s.rlRemaining,
-		RateLimitLimit:       s.rlLimit,
-		RateLimitReset:       s.rlReset,
-		ConfiguredCapacity:   s.configuredCapacity,
-		WorkerCapacity:       s.workerCapacity,
-		Version:              s.version,
-		BuildSHA:             s.buildSHA,
-		ConfigLoaded:         s.configLoaded,
-		Draining:             s.draining,
-		AssignmentsTotal:     s.assignmentsTotal,
-		CompletedTotal:       s.completedTotal,
-		UnassignedExitsTotal: s.unassignedTotal,
-		DeregistrationsTotal: s.deregisteredTotal,
+		PerRepo:                 make(map[string]RepoState, len(s.perRepo)),
+		Reservations:            make(map[string]SpawnState, len(s.reservations)),
+		RateLimitRemaining:      s.rlRemaining,
+		RateLimitLimit:          s.rlLimit,
+		RateLimitReset:          s.rlReset,
+		ConfiguredCapacity:      s.configuredCapacity,
+		WorkerCapacity:          s.workerCapacity,
+		Version:                 s.version,
+		BuildSHA:                s.buildSHA,
+		ConfigLoaded:            s.configLoaded,
+		Draining:                s.draining,
+		TeardownBlocked:         s.teardownBlocked,
+		AssignmentsTotal:        s.assignmentsTotal,
+		CompletedTotal:          s.completedTotal,
+		UnassignedExitsTotal:    s.unassignedTotal,
+		DeregistrationsTotal:    s.deregisteredTotal,
+		TeardownFailuresTotal:   s.teardownFailures,
+		TeardownReconciledTotal: s.teardownReconciled,
 	}
 	for repo, r := range s.perRepo {
 		snap.PerRepo[repo] = *r

@@ -82,6 +82,7 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 	renderPhaseGauge(w, "pending_runners", "Reserved runners not yet observed online.", snap, func(r state.RepoState) int { return r.Pending })
 	renderPhaseGauge(w, "online_runners", "Online runners waiting for assignment.", snap, func(r state.RepoState) int { return r.Online })
 	renderPhaseGauge(w, "assigned_runners", "Runners observed assigned to a job.", snap, func(r state.RepoState) int { return r.Assigned })
+	renderPhaseGauge(w, "teardown_blocked_reservations", "Reservations retained after backend teardown failure.", snap, func(r state.RepoState) int { return r.TeardownBlocked })
 	// spawns_total
 	fmt.Fprintln(w, "# HELP runsecure_orchestrator_spawns_total Total spawn attempts.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_spawns_total counter")
@@ -132,6 +133,12 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 	fmt.Fprintln(w, "# HELP runsecure_orchestrator_deregistrations_total JIT runner registrations confirmed removed.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_deregistrations_total counter")
 	fmt.Fprintf(w, "runsecure_orchestrator_deregistrations_total %d\n", snap.DeregistrationsTotal)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_teardown_failures_total Backend teardown failures that blocked scheduling.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_teardown_failures_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_teardown_failures_total %d\n", snap.TeardownFailuresTotal)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_teardown_reconciled_total Blocked teardowns resolved by exact-handle retry.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_teardown_reconciled_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_teardown_reconciled_total %d\n", snap.TeardownReconciledTotal)
 	draining := 0
 	if snap.Draining {
 		draining = 1

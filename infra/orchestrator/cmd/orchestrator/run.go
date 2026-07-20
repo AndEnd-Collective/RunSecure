@@ -500,6 +500,7 @@ type etagger interface {
 
 func (p *productionDeps) InFlight(repo string) int       { return p.st.InFlight(repo) }
 func (p *productionDeps) GlobalInFlight() int            { return p.st.GlobalInFlight() }
+func (p *productionDeps) SchedulingBlocked() bool        { return p.st.SchedulingBlocked() }
 func (p *productionDeps) BreakerIsOpen(repo string) bool { return p.brks.IsOpen(repo) }
 func (p *productionDeps) BreakerMaybeHalfOpen(repo string) bool {
 	return p.brks.MaybeHalfOpen(repo)

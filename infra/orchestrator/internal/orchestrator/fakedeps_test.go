@@ -407,6 +407,8 @@ type fakeBackend struct {
 	waitTimedOut bool
 
 	// Teardown controls.
+	teardownErr   error
+	teardownErrs  []error
 	teardownCalls []struct {
 		handle backend.Handle
 		force  bool
@@ -468,7 +470,12 @@ func (f *fakeBackend) Teardown(ctx context.Context, h backend.Handle, force bool
 		force  bool
 		ctxErr error
 	}{h, force, ctx.Err()})
-	return nil
+	if len(f.teardownErrs) > 0 {
+		err := f.teardownErrs[0]
+		f.teardownErrs = f.teardownErrs[1:]
+		return err
+	}
+	return f.teardownErr
 }
 
 func (f *fakeBackend) Reconcile(_ context.Context, _ string) ([]backend.Handle, error) {
@@ -639,7 +646,7 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 		bucket:      &fakeBucket{},
 		lifecycle: LifecycleTiming{
 			OnlineTimeout: 100 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
-			PollInterval: time.Millisecond,
+			PollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
 		},
 		version:  "v-test",
 		buildSHA: "sha-test",

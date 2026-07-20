@@ -50,6 +50,7 @@ func TestReadinessReasons_FailClosed(t *testing.T) {
 			"stale/repo":   {LastPollSuccess: now.Add(-30 * time.Second)},
 			"auth/repo": {
 				LastPollSuccess: now, LastPollError: "github_auth_failed", BreakerOpen: true,
+				TeardownBlocked: 1,
 			},
 		},
 	}
@@ -58,5 +59,6 @@ func TestReadinessReasons_FailClosed(t *testing.T) {
 		"config_not_loaded", "draining", "poll_never_succeeded:never/polled",
 		"poll_stale:stale/repo", "poll_error:auth/repo:github_auth_failed",
 		"breaker_open:auth/repo",
+		"teardown_blocked:auth/repo",
 	}, reasons)
 }

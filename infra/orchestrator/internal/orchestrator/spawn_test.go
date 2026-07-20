@@ -16,6 +16,7 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,12 +288,95 @@ func TestTeardownSpawn_CancelledRunUsesFreshContextAndForce(t *testing.T) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	teardownSpawn(runCtx, be, backend.Handle{SpawnID: "s1"}, false)
+	require.NoError(t, teardownSpawn(runCtx, be, backend.Handle{SpawnID: "s1"}, false))
 
 	require.Len(t, be.teardownCalls, 1)
 	require.True(t, be.teardownCalls[0].force)
 	require.NoError(t, be.teardownCalls[0].ctxErr,
 		"cleanup must not inherit the cancelled runner context")
+}
+
+func TestSpawn_TeardownFailureCannotReportSuccess(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.teardownErrs = []error{errors.New("proxy delete returned conflict"), nil}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "proxy delete returned conflict")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnCompleted)
+	require.Equal(t, int64(1), d.st.Snapshot().DeregistrationsTotal)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownFailuresTotal)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+}
+
+func TestSpawn_LifecycleAndTeardownFailuresAreJoined(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+	d.be.teardownErrs = []error{errors.New("proxy cleanup failed"), nil}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "lifecycle-cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "before GitHub reported a job assignment")
+	require.ErrorContains(t, err, "backend teardown failed: proxy cleanup failed")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+	require.Contains(t, d.emBuf.String(), `"prior_failure_reason":"runner_exited_unassigned"`)
+}
+
+func TestSpawn_TimeoutAndTeardownFailuresAreJoined(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.waitExitCode = -1
+	d.be.waitTimedOut = true
+	d.be.teardownErrs = []error{errors.New("network cleanup failed"), nil}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "timeout-cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "spawn timed out")
+	require.ErrorContains(t, err, "network cleanup failed")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+}
+
+func TestSpawn_PersistentTeardownFailureRetainsCapacityAndBlocksAdmission(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.teardownErr = errors.New("persistent proxy cleanup failure")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "cleanup-blocked",
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked && d.be.teardownCount() >= 2
+	}, time.Second, time.Millisecond)
+	snap := d.st.Snapshot()
+	require.Equal(t, 1, snap.GlobalInFlight)
+	require.Equal(t, 1, snap.PerRepo["o/r"].TeardownBlocked)
+	require.Equal(t, state.PhaseTeardownBlocked, snap.Reservations["cleanup-blocked"].Phase)
+	require.Equal(t, int64(1), snap.TeardownFailuresTotal)
+	require.False(t, d.st.TryReserve("replacement", "o/r", 5, 10, d.clk.Now()))
+	require.Contains(t, d.emBuf.String(), `"capacity_retained":true`)
+	require.Contains(t, d.emBuf.String(), `"scheduling_blocked":true`)
+
+	cancel()
+	err := <-done
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, d.st.GlobalInFlight(),
+		"cancellation must not release unresolved teardown debt")
 }
 
 func TestTeardownGracePeriod(t *testing.T) {
@@ -307,6 +391,17 @@ func TestSpawn_RateLimitBackoff(t *testing.T) {
 
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.ErrorIs(t, err, ErrRateLimitBackoff)
+}
+
+func TestPauseForRateLimitEmitsOnlyOnPauseTransition(t *testing.T) {
+	d := newSpawnDeps(t)
+	w := NewSpawnWorker(d)
+
+	w.pauseForRateLimit("s", github.ErrRateLimited)
+	w.pauseForRateLimit("s", github.ErrRateLimited)
+
+	require.True(t, d.ratePaused.Load())
+	require.Equal(t, 1, strings.Count(d.emBuf.String(), cornerstone.EventRatelimitPaused))
 }
 
 func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
@@ -659,6 +754,7 @@ func TestLifecycleTimingDefaultsAndTimerDrain(t *testing.T) {
 	require.Equal(t, 60*time.Second, defaults.OnlineTimeout)
 	require.Equal(t, 120*time.Second, defaults.AssignmentTimeout)
 	require.Equal(t, 2*time.Second, defaults.PollInterval)
+	require.Equal(t, time.Second, defaults.CleanupRetryInterval)
 	require.Equal(t, defaults, normalizedLifecycleTiming(LifecycleTiming{}))
 	expired := time.NewTimer(time.Millisecond)
 	time.Sleep(2 * time.Millisecond)

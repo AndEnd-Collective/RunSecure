@@ -46,6 +46,10 @@ type StateLike interface {
 	RecordJIT(spawnID string, runnerID int64, runnerName string)
 	MarkOnline(spawnID string, now time.Time) bool
 	MarkAssigned(spawnID string, now time.Time) bool
+	MarkTeardownBlocked(spawnID, repo, detail string, at time.Time) bool
+	UpdateTeardownFailure(spawnID, detail string)
+	ResolveTeardown(spawnID string) bool
+	SchedulingBlocked() bool
 	ReleaseReservation(spawnID string)
 	RecordCompleted()
 	RecordUnassignedExit()
@@ -99,6 +103,7 @@ type PollDeps interface {
 	RecordPollAttempt(repo string)
 	RecordPollSuccess(repo string, queued int) (breakerClosed bool)
 	RecordPollFailure(repo, class, detail string) (breakerOpened bool, consecutiveFailures int)
+	SchedulingBlocked() bool
 
 	// RecordPollTick records that a poll cycle just ticked. Production
 	// implementations update the /healthz freshness signal here. Fix for
@@ -143,9 +148,10 @@ type SpawnDeps interface {
 // LifecycleTiming controls GitHub runner registration/assignment observation.
 // Production uses conservative deadlines; tests inject millisecond values.
 type LifecycleTiming struct {
-	OnlineTimeout     time.Duration
-	AssignmentTimeout time.Duration
-	PollInterval      time.Duration
+	OnlineTimeout        time.Duration
+	AssignmentTimeout    time.Duration
+	PollInterval         time.Duration
+	CleanupRetryInterval time.Duration
 }
 
 // Errors surfaced through SpawnWorker.Execute for callers that want to
@@ -153,6 +159,7 @@ type LifecycleTiming struct {
 var (
 	ErrSemaphoreUnavailable = errors.New("orchestrator: failed to acquire semaphore (concurrency)")
 	ErrRateLimitBackoff     = errors.New("orchestrator: spawn rate-limit hit (B1)")
+	ErrSchedulingBlocked    = errors.New("orchestrator: scheduling blocked by drain or teardown debt")
 )
 
 // shutdown sentinel; callers use ctx cancellation rather than this.

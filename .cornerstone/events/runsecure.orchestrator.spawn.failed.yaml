@@ -5,10 +5,11 @@ metadata:
   name: runsecure.orchestrator.spawn.failed
   uuid: 6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a17
   description: |
-    Runner exited non-zero OR a pre-start step failed (socket-proxy 403, image
-    pull, JIT generation error, etc.). event.details.failure.reason is required
-    and is a short stable code (snake_case); the original error text goes in
-    event.details.error.data.detail. Severity Error.
+    Runner exited non-zero, a pre-start step failed, or backend teardown could
+    not be confirmed. event.details.failure.reason is required and is a short
+    stable code (snake_case); backend_teardown_failed also carries retained
+    capacity and scheduling-block state in event.details.error.data. The
+    original error text goes in event.details.error.data.detail. Severity Error.
   status: active
   tags: [runsecure, orchestrator, spawn]
 

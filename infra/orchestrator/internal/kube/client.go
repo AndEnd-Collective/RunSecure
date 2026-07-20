@@ -215,14 +215,41 @@ func (c *Client) relist(ctx context.Context, ns, podName string) (corev1.PodPhas
 	return pod.Status.Phase, false
 }
 
-// DeleteSpawn deletes the owning Secret for a spawn. The Kubernetes garbage
-// collector cascades the deletion to all objects that carry an OwnerReference
-// pointing at that Secret (Service, NetworkPolicies, Pods).
+// DeleteSpawn deletes the owning Secret for a spawn. Foreground propagation
+// keeps the owner until its dependents are gone, and the final Get loop turns a
+// successful return into cleanup confirmation rather than deletion acceptance.
+// A missing Secret is already-clean state and is therefore idempotent success.
 func (c *Client) DeleteSpawn(ctx context.Context, ns, secretName string) error {
-	if err := c.cs.CoreV1().Secrets(ns).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil {
+	foreground := metav1.DeletePropagationForeground
+	err := c.cs.CoreV1().Secrets(ns).Delete(ctx, secretName, metav1.DeleteOptions{
+		PropagationPolicy: &foreground,
+	})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("kube: delete secret %q in %q: %w", secretName, ns, err)
 	}
-	return nil
+	return c.waitForSpawnDeleted(ctx, ns, secretName)
+}
+
+func (c *Client) waitForSpawnDeleted(ctx context.Context, ns, secretName string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := c.cs.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+		switch {
+		case k8serrors.IsNotFound(err):
+			return nil
+		case err != nil:
+			return fmt.Errorf("kube: confirm secret %q deletion in %q: %w", secretName, ns, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("kube: confirm secret %q deletion in %q: %w", secretName, ns, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // ListSpawns returns one SpawnRef per active runner pod in the given scope.

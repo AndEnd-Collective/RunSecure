@@ -8,6 +8,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -97,8 +98,9 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 	}
 
 	refs := map[string]string{
-		"network":      netID,
-		"network_name": netName,
+		"network":           netID,
+		"network_name":      netName,
+		"egress_config_dir": in.EgressConfigDir,
 	}
 	for role, id := range containerIDs {
 		refs[role] = id
@@ -136,32 +138,51 @@ func (b *composeBackend) WaitForExit(ctx context.Context, h backend.Handle, time
 	}
 }
 
-// Teardown deletes every container in h.Refs (by role key, skipping
-// "network"), then deletes the internal network, then removes the per-spawn
-// egress config subdirectory from the shared volume. Errors from individual
-// deletions are tolerated so that cleanup is best-effort — matching the
-// semantics of orchestrator/spawn.go tearDown().
+// Teardown deletes the runner and its always-running proxy sidecar, then the
+// internal network and per-spawn egress config. The proxy must always be
+// force-removed: on a successful job only the runner exits by itself, so a
+// non-forced proxy delete returns Docker 409 and leaves both the proxy and its
+// network behind.
+//
+// Every phase is attempted and all errors are returned together. Callers must
+// not report a successful spawn when owned runtime resources remain.
 func (b *composeBackend) Teardown(ctx context.Context, h backend.Handle, force bool) error {
-	for role, id := range h.Refs {
-		if role == "network" {
+	var cleanupErrors []error
+	for _, ref := range []struct {
+		role  string
+		force bool
+	}{
+		{role: "runner", force: force},
+		{role: "proxy", force: true},
+	} {
+		id := h.Refs[ref.role]
+		if id == "" {
 			continue
 		}
-		_ = b.c.DeleteContainer(ctx, id, force)
+		if err := b.c.DeleteContainer(ctx, id, ref.force); err != nil {
+			cleanupErrors = append(cleanupErrors,
+				fmt.Errorf("compose: delete %s container %s: %w", ref.role, id, err))
+		}
 	}
-	if netID, ok := h.Refs["network"]; ok {
-		_ = b.c.DeleteNetwork(ctx, netID)
+	if netID := h.Refs["network"]; netID != "" {
+		if err := b.c.DeleteNetwork(ctx, netID); err != nil {
+			cleanupErrors = append(cleanupErrors,
+				fmt.Errorf("compose: delete network %s: %w", netID, err))
+		}
 	}
-	// Remove the per-spawn egress config subdir so it does not accumulate.
-	// EgressConfigDir is the full path on the volume (<base>/<spawnID>).
-	// We reconstruct it from the mount path and SpawnID since the Handle
-	// does not carry EgressConfigDir directly — the caller sets it via
-	// the SpawnInput. For backwards compat we derive the path the same way
-	// as orchestrator/spawn.go: egressMountPath + "/" + spawnID.
+	// Remove the exact per-spawn egress config dir captured at Spawn time. Old
+	// reconstructed handles lack the ref, so retain the historical fallback.
 	//
 	// Note: if the egress directory does not exist os.RemoveAll is a no-op.
-	egressDir := egressMountPath + "/" + h.SpawnID
-	_ = os.RemoveAll(egressDir)
-	return nil
+	egressDir := h.Refs["egress_config_dir"]
+	if egressDir == "" {
+		egressDir = egressMountPath + "/" + h.SpawnID
+	}
+	if err := os.RemoveAll(egressDir); err != nil {
+		cleanupErrors = append(cleanupErrors,
+			fmt.Errorf("compose: remove egress config %s: %w", egressDir, err))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 // Reconcile lists all containers for scope, groups them by runsecure.spawn_id

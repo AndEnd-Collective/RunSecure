@@ -39,6 +39,7 @@ func newPollDeps(t *testing.T) *pollDeps {
 func (d *pollDeps) IntentChannel() chan<- SpawnIntent { return d.intents }
 func (d *pollDeps) InFlight(repo string) int          { return d.st.InFlight(repo) }
 func (d *pollDeps) GlobalInFlight() int               { return d.st.GlobalInFlight() }
+func (d *pollDeps) SchedulingBlocked() bool           { return d.st.SchedulingBlocked() }
 func (d *pollDeps) BreakerIsOpen(repo string) bool    { return d.breakers.IsOpen(repo) }
 func (d *pollDeps) BreakerMaybeHalfOpen(repo string) bool {
 	return d.breakers.MaybeHalfOpen(repo)
@@ -156,6 +157,25 @@ func TestPoll_ReservationsPreventDuplicateCapacityAcrossTicks(t *testing.T) {
 	p.tick(context.Background())
 	require.Len(t, d.intents, 3, "second poll must not duplicate pending capacity")
 	require.Equal(t, 3, d.st.GlobalInFlight())
+}
+
+func TestPoll_TeardownDebtBlocksScopeWideAdmission(t *testing.T) {
+	d := newPollDeps(t)
+	now := d.clk.Now()
+	require.True(t, d.st.TryReserve("leaked", "o/other", 2, 2, now))
+	require.True(t, d.st.MarkTeardownBlocked(
+		"leaked", "o/other", "proxy delete failed", now,
+	))
+
+	NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 10, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d).tick(context.Background())
+
+	require.Empty(t, d.intents)
+	require.Equal(t, int64(1), d.pollTickCount.Load())
+	require.True(t, d.st.Snapshot().PerRepo["o/r"].LastPollAt.IsZero(),
+		"blocked scheduling must not make a GitHub demand request")
 }
 
 func TestPoll_QueuedJobsInInProgressWorkflowCreateCapacity(t *testing.T) {

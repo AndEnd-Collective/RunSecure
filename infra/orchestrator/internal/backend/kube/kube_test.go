@@ -33,7 +33,7 @@ func testInput(spawnID string) backend.SpawnInput {
 		RunnerImage:     "ghcr.io/runsecure/runner-base:latest",
 		ProxyImage:      "ghcr.io/runsecure/proxy:latest",
 		JITConfigB64:    "dGVzdC1qaXQtY29uZmlnLWI2NA==",
-		EgressConfigDir: "/tmp/egress",
+		EgressConfigDir: "",
 		EnableDNSMasq:   false,
 		TCPEgressPorts:  []int{443},
 	}
@@ -306,7 +306,7 @@ func TestTeardown_DeletesOwningSecret(t *testing.T) {
 	assert.True(t, isNotFound(err), "Secret must be deleted after Teardown; got err: %v", err)
 }
 
-func TestTeardown_MissingSecret_ReturnsError(t *testing.T) {
+func TestTeardown_MissingSecret_IsIdempotentSuccess(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
@@ -321,8 +321,24 @@ func TestTeardown_MissingSecret_ReturnsError(t *testing.T) {
 			"proxy_pod":  "rs-proxy-ghost",
 		},
 	}
-	err := b.Teardown(ctx, h, true)
-	require.Error(t, err, "Teardown on non-existent secret must return an error")
+	require.NoError(t, b.Teardown(ctx, h, true),
+		"Teardown on an already-absent owning Secret must succeed")
+}
+
+func TestTeardown_RemovesExactEgressConfigDir(t *testing.T) {
+	b, _ := newBackend(t)
+	egressDir := filepath.Join(t.TempDir(), "custom-egress", "spawn")
+	require.NoError(t, os.MkdirAll(egressDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "squid.conf"), []byte("fixture"), 0o600))
+	in := testInput("spawn-egress-cleanup")
+	in.EgressConfigDir = egressDir
+	h, err := b.Spawn(context.Background(), in)
+	require.NoError(t, err)
+	require.Equal(t, egressDir, h.Refs["egress_config_dir"])
+
+	require.NoError(t, b.Teardown(context.Background(), h, true))
+	_, statErr := os.Stat(egressDir)
+	require.True(t, os.IsNotExist(statErr))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

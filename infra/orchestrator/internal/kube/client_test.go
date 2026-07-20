@@ -272,6 +272,13 @@ func TestDeleteSpawn(t *testing.T) {
 	require.True(t, k8serrors.IsNotFound(err), "Secret must be deleted; got error: %v", err)
 }
 
+func TestDeleteSpawn_MissingSecretIsIdempotentSuccess(t *testing.T) {
+	c := NewClient(fake.NewSimpleClientset())
+	require.NoError(t, c.DeleteSpawn(
+		context.Background(), "runsecure-missing", "rs-secret-missing",
+	))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // ListSpawns
 // ──────────────────────────────────────────────────────────────────────────────

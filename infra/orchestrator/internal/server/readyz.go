@@ -70,6 +70,9 @@ func readinessReasons(snap state.Snapshot, now time.Time, pollIntervalSeconds in
 		if repoState.BreakerOpen {
 			reasons = append(reasons, "breaker_open:"+repo)
 		}
+		if repoState.TeardownBlocked > 0 {
+			reasons = append(reasons, "teardown_blocked:"+repo)
+		}
 	}
 	return reasons
 }

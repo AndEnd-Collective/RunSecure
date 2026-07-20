@@ -15,15 +15,17 @@ const (
 	defaultRunnerOnlineTimeout     = 60 * time.Second
 	defaultRunnerAssignmentTimeout = 120 * time.Second
 	defaultRunnerPollInterval      = 2 * time.Second
+	defaultCleanupRetryInterval    = time.Second
 )
 
 // DefaultLifecycleTiming is the production registration and assignment
 // observation policy. Tests inject shorter values through SpawnDeps.
 func DefaultLifecycleTiming() LifecycleTiming {
 	return LifecycleTiming{
-		OnlineTimeout:     defaultRunnerOnlineTimeout,
-		AssignmentTimeout: defaultRunnerAssignmentTimeout,
-		PollInterval:      defaultRunnerPollInterval,
+		OnlineTimeout:        defaultRunnerOnlineTimeout,
+		AssignmentTimeout:    defaultRunnerAssignmentTimeout,
+		PollInterval:         defaultRunnerPollInterval,
+		CleanupRetryInterval: defaultCleanupRetryInterval,
 	}
 }
 
@@ -191,6 +193,9 @@ func normalizedLifecycleTiming(timing LifecycleTiming) LifecycleTiming {
 	}
 	if timing.PollInterval <= 0 {
 		timing.PollInterval = defaults.PollInterval
+	}
+	if timing.CleanupRetryInterval <= 0 {
+		timing.CleanupRetryInterval = defaults.CleanupRetryInterval
 	}
 	return timing
 }

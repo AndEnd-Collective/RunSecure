@@ -76,6 +76,9 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		return ErrSemaphoreUnavailable
 	}
 	defer w.deps.State().ReleaseReservation(intent.SpawnID)
+	if w.deps.State().SchedulingBlocked() {
+		return ErrSchedulingBlocked
+	}
 
 	// Pre-step: B1 rate limit. Defensive — the poll loop already shaped the
 	// stream, but a misconfigured pool could still try to spawn faster than
@@ -207,18 +210,31 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// Step 7: teardown. Lifecycle failures are force conditions, and cleanup
 	// always receives a fresh bounded context so cancellation cannot leak the
 	// runner/proxy resources.
-	teardownSpawn(ctx, w.deps.Backend(), h, timedOut || lifecycle.err != nil)
+	teardownErr := teardownSpawn(ctx, w.deps.Backend(), h, timedOut || lifecycle.err != nil)
 
 	if lifecycle.err != nil {
+		if teardownErr != nil {
+			lifecycle.err = errors.Join(lifecycle.err,
+				fmt.Errorf("backend teardown failed: %w", teardownErr))
+			w.blockTeardown(intent, containerName, lifecycle.err, lifecycle.failureReason)
+		}
 		w.pauseForRateLimit(intent.Scope, lifecycle.err)
 		if lifecycle.unassigned {
 			w.deps.State().RecordUnassignedExit()
 		}
 		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
+		if teardownErr != nil {
+			return w.reconcileTeardown(ctx, intent, h, lifecycle.err)
+		}
 		return w.fail(intent, containerName, lifecycle.failureReason, lifecycle.err)
 	}
 
 	if timedOut {
+		timeoutErr := errors.New("spawn timed out")
+		if teardownErr != nil {
+			timeoutErr = errors.Join(timeoutErr, teardownErr)
+			w.blockTeardown(intent, containerName, timeoutErr, "wall_clock_timeout")
+		}
 		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
 		_ = w.deps.Emit().EmitSpawnTimeoutForcedTeardown(cornerstone.SpawnTimeoutForcedTeardownFields{
@@ -227,7 +243,15 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 			ConfiguredTimeoutSecs: timeoutSecs,
 			ElapsedSeconds:        elapsed,
 		})
-		return errors.New("spawn timed out")
+		if teardownErr != nil {
+			return w.reconcileTeardown(ctx, intent, h, timeoutErr)
+		}
+		return timeoutErr
+	}
+	if teardownErr != nil {
+		w.blockTeardown(intent, containerName, teardownErr, "")
+		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
+		return w.reconcileTeardown(ctx, intent, h, teardownErr)
 	}
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	runnerContainerID := h.Refs["runner"]
@@ -263,13 +287,68 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 // which previously left runner/proxy resources behind during forced shutdown.
 // Context cancellation is itself a force condition because WaitForExit returns
 // without observing a normal runner exit.
-func teardownSpawn(runCtx context.Context, be backend.Backend, h backend.Handle, timedOut bool) {
+func teardownSpawn(runCtx context.Context, be backend.Backend, h backend.Handle, timedOut bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), teardownGracePeriod())
 	defer cancel()
-	_ = be.Teardown(cleanupCtx, h, timedOut || runCtx.Err() != nil)
+	return be.Teardown(cleanupCtx, h, timedOut || runCtx.Err() != nil)
 }
 
 func teardownGracePeriod() time.Duration { return 15 * time.Second }
+
+func (w *SpawnWorker) blockTeardown(
+	intent SpawnIntent,
+	containerName string,
+	err error,
+	priorFailureReason string,
+) {
+	if !w.deps.State().MarkTeardownBlocked(
+		intent.SpawnID, intent.Repo, err.Error(), w.deps.Clock().Now(),
+	) {
+		return
+	}
+	extra := map[string]any{
+		"backend":            w.deps.Backend().Name(),
+		"capacity_retained":  true,
+		"scheduling_blocked": true,
+		"recovery":           "exact_teardown_retry",
+	}
+	if priorFailureReason != "" {
+		extra["prior_failure_reason"] = priorFailureReason
+	}
+	_ = w.deps.Emit().EmitSpawnFailed(cornerstone.SpawnFailedFields{
+		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+		ContainerName:  containerName,
+		FailureReason:  "backend_teardown_failed",
+		Detail:         err.Error(),
+		ExtraErrorData: extra,
+	})
+}
+
+// reconcileTeardown retries the exact backend handle with force enabled. A
+// generic inventory reconciliation is insufficient proof because it may omit
+// network-only, sidecar-only, or owning-resource leaks.
+func (w *SpawnWorker) reconcileTeardown(
+	ctx context.Context,
+	intent SpawnIntent,
+	h backend.Handle,
+	originalErr error,
+) error {
+	retryInterval := normalizedLifecycleTiming(w.deps.LifecycleTiming()).CleanupRetryInterval
+	for {
+		retryErr := teardownSpawn(ctx, w.deps.Backend(), h, true)
+		if retryErr == nil {
+			w.deps.State().ResolveTeardown(intent.SpawnID)
+			return originalErr
+		}
+		w.deps.State().UpdateTeardownFailure(intent.SpawnID, retryErr.Error())
+		select {
+		case <-ctx.Done():
+			return errors.Join(originalErr,
+				fmt.Errorf("teardown reconciliation interrupted: %w", ctx.Err()))
+		case <-w.deps.Clock().After(retryInterval):
+		}
+	}
+}
 
 func (w *SpawnWorker) deregister(ctx context.Context, repo string, runnerID int64) error {
 	if runnerID <= 0 {

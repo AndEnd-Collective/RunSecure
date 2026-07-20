@@ -194,6 +194,59 @@ func TestReservationCapsAndDirectAssignment(t *testing.T) {
 	require.Zero(t, s.Snapshot().PerRepo["o/c"].Online)
 }
 
+func TestTeardownBlockedRetainsCapacityUntilExactResolution(t *testing.T) {
+	for _, phase := range []SpawnPhase{PhasePending, PhaseOnline, PhaseAssigned} {
+		t.Run(string(phase), func(t *testing.T) {
+			s := New()
+			now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+			require.True(t, s.TryReserve("spawn-1", "o/r", 2, 2, now))
+			if phase == PhaseOnline || phase == PhaseAssigned {
+				require.True(t, s.MarkOnline("spawn-1", now.Add(time.Second)))
+			}
+			if phase == PhaseAssigned {
+				require.True(t, s.MarkAssigned("spawn-1", now.Add(2*time.Second)))
+			}
+
+			require.True(t, s.MarkTeardownBlocked(
+				"spawn-1", "o/r", "network delete failed", now.Add(3*time.Second),
+			))
+			require.False(t, s.MarkTeardownBlocked(
+				"spawn-1", "o/r", "retry still failed", now.Add(4*time.Second),
+			))
+			s.ReleaseReservation("spawn-1")
+			snap := s.Snapshot()
+			require.True(t, snap.TeardownBlocked)
+			require.True(t, s.SchedulingBlocked())
+			require.Equal(t, 1, snap.GlobalInFlight)
+			require.Equal(t, 1, snap.PerRepo["o/r"].TeardownBlocked)
+			require.Zero(t, snap.PerRepo["o/r"].Pending)
+			require.Zero(t, snap.PerRepo["o/r"].Online)
+			require.Zero(t, snap.PerRepo["o/r"].Assigned)
+			require.Equal(t, "retry still failed", snap.Reservations["spawn-1"].TeardownFailure)
+			require.Equal(t, int64(1), snap.TeardownFailuresTotal)
+			require.False(t, s.TryReserve("replacement", "o/r", 2, 2, now))
+
+			require.True(t, s.ResolveTeardown("spawn-1"))
+			require.False(t, s.ResolveTeardown("spawn-1"))
+			snap = s.Snapshot()
+			require.False(t, snap.TeardownBlocked)
+			require.False(t, s.SchedulingBlocked())
+			require.Zero(t, snap.GlobalInFlight)
+			require.Zero(t, snap.PerRepo["o/r"].TeardownBlocked)
+			require.Equal(t, int64(1), snap.TeardownReconciledTotal)
+			require.True(t, s.TryReserve("replacement", "o/r", 2, 2, now))
+		})
+	}
+}
+
+func TestDrainingBlocksAtomicReservation(t *testing.T) {
+	s := New()
+	s.SetDraining(true)
+	require.True(t, s.SchedulingBlocked())
+	require.False(t, s.TryReserve("spawn-1", "o/r", 1, 1, time.Now()))
+	require.False(t, s.AcquireSemaphores("o/r", 1, 1))
+}
+
 func TestPollAndDrainState(t *testing.T) {
 	s := New()
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)

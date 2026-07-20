@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,4 +126,28 @@ func TestLifecycleTransientObservationStillPollsBeforeAssignment(t *testing.T) {
 	getCalls := fake.runnerGetCalled
 	fake.mu.Unlock()
 	require.Greater(t, getCalls, 1, "unassigned runners must continue lifecycle polling")
+}
+
+func TestLifecyclePollObservationFailureStopsDelivery(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.runnerErrCode = http.StatusForbidden
+	fake.runnerErrAfter = 2
+	fake.mu.Unlock()
+	d.be.waitDelay = 20 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 50 * time.Millisecond, AssignmentTimeout: 50 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "poll-observation-failure",
+	})
+
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_failed"`)
 }
