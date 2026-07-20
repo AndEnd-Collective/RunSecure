@@ -593,6 +593,27 @@ func TestProductionDeps_BreakerMaybeHalfOpen_Delegates(t *testing.T) {
 	require.False(t, pd.BreakerMaybeHalfOpen("owner/repo"))
 }
 
+func TestProductionDeps_DemandRefreshesDriveBreakerButRateLimitsDoNot(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	pd := &productionDeps{st: state.New(), brks: newBreakerMap(), clk: clock.NewFake(now)}
+
+	opened, count := pd.RecordPollFailure("owner/repo", "github_rate_limited", "quota")
+	require.False(t, opened)
+	require.Zero(t, count)
+	require.False(t, pd.BreakerIsOpen("owner/repo"))
+
+	for i := 1; i <= 5; i++ {
+		opened, count = pd.RecordPollFailure("owner/repo", "github_demand_failed", "boom")
+		require.Equal(t, i, count)
+	}
+	require.True(t, opened)
+	require.True(t, pd.BreakerIsOpen("owner/repo"))
+
+	require.True(t, pd.RecordPollSuccess("owner/repo", 3))
+	require.False(t, pd.BreakerIsOpen("owner/repo"))
+	require.Equal(t, 3, pd.st.Snapshot().PerRepo["owner/repo"].QueuedJobs)
+}
+
 func TestProductionDeps_NewSpawnID_Unique(t *testing.T) {
 	pd := &productionDeps{}
 	ids := make(map[string]struct{})
@@ -780,13 +801,6 @@ func TestProductionDeps_RateLimiter_TryTake(t *testing.T) {
 	require.True(t, rl.TryTake(), "token bucket with tokens available must return true")
 }
 
-func TestProductionDeps_Breakers_ReturnsBreakers(t *testing.T) {
-	bm := newBreakerMap()
-	pd := &productionDeps{brks: bm}
-	got := pd.Breakers()
-	require.NotNil(t, got)
-}
-
 func TestProductionDeps_Egress_ReturnsNonNil(t *testing.T) {
 	pd := &productionDeps{eg: nil, allowKeys: nil}
 	e := pd.Egress()
@@ -858,7 +872,7 @@ func TestProductionDeps_RecordRateLimit_ZeroValues(t *testing.T) {
 	rem, lim, reset := st.RateLimit()
 	require.Equal(t, 0, rem)
 	require.Equal(t, 0, lim)
-	require.Equal(t, time.Unix(0, 0), reset)
+	require.True(t, reset.IsZero())
 }
 
 func TestProductionDeps_MarkRateLimited_SetsFlag(t *testing.T) {
@@ -866,7 +880,8 @@ func TestProductionDeps_MarkRateLimited_SetsFlag(t *testing.T) {
 	pd := &productionDeps{st: st}
 
 	require.False(t, pd.IsRateLimited("owner/repo"))
-	pd.MarkRateLimited("owner/repo")
+	require.True(t, pd.MarkRateLimited("owner/repo"))
+	require.False(t, pd.MarkRateLimited("owner/repo"), "an existing pause must not re-emit transition events")
 	require.True(t, pd.IsRateLimited("owner/repo"))
 }
 

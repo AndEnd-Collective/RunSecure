@@ -36,6 +36,7 @@ type fakeGitHubBackend struct {
 	jitOnRunnerID     int64
 	jitLabels         []string
 	jitMismatch       bool
+	jitErrCode        int
 	deletedRunners    map[int64]bool
 	createCalled      int
 	deleteCalled      int
@@ -150,6 +151,13 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 		// /repos/o/r/actions/runners/generate-jitconfig
 		if strings.HasSuffix(r.URL.Path, "/generate-jitconfig") && r.Method == http.MethodPost {
 			g.createCalled++
+			if g.jitErrCode != 0 {
+				if g.rlAfterResponse {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(g.jitErrCode)
+				return
+			}
 			labels := []map[string]any{}
 			labelSet := g.jitLabels
 			if labelSet == nil {
@@ -303,14 +311,19 @@ func (f *fakeDockerClient) ListNetworksForScope(ctx context.Context, scope strin
 // ------------- in-memory emitter + fake breakers/buckets ------------------
 
 type fakeBreakers struct {
-	mu     sync.Mutex
-	open   map[string]bool
-	failed map[string]int
-	closed map[string]int
+	mu            sync.Mutex
+	open          map[string]bool
+	halfOpen      map[string]bool
+	allowHalfOpen map[string]bool
+	failed        map[string]int
+	closed        map[string]int
 }
 
 func newFakeBreakers() *fakeBreakers {
-	return &fakeBreakers{open: map[string]bool{}, failed: map[string]int{}, closed: map[string]int{}}
+	return &fakeBreakers{
+		open: map[string]bool{}, halfOpen: map[string]bool{}, allowHalfOpen: map[string]bool{},
+		failed: map[string]int{}, closed: map[string]int{},
+	}
 }
 
 func (b *fakeBreakers) IsOpen(repo string) bool {
@@ -318,13 +331,24 @@ func (b *fakeBreakers) IsOpen(repo string) bool {
 	defer b.mu.Unlock()
 	return b.open[repo]
 }
-func (b *fakeBreakers) MaybeHalfOpen(repo string) bool { return false }
+func (b *fakeBreakers) MaybeHalfOpen(repo string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.open[repo] && b.allowHalfOpen[repo] {
+		b.open[repo] = false
+		b.halfOpen[repo] = true
+		return true
+	}
+	return false
+}
 func (b *fakeBreakers) RecordSuccess(repo string) (closed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	wasOpen := b.open[repo]
+	wasOpen := b.open[repo] || b.halfOpen[repo]
 	b.closed[repo]++
 	b.open[repo] = false
+	b.halfOpen[repo] = false
+	b.failed[repo] = 0
 	return wasOpen
 }
 func (b *fakeBreakers) RecordFailure(repo string) (opened bool, count int) {
@@ -332,8 +356,9 @@ func (b *fakeBreakers) RecordFailure(repo string) (opened bool, count int) {
 	defer b.mu.Unlock()
 	wasOpen := b.open[repo]
 	b.failed[repo]++
-	if !wasOpen && b.failed[repo] >= 5 {
+	if b.halfOpen[repo] || (!wasOpen && b.failed[repo] >= 5) {
 		b.open[repo] = true
+		b.halfOpen[repo] = false
 		return true, b.failed[repo]
 	}
 	return false, b.failed[repo]
@@ -495,6 +520,9 @@ type spawnDeps struct {
 	lifecycle      LifecycleTiming
 	version        string
 	buildSHA       string
+	rlMu           sync.Mutex
+	rateLimit      github.RateLimit
+	ratePaused     atomic.Bool
 }
 
 func (d *spawnDeps) GitHub() *github.Client     { return d.gh }
@@ -522,10 +550,24 @@ func (d *spawnDeps) RunnerImageDigestFor(_ string) string {
 }
 func (d *spawnDeps) SeccompProfileHostPath(_ string) string { return "/seccomp/p.json" }
 func (d *spawnDeps) RateLimiter() TokenBucket               { return d.bucket }
-func (d *spawnDeps) Breakers() BreakerMap                   { return d.breakers }
-func (d *spawnDeps) LifecycleTiming() LifecycleTiming       { return d.lifecycle }
-func (d *spawnDeps) Version() string                        { return d.version }
-func (d *spawnDeps) BuildSHA() string                       { return d.buildSHA }
+func (d *spawnDeps) RateLimitContextFor(_ string) (int, int, string) {
+	d.rlMu.Lock()
+	defer d.rlMu.Unlock()
+	reset := ""
+	if d.rateLimit.ResetUnix != 0 {
+		reset = time.Unix(d.rateLimit.ResetUnix, 0).Format(time.RFC3339)
+	}
+	return d.rateLimit.Remaining, d.rateLimit.Limit, reset
+}
+func (d *spawnDeps) RecordRateLimit(_ string, lim github.RateLimit) {
+	d.rlMu.Lock()
+	d.rateLimit = lim
+	d.rlMu.Unlock()
+}
+func (d *spawnDeps) MarkRateLimited(_ string) bool    { return !d.ratePaused.Swap(true) }
+func (d *spawnDeps) LifecycleTiming() LifecycleTiming { return d.lifecycle }
+func (d *spawnDeps) Version() string                  { return d.version }
+func (d *spawnDeps) BuildSHA() string                 { return d.buildSHA }
 
 func newSpawnDeps(t *testing.T) *spawnDeps {
 	t.Helper()

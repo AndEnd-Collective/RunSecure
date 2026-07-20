@@ -52,23 +52,6 @@ type StateLike interface {
 	RecordDeregistered()
 }
 
-// BreakerMap is per-repo breaker storage. Implementations are concrete in
-// production; tests inject a map.
-//
-// RecordSuccess returns true if the breaker just transitioned to Closed
-// from a non-Closed state — callers emit breaker.closed only on transition,
-// not on every success.
-//
-// RecordFailure returns whether the breaker just transitioned to Open and
-// the current consecutive-failure count. Callers emit breaker.opened only
-// when `opened` is true.
-type BreakerMap interface {
-	IsOpen(repo string) bool
-	MaybeHalfOpen(repo string) bool
-	RecordSuccess(repo string) (closed bool)
-	RecordFailure(repo string) (opened bool, consecutiveFailures int)
-}
-
 // TokenBucket is the B1 rate limiter.
 type TokenBucket interface {
 	TryTake() bool
@@ -105,7 +88,7 @@ type PollDeps interface {
 
 	RateLimitContextFor(scope string) (remaining int, limit int, reset string)
 	RecordRateLimit(scope string, lim github.RateLimit)
-	MarkRateLimited(scope string)
+	MarkRateLimited(scope string) (newlyPaused bool)
 	IsRateLimited(scope string) bool
 	MaybeClearRateLimit(scope string) bool
 
@@ -114,8 +97,8 @@ type PollDeps interface {
 	TryReserve(spawnID, repo string, repoCap, globalCap int) bool
 	ReleaseReservation(spawnID string)
 	RecordPollAttempt(repo string)
-	RecordPollSuccess(repo string, queued int)
-	RecordPollFailure(repo, class, detail string)
+	RecordPollSuccess(repo string, queued int) (breakerClosed bool)
+	RecordPollFailure(repo, class, detail string) (breakerOpened bool, consecutiveFailures int)
 
 	// RecordPollTick records that a poll cycle just ticked. Production
 	// implementations update the /healthz freshness signal here. Fix for
@@ -128,9 +111,8 @@ type PollDeps interface {
 type SpawnDeps interface {
 	GitHub() *github.Client
 	// Docker returns the raw docker client. Still required by tests and
-	// production code that inspects containers outside of the spawn lifecycle
-	// (e.g. cold-start reconciliation in run.go). Execute no longer calls
-	// Docker() for the spawn lifecycle — that is delegated to Backend().
+	// production diagnostics that inspect containers outside of the spawn
+	// lifecycle. Execute delegates the lifecycle to Backend().
 	Docker() docker.Client
 	// Backend returns the pluggable spawn mechanism. Execute calls
 	// Backend().Spawn / WaitForExit / Teardown instead of calling Docker()
@@ -150,7 +132,9 @@ type SpawnDeps interface {
 	SeccompProfileHostPath(name string) string
 
 	RateLimiter() TokenBucket
-	Breakers() BreakerMap
+	RateLimitContextFor(scope string) (remaining int, limit int, reset string)
+	RecordRateLimit(scope string, lim github.RateLimit)
+	MarkRateLimited(scope string) (newlyPaused bool)
 	LifecycleTiming() LifecycleTiming
 	Version() string
 	BuildSHA() string

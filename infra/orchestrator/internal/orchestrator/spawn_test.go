@@ -162,6 +162,32 @@ func TestSpawn_RunnerObservationRateLimitFailsDelivery(t *testing.T) {
 	})
 	require.ErrorIs(t, err, github.ErrRateLimited)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_rate_limited"`)
+	require.True(t, d.ratePaused.Load())
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused)
+}
+
+func TestSpawn_JITRateLimitPausesScopeScheduler(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jitErrCode = http.StatusForbidden
+	fake.rlAfterResponse = true
+	fake.rlLimit = 5000
+	fake.rlRemaining = 12
+	fake.rlReset = "1800000000"
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "jit-rate-limited",
+	})
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.True(t, d.ratePaused.Load())
+	remaining, limit, reset := d.RateLimitContextFor("s")
+	require.Equal(t, 0, remaining)
+	require.Equal(t, 5000, limit)
+	require.Equal(t, time.Unix(1800000000, 0).Format(time.RFC3339), reset)
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused)
 }
 
 func TestSpawn_ContextCancellationWhileObservingRunner(t *testing.T) {
@@ -294,9 +320,7 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
 }
 
-// Bug #1 regression test: breaker.opened fires when the breaker transitions
-// to Open. Previously the return values from RecordFailure were dropped.
-func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
+func TestSpawn_RunnerOutcomesDoNotDriveDemandBreaker(t *testing.T) {
 	d := newSpawnDeps(t)
 	d.be.spawnErr = errors.New("force failure")
 	w := NewSpawnWorker(d)
@@ -305,23 +329,16 @@ func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
 		})
 	}
-	d.requireEmitted(t, cornerstone.EventBreakerOpened)
-}
+	require.Zero(t, d.breakers.failed["o/r"])
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventBreakerOpened)
 
-func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
-	d := newSpawnDeps(t)
-	d.be.spawnErr = errors.New("force failure")
-	w := NewSpawnWorker(d)
-	for i := 0; i < 5; i++ {
-		_ = w.Execute(context.Background(), SpawnIntent{
-			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
-		})
-	}
+	d.breakers.open["o/r"] = true
 	d.be.spawnErr = nil
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "ok",
 	}))
-	d.requireEmitted(t, cornerstone.EventBreakerClosed)
+	require.True(t, d.breakers.open["o/r"], "runner success must not close the demand breaker")
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventBreakerClosed)
 }
 
 // --- Task 8: egressNetworkName env lookup + fallback -------------------------

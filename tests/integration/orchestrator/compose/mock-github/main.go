@@ -6,6 +6,7 @@
 //	GET    /repos/{owner}/{repo}/actions/runs?status=queued|in_progress → workflow runs
 //	GET    /repos/{owner}/{repo}/actions/runs/{id}/jobs?filter=latest → queued jobs
 //	POST   /repos/{owner}/{repo}/actions/runners/generate-jitconfig → returns JIT config
+//	GET    /repos/{owner}/{repo}/actions/runners       → runner registrations
 //	GET    /repos/{owner}/{repo}/actions/runners/{id}  → online/busy runner
 //	DELETE /repos/{owner}/{repo}/actions/runners/{id}  → 204
 //
@@ -23,12 +24,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
 
 var deletedRunners sync.Map
+var registeredRunners sync.Map
 
 func main() {
 	addr := envOr("MOCK_LISTEN", ":80")
@@ -59,6 +63,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		runsFor(w, r)
 	case strings.HasSuffix(r.URL.Path, "/generate-jitconfig"):
 		generateJIT(w, r)
+	case strings.HasSuffix(r.URL.Path, "/actions/runners") && r.Method == http.MethodGet:
+		listRunners(w, r)
 	case strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete:
 		deleteRunner(w, r)
 	case strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet:
@@ -133,6 +139,10 @@ func generateJIT(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id := runnerIDSeq.Add(1)
+	name, _ := body["name"].(string)
+	registeredRunners.Store(fmt.Sprint(id), map[string]any{
+		"id": id, "name": name, "status": "online", "busy": true, "labels": labels,
+	})
 	w.WriteHeader(201)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"runner": map[string]any{
@@ -147,7 +157,37 @@ func deleteRunner(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	id := parts[len(parts)-1]
 	deletedRunners.Store(id, true)
+	registeredRunners.Delete(id)
+	log.Printf("deleted runner registration id=%s", id)
 	w.WriteHeader(204)
+}
+
+func listRunners(w http.ResponseWriter, r *http.Request) {
+	runners := []map[string]any{}
+	registeredRunners.Range(func(_, value any) bool {
+		runner, ok := value.(map[string]any)
+		if ok {
+			runners = append(runners, runner)
+		}
+		return true
+	})
+	sort.Slice(runners, func(i, j int) bool {
+		return runners[i]["id"].(int64) < runners[j]["id"].(int64)
+	})
+	total := len(runners)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * 100
+	end := min(start+100, len(runners))
+	if start >= len(runners) {
+		runners = nil
+	} else {
+		runners = runners[start:end]
+	}
+	setRateLimit(w)
+	_ = json.NewEncoder(w).Encode(map[string]any{"total_count": total, "runners": runners})
 }
 
 func getRunner(w http.ResponseWriter, r *http.Request) {
@@ -159,9 +199,15 @@ func getRunner(w http.ResponseWriter, r *http.Request) {
 	}
 	var runnerID int64
 	_, _ = fmt.Sscanf(id, "%d", &runnerID)
+	name := "mock-runsecure-runner"
+	if registered, ok := registeredRunners.Load(id); ok {
+		if runner, ok := registered.(map[string]any); ok {
+			name, _ = runner["name"].(string)
+		}
+	}
 	setRateLimit(w)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": runnerID, "name": "mock-runsecure-runner", "status": "online", "busy": true,
+		"id": runnerID, "name": name, "status": "online", "busy": true,
 	})
 }
 

@@ -273,8 +273,8 @@ func (s *State) SetDraining(draining bool) {
 	s.mu.Unlock()
 }
 
-// AcquireSemaphores is retained for cold-start and compatibility callers. New
-// scheduler paths use TryReserve so pending work is visible before execution.
+// AcquireSemaphores is retained for compatibility callers. Scheduler paths
+// use TryReserve so pending work is visible before execution.
 func (s *State) AcquireSemaphores(repo string, repoCap, globalCap int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

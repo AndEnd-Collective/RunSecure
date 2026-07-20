@@ -142,9 +142,9 @@ EOF
 # networking tools we need to probe structural-floor properties from
 # inside a spawned runner container.
 build_test_runner_image() {
-  if docker image inspect runsecure-test-runner:local >/dev/null 2>&1; then
-    return 0
-  fi
+  # Always invoke the build so source-contract changes (for example the
+  # required JIT entrypoint) cannot be hidden by a stale local tag. BuildKit
+  # still reuses unchanged layers, so this remains cheap on repeat runs.
   local builddir
   builddir=$(mktemp -d)
   # The stub mirrors the REAL runner image contract (fix G2/G3): the

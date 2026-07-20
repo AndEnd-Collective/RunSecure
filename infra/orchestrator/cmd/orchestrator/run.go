@@ -63,18 +63,12 @@ func Run(ctx context.Context, scopePath string) error {
 	}
 	st.Configure(repoNames, s.GlobalMaxRunners, s.GlobalMaxRunners, version, buildSHA)
 
-	// Server (healthz + metrics + snapshot) starts first so /healthz can
-	// surface "we're booting" status to docker HEALTHCHECK / k8s probes.
-	serverDeps := newServerDeps(st, clk, s.PollIntervalSeconds)
-	srv := server.New(":8080", ":8081", serverDeps, em)
-	go func() { _ = srv.Run(ctx) }()
-
-	// Cold-start state recovery from docker.
-	if listed, err := dc.ListContainersForScope(ctx, s.Name); err == nil {
-		orphans := state.RebuildFromDocker(st, listed)
-		for _, o := range orphans {
-			_ = dc.DeleteContainer(ctx, o.ContainerID, true)
-		}
+	// A restarted process cannot safely adopt old runners: it has no lifecycle
+	// goroutine capable of releasing their capacity. Clean exact JIT
+	// registrations first, then their scope-owned containers, and fail startup
+	// if either dependency cannot be reconciled.
+	if err := cleanupRecoveredSpawns(ctx, s.Name, repoNames, dc, gh); err != nil {
+		return err
 	}
 
 	// Cold-start per-spawn network cleanup (#54 fix 4): remove any rs-net-*
@@ -82,11 +76,22 @@ func Run(ctx context.Context, scopePath string) error {
 	// normally deleted by Teardown, but a hard restart or crash leaves them
 	// behind. The address-pool exhausts after ~31 unreleased bridge networks.
 	// We list only runsecure.scope-labelled networks so the scope is precise.
-	if nets, err := dc.ListNetworksForScope(ctx, s.Name); err == nil {
-		for _, n := range nets {
-			_ = dc.DeleteNetwork(ctx, n.ID)
+	nets, err := dc.ListNetworksForScope(ctx, s.Name)
+	if err != nil {
+		return fmt.Errorf("cold-start: list recovered networks: %w", err)
+	}
+	for _, n := range nets {
+		if err := dc.DeleteNetwork(ctx, n.ID); err != nil {
+			return fmt.Errorf("cold-start: delete recovered network %s: %w", n.ID, err)
 		}
 	}
+
+	// Server (healthz + metrics + snapshot) starts only after cold-start
+	// reconciliation succeeds, so a failed cleanup cannot look live while the
+	// process is about to exit.
+	serverDeps := newServerDeps(st, clk, s.PollIntervalSeconds)
+	srv := server.New(":8080", ":8081", serverDeps, em)
+	go func() { _ = srv.Run(ctx) }()
 
 	// Build everything the poll + spawn deps need.
 	intentCh := make(chan orchestrator.SpawnIntent, 32)
@@ -508,10 +513,15 @@ func (p *productionDeps) RateLimitContextFor(_ string) (int, int, string) {
 	return rem, lim, reset.Format(time.RFC3339)
 }
 func (p *productionDeps) RecordRateLimit(_ string, lim github.RateLimit) {
-	p.st.SetRateLimit(lim.Remaining, lim.Limit, time.Unix(lim.ResetUnix, 0))
+	reset := time.Time{}
+	if lim.ResetUnix > 0 {
+		reset = time.Unix(lim.ResetUnix, 0)
+	}
+	p.st.SetRateLimit(lim.Remaining, lim.Limit, reset)
 }
-func (p *productionDeps) MarkRateLimited(_ string) {
+func (p *productionDeps) MarkRateLimited(_ string) bool {
 	p.rlMu.Lock()
+	newlyPaused := !p.rlPaused
 	p.rlPaused = true
 	_, _, r := p.st.RateLimit()
 	if r.IsZero() {
@@ -519,6 +529,7 @@ func (p *productionDeps) MarkRateLimited(_ string) {
 	}
 	p.rlReset = r
 	p.rlMu.Unlock()
+	return newlyPaused
 }
 func (p *productionDeps) IsRateLimited(_ string) bool {
 	p.rlMu.Lock()
@@ -558,12 +569,20 @@ func (p *productionDeps) RecordPollAttempt(repo string) {
 	p.st.RecordPollAttempt(repo, p.clk.Now())
 }
 
-func (p *productionDeps) RecordPollSuccess(repo string, queued int) {
+func (p *productionDeps) RecordPollSuccess(repo string, queued int) bool {
 	p.st.RecordPollSuccess(repo, queued, p.clk.Now())
+	return p.brks.RecordSuccess(repo)
 }
 
-func (p *productionDeps) RecordPollFailure(repo, class, detail string) {
+func (p *productionDeps) RecordPollFailure(repo, class, detail string) (bool, int) {
 	p.st.RecordPollFailure(repo, class, detail)
+	// A scoped rate-limit pause already suppresses every repository poll until
+	// its reset window. It must not also consume the per-repository demand
+	// breaker budget or turn one GitHub quota event into a five-minute outage.
+	if class == "github_rate_limited" {
+		return false, 0
+	}
+	return p.brks.RecordFailure(repo)
 }
 
 // RecordPollTick (bug #2 fix) updates the serverDeps freshness signal that
@@ -618,7 +637,6 @@ func (p *productionDeps) SeccompProfileHostPath(name string) string {
 func (p *productionDeps) RateLimiter() orchestrator.TokenBucket {
 	return tokenBucketAdapter{b: p.bucket}
 }
-func (p *productionDeps) Breakers() orchestrator.BreakerMap { return p.brks }
 func (p *productionDeps) LifecycleTiming() orchestrator.LifecycleTiming {
 	return orchestrator.DefaultLifecycleTiming()
 }

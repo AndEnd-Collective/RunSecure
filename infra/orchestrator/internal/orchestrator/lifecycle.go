@@ -104,6 +104,7 @@ func (w *SpawnWorker) waitForLifecycle(
 
 	poll := time.NewTicker(timing.PollInterval)
 	defer poll.Stop()
+	pollC := poll.C
 	onlineTimer := time.NewTimer(timing.OnlineTimeout)
 	defer stopTimer(onlineTimer)
 	assignmentTimer := time.NewTimer(timing.AssignmentTimeout)
@@ -113,6 +114,8 @@ func (w *SpawnWorker) waitForLifecycle(
 	}
 	if assigned {
 		stopTimer(assignmentTimer)
+		poll.Stop()
+		pollC = nil
 	}
 
 	for {
@@ -120,6 +123,13 @@ func (w *SpawnWorker) waitForLifecycle(
 		case <-ctx.Done():
 			return lifecycleFailure("runner_observation_cancelled", ctx.Err())
 		case result := <-exitCh:
+			// Backend wall-clock expiry and worker cancellation are transport
+			// outcomes, not evidence that a healthy runner exited without a job.
+			// Preserve them for Execute's timeout/cancellation handling before
+			// considering the unassigned-runner failure below.
+			if transportResult, ok := lifecycleTransportResult(ctx, result); ok {
+				return transportResult
+			}
 			if !assigned {
 				failure := fmt.Errorf("runner %d exited with code %d before GitHub reported a job assignment", runnerID, result.exitCode)
 				_ = w.deps.Emit().EmitRunnerExitedUnassigned(cornerstone.RunnerExitedUnassignedFields{
@@ -134,7 +144,7 @@ func (w *SpawnWorker) waitForLifecycle(
 				return out
 			}
 			return lifecycleResult{exitCode: result.exitCode, timedOut: result.timedOut}
-		case <-poll.C:
+		case <-pollC:
 			if failure := observe(); failure.err != nil {
 				return failure
 			}
@@ -163,6 +173,10 @@ func (w *SpawnWorker) waitForLifecycle(
 		}
 		if assigned {
 			stopTimer(assignmentTimer)
+			if pollC != nil {
+				poll.Stop()
+				pollC = nil
+			}
 		}
 	}
 }
@@ -183,6 +197,16 @@ func normalizedLifecycleTiming(timing LifecycleTiming) LifecycleTiming {
 
 func lifecycleFailure(reason string, err error) lifecycleResult {
 	return lifecycleResult{exitCode: -1, err: err, failureReason: reason}
+}
+
+func lifecycleTransportResult(ctx context.Context, result backendExit) (lifecycleResult, bool) {
+	if result.timedOut {
+		return lifecycleResult{exitCode: result.exitCode, timedOut: true}, true
+	}
+	if err := ctx.Err(); err != nil {
+		return lifecycleFailure("runner_observation_cancelled", err), true
+	}
+	return lifecycleResult{}, false
 }
 
 func stopTimer(timer *time.Timer) {

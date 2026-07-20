@@ -118,7 +118,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	})
 	if err != nil {
 		reason := classifyJITError(err)
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
+		w.pauseForRateLimit(intent.Scope, err)
 		return w.fail(intent, containerName, reason, err)
 	}
 	_ = w.deps.Emit().EmitSpawnJITAcquired(cornerstone.SpawnJITAcquiredFields{
@@ -132,7 +132,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// can be threaded into SpawnInput for kube backend L3 enforcement.
 	egressDir, allowedPrivateCIDRs, err := w.deps.Egress().Render(intent.SpawnID, snapshot.YML)
 	if err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, "egress_render", err, jit.RunnerID)
 	}
 
@@ -183,7 +182,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	}
 	h, err := w.deps.Backend().Spawn(ctx, spawnIn)
 	if err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
@@ -212,7 +210,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	teardownSpawn(ctx, w.deps.Backend(), h, timedOut || lifecycle.err != nil)
 
 	if lifecycle.err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
+		w.pauseForRateLimit(intent.Scope, lifecycle.err)
 		if lifecycle.unassigned {
 			w.deps.State().RecordUnassignedExit()
 		}
@@ -229,7 +227,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 			ConfiguredTimeoutSecs: timeoutSecs,
 			ElapsedSeconds:        elapsed,
 		})
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return errors.New("spawn timed out")
 	}
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
@@ -241,12 +238,10 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		ExitCode: exitCode, DurationMillis: durationMs,
 	})
 	if err := w.deregister(ctx, intent.Repo, jit.RunnerID); err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return w.fail(intent, containerName, "runner_deregistration_failed", err)
 	}
 
 	if exitCode == 0 {
-		w.recordSuccessAndMaybeEmit(intent.Scope, intent.Repo)
 		_ = w.deps.Emit().EmitSpawnCompleted(cornerstone.SpawnCompletedFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 			ContainerID: runnerContainerID, ContainerName: containerName,
@@ -254,7 +249,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		})
 		return nil
 	}
-	w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 	_ = w.deps.Emit().EmitSpawnFailed(cornerstone.SpawnFailedFields{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		ContainerName: containerName,
@@ -326,26 +320,18 @@ func runnerCleanupContext(context.Context) (context.Context, context.CancelFunc)
 	return context.WithTimeout(context.Background(), teardownGracePeriod())
 }
 
-// recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits
-// breaker.opened on the open transition (FIX for bug #1: the events were
-// previously never emitted because the return values were dropped).
-func (w *SpawnWorker) recordFailureAndMaybeEmit(scope, repo string) {
-	opened, consecutive := w.deps.Breakers().RecordFailure(repo)
-	if opened {
-		_ = w.deps.Emit().EmitBreakerOpened(cornerstone.BreakerFields{
-			Scope: scope, Repo: repo, ConsecutiveFailures: consecutive,
-		})
+func (w *SpawnWorker) pauseForRateLimit(scope string, err error) {
+	if !errors.Is(err, github.ErrRateLimited) {
+		return
 	}
-}
-
-// recordSuccessAndMaybeEmit calls RecordSuccess and emits breaker.closed
-// only when the breaker just transitioned from a non-Closed state.
-func (w *SpawnWorker) recordSuccessAndMaybeEmit(scope, repo string) {
-	if closed := w.deps.Breakers().RecordSuccess(repo); closed {
-		_ = w.deps.Emit().EmitBreakerClosed(cornerstone.BreakerFields{
-			Scope: scope, Repo: repo,
-		})
+	w.deps.RecordRateLimit(scope, github.ErrorRateLimit(err))
+	if !w.deps.MarkRateLimited(scope) {
+		return
 	}
+	remaining, limit, reset := w.deps.RateLimitContextFor(scope)
+	_ = w.deps.Emit().EmitRatelimitPaused(cornerstone.RateLimitFields{
+		Scope: scope, Remaining: remaining, Limit: limit, ResetISO: reset,
+	})
 }
 
 func classifyJITError(err error) string {

@@ -339,9 +339,8 @@ type containerJSON struct {
 }
 
 func (c *httpClient) ListContainersForScope(ctx context.Context, scope string) ([]Container, error) {
-	// Only return RUNNING containers — exited ones are stale and would
-	// inflate the cold-start in-flight count. Status filtering server-side
-	// avoids returning hundreds of stopped containers from prior runs.
+	// Only return RUNNING containers. Status filtering server-side avoids
+	// returning hundreds of stopped containers from prior runs.
 	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"],"status":["running"]}`, scope)
 	path := "/containers/json?filters=" + url.QueryEscape(filter)
 	resp, err := c.do(ctx, http.MethodGet, path, nil)

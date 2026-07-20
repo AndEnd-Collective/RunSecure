@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 )
 
@@ -61,15 +60,11 @@ func (c *Client) GenerateJITConfig(ctx context.Context, repo string, req JITConf
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return JITConfigResponse{}, ErrAuthFailed
-	}
 	if resp.StatusCode == http.StatusUnprocessableEntity {
 		return JITConfigResponse{}, errors.New("github: 422 no JIT slot available")
 	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return JITConfigResponse{}, fmt.Errorf("github: generate-jitconfig: status %d", resp.StatusCode)
+		return JITConfigResponse{}, responseError(resp, "generate JIT config")
 	}
 
 	var raw rawJITResponse
@@ -111,10 +106,44 @@ func (c *Client) DeleteRunner(ctx context.Context, repo string, runnerID int64) 
 	switch resp.StatusCode {
 	case http.StatusNoContent, http.StatusNotFound:
 		return nil // 404 = already gone, fine
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return ErrAuthFailed
 	default:
-		return fmt.Errorf("github: delete runner %d: status %d", runnerID, resp.StatusCode)
+		return responseError(resp, "delete runner")
+	}
+}
+
+type runnersResponse struct {
+	Runners []Runner `json:"runners"`
+}
+
+// ListRunners returns every repository runner registration. Cold-start
+// reconciliation uses the exact runner names recorded on recovered containers
+// to deregister only RunSecure-owned JIT runners before removing containers.
+func (c *Client) ListRunners(ctx context.Context, repo string) ([]Runner, RateLimit, error) {
+	all := make([]Runner, 0)
+	lim := RateLimit{}
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/repos/%s/actions/runners?per_page=%d&page=%d", repo, githubPageSize, page)
+		resp, err := c.Do(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, lim, err
+		}
+		pageLimit := ParseRateLimit(resp.Header)
+		lim = newestRateLimit(lim, pageLimit)
+		if resp.StatusCode != http.StatusOK {
+			err := responseError(resp, "list runners")
+			_ = resp.Body.Close()
+			return nil, lim, err
+		}
+		var body runnersResponse
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, lim, fmt.Errorf("github: decode runners: %w", err)
+		}
+		all = append(all, body.Runners...)
+		if len(body.Runners) < githubPageSize {
+			return all, lim, nil
+		}
 	}
 }
 

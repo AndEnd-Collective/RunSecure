@@ -95,20 +95,20 @@ func (p *Poll) tick(ctx context.Context) {
 		p.deps.RecordPollAttempt(repo.Repo)
 		labels, err := p.deps.LabelsForRepo(repo.Repo)
 		if err != nil {
-			p.deps.RecordPollFailure(repo.Repo, "runner_config", err.Error())
+			p.recordPollFailure(repo.Repo, "runner_config", err.Error())
 			continue
 		}
 		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels)
 		if err != nil {
 			lim := github.ErrorRateLimit(err)
 			p.deps.RecordRateLimit(p.scope.Name, lim)
-			p.deps.RecordPollFailure(repo.Repo, classifyPollError(err), err.Error())
+			p.recordPollFailure(repo.Repo, classifyPollError(err), err.Error())
 			p.handlePollError(repo.Repo, err)
 			continue
 		}
 		p.deps.RecordRateLimit(p.scope.Name, demand.RateLimit)
 		queued := demand.Count()
-		p.deps.RecordPollSuccess(repo.Repo, queued)
+		p.recordPollSuccess(repo.Repo, queued)
 		if queued > 0 {
 			_ = p.deps.Emit().EmitPollQueuedJobsObserved(cornerstone.PollQueuedJobsObservedFields{
 				Scope: p.scope.Name, Repo: repo.Repo, Count: queued,
@@ -141,6 +141,23 @@ func (p *Poll) tick(ctx context.Context) {
 	}
 }
 
+func (p *Poll) recordPollFailure(repo, class, detail string) {
+	opened, consecutive := p.deps.RecordPollFailure(repo, class, detail)
+	if opened {
+		_ = p.deps.Emit().EmitBreakerOpened(cornerstone.BreakerFields{
+			Scope: p.scope.Name, Repo: repo, ConsecutiveFailures: consecutive,
+		})
+	}
+}
+
+func (p *Poll) recordPollSuccess(repo string, queued int) {
+	if p.deps.RecordPollSuccess(repo, queued) {
+		_ = p.deps.Emit().EmitBreakerClosed(cornerstone.BreakerFields{
+			Scope: p.scope.Name, Repo: repo,
+		})
+	}
+}
+
 func classifyPollError(err error) string {
 	switch {
 	case errors.Is(err, github.ErrRateLimited):
@@ -155,11 +172,12 @@ func classifyPollError(err error) string {
 func (p *Poll) handlePollError(repo string, err error) {
 	switch {
 	case errors.Is(err, github.ErrRateLimited):
-		p.deps.MarkRateLimited(p.scope.Name)
-		rem, lim, reset := p.deps.RateLimitContextFor(p.scope.Name)
-		_ = p.deps.Emit().EmitRatelimitPaused(cornerstone.RateLimitFields{
-			Scope: p.scope.Name, Remaining: rem, Limit: lim, ResetISO: reset,
-		})
+		if p.deps.MarkRateLimited(p.scope.Name) {
+			rem, lim, reset := p.deps.RateLimitContextFor(p.scope.Name)
+			_ = p.deps.Emit().EmitRatelimitPaused(cornerstone.RateLimitFields{
+				Scope: p.scope.Name, Remaining: rem, Limit: lim, ResetISO: reset,
+			})
+		}
 	case errors.Is(err, github.ErrAuthFailed):
 		_ = p.deps.Emit().EmitAuthDegraded(cornerstone.AuthDegradedFields{
 			Scope: p.scope.Name, Repo: repo, Status: github.ErrorStatus(err),

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,7 +47,7 @@ func (d *pollDeps) RateLimitContextFor(_ string) (int, int, string) {
 	return d.rl.remaining, d.rl.limit, d.rl.reset
 }
 func (d *pollDeps) RecordRateLimit(_ string, _ github.RateLimit) {}
-func (d *pollDeps) MarkRateLimited(_ string)                     { d.rl.paused.Store(true) }
+func (d *pollDeps) MarkRateLimited(_ string) bool                { return !d.rl.paused.Swap(true) }
 func (d *pollDeps) IsRateLimited(_ string) bool                  { return d.rl.paused.Load() }
 func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
 	// Honour rl.stickPaused: when set, never clear (so the "still paused;
@@ -82,11 +83,16 @@ func (d *pollDeps) ReleaseReservation(spawnID string) { d.st.ReleaseReservation(
 func (d *pollDeps) RecordPollAttempt(repo string) {
 	d.st.RecordPollAttempt(repo, d.clk.Now())
 }
-func (d *pollDeps) RecordPollSuccess(repo string, queued int) {
+func (d *pollDeps) RecordPollSuccess(repo string, queued int) bool {
 	d.st.RecordPollSuccess(repo, queued, d.clk.Now())
+	return d.breakers.RecordSuccess(repo)
 }
-func (d *pollDeps) RecordPollFailure(repo, class, detail string) {
+func (d *pollDeps) RecordPollFailure(repo, class, detail string) (bool, int) {
 	d.st.RecordPollFailure(repo, class, detail)
+	if class == "github_rate_limited" {
+		return false, 0
+	}
+	return d.breakers.RecordFailure(repo)
 }
 
 func itoa(n int64) string {
@@ -213,6 +219,55 @@ func TestPoll_SkipsBreakerOpen(t *testing.T) {
 	NewPoll(scope, d).tick(context.Background())
 
 	require.Empty(t, d.intents)
+}
+
+func TestPoll_DemandFailuresOpenAndSuccessfulRefreshClosesBreaker(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queueErrCode["o/r"] = http.StatusInternalServerError
+	srv.mu.Unlock()
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+
+	for range 5 {
+		p.tick(context.Background())
+	}
+	require.True(t, d.breakers.IsOpen("o/r"))
+	d.requireEmitted(t, cornerstone.EventBreakerOpened)
+
+	srv.mu.Lock()
+	delete(srv.queueErrCode, "o/r")
+	srv.mu.Unlock()
+	d.breakers.mu.Lock()
+	d.breakers.allowHalfOpen["o/r"] = true
+	d.breakers.mu.Unlock()
+	p.tick(context.Background())
+	require.False(t, d.breakers.IsOpen("o/r"))
+	d.requireEmitted(t, cornerstone.EventBreakerClosed)
+}
+
+func TestPoll_RateLimitPauseDoesNotConsumeDemandBreakerBudget(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queueErrCode["o/r"] = http.StatusTooManyRequests
+	srv.mu.Unlock()
+
+	NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d).tick(context.Background())
+
+	d.breakers.mu.Lock()
+	failures := d.breakers.failed["o/r"]
+	d.breakers.mu.Unlock()
+	require.Zero(t, failures)
+	require.False(t, d.breakers.IsOpen("o/r"))
 }
 
 func TestPoll_RateLimitPauseAndResume(t *testing.T) {
