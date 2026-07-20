@@ -28,11 +28,19 @@ RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
 RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/node:latest-24
 RUNSECURE_PAT_FILE=/path/to/your/0400-mode/pat
 RUNSECURE_PROJECTS_ROOT=/path/to/parent/of/project/checkouts
+# Optional host ports; keep distinct when running multiple scope stacks.
+RUNSECURE_ORCHESTRATOR_HEALTH_PORT=8080
+RUNSECURE_ORCHESTRATOR_STATE_PORT=8081
 EOF
 
 # 4. Bring up the scope stack.
 docker compose -f infra/orchestrator/compose.scope.yml --env-file "$HOME/.config/runsecure/my.env" up -d
 ```
+
+Health, readiness, metrics, and state reach the host through an unprivileged
+relay bound only to `127.0.0.1`. The PAT-holding orchestrator remains attached
+exclusively to Docker-internal networks; changing the optional published ports
+does not make the bind address configurable.
 
 ## See also
 

@@ -5,10 +5,11 @@
 #   docker compose -f infra/orchestrator/compose.scope.yml \
 #     --env-file infra/orchestrator/scopes/datacentric.env up -d
 #
-# Three containers per stack:
+# Long-running containers per stack:
 #   - orchestrator: distroless Go binary; polls GitHub, spawns runners via socket-proxy
 #   - socket-proxy: distroless Go binary; the ONLY thing mounting docker.sock
 #   - orch-egress:  the orchestrator's only outbound HTTP path (api.github.com allowlist)
+#   - operator-relay: path-restricted localhost bridge for health/state probes
 services:
   socket-proxy:
     image: ${RUNSECURE_SOCKET_PROXY_IMAGE}
@@ -132,7 +133,11 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     user: "65532:65532"
-    networks: [orch-internal]
+    networks:
+      - orch-internal
+      # A separate internal link lets the relay reach only the orchestrator,
+      # not the docker-socket proxy or the egress proxy.
+      - operator-internal
     depends_on:
       socket-proxy:
         condition: service_started
@@ -171,12 +176,54 @@ services:
       # RUNSECURE_PROJECTS_ROOT is the directory containing every checkout in
       # this scope; project_dir values resolve below /projects in-container.
       - ${RUNSECURE_PROJECTS_ROOT:?RUNSECURE_PROJECTS_ROOT is required}:/projects:ro
-    ports:
-      # Localhost-only by design — never publish externally.
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:8081:8081"
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
+
+  operator-relay:
+    # Docker does not activate host-published ports for a container attached
+    # exclusively to an internal bridge. Keep the PAT-holding orchestrator on
+    # internal-only networks and expose this secretless, path-restricted relay.
+    image: ${RUNSECURE_PROXY_IMAGE}
+    container_name: rs-orch-${RUNSECURE_SCOPE}-operator-relay
+    restart: unless-stopped
+    read_only: true
+    user: "1001:1001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint:
+      - /usr/sbin/haproxy
+      - -W
+      - -db
+      - -f
+      - /etc/runsecure/operator-relay.haproxy.cfg
+    depends_on:
+      orchestrator:
+        condition: service_started
+    networks:
+      - operator-internal
+      - operator-host
+    ports:
+      # host_ip is literal: an operator-supplied port cannot widen the bind.
+      - target: 8080
+        published: "${RUNSECURE_ORCHESTRATOR_HEALTH_PORT:-8080}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 8081
+        published: "${RUNSECURE_ORCHESTRATOR_STATE_PORT:-8081}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - ./operator-relay.haproxy.cfg:/etc/runsecure/operator-relay.haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "/usr/sbin/haproxy", "-c", "-f", "/etc/runsecure/operator-relay.haproxy.cfg"]
+      interval: 15s
+      timeout: 2s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          pids: 32
 
 volumes:
   egress-configs:
@@ -188,6 +235,18 @@ networks:
   orch-internal:
     driver: bridge
     internal: true       # orchestrator + socket-proxy have NO host egress
+  operator-internal:
+    driver: bridge
+    internal: true       # only orchestrator + operator-relay; no host egress
+  operator-host:
+    driver: bridge
+    driver_opts:
+      # A non-internal bridge is required for Docker host-port publication,
+      # but disabling masquerade leaves it without outbound internet egress.
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+      # Defense in depth: any port without an explicit host_ip still defaults
+      # to loopback instead of all host interfaces.
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
   orch-external:
     driver: bridge       # orch-egress's external interface (host-routable)
   spawn-egress:
