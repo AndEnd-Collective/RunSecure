@@ -693,7 +693,7 @@ jobs:
         run: |
           set -euo pipefail
           bash infra/scripts/grype-scan-image.sh \
-            "$IMAGE_REF" grype-proxy.sarif ca-certificates
+            "$IMAGE_REF" grype-proxy.sarif squid
 
       - name: Upload Grype scan results (proxy) to GitHub Security
         if: always() && hashFiles('grype-proxy.sarif') != ''
