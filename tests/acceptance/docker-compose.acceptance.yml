@@ -6,7 +6,8 @@
 # runs them inside the runner.
 #
 # Variables:
-#   IMAGE_VERSION   — tag of the published images to test (e.g. "1.1.2")
+#   PROXY_IMAGE_REF  — exact immutable proxy image reference
+#   RUNNER_IMAGE_REF — exact immutable language image reference
 #   LANG            — language layer to test (node|python|rust)
 #   LANG_VERSION    — version of the language (e.g. "24" for node)
 #
@@ -18,7 +19,7 @@
 
 services:
   proxy:
-    image: ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION:-latest}${IMAGE_TAG_SUFFIX:-}
+    image: ${PROXY_IMAGE_REF:-ghcr.io/andend-collective/runsecure/proxy:latest}
     container_name: rs-acceptance-proxy
     init: true
     restart: "no"
@@ -51,7 +52,7 @@ services:
 
   runner:
     # The published language image — exact same artifact consumers get from GHCR.
-    image: ghcr.io/andend-collective/runsecure/${LANG:-node}:${IMAGE_VERSION:-latest}${IMAGE_TAG_SUFFIX:-}-${LANG_VERSION:-24}
+    image: ${RUNNER_IMAGE_REF:-ghcr.io/andend-collective/runsecure/node:latest-24}
     container_name: rs-acceptance-runner
     init: true
     depends_on:
@@ -73,15 +74,15 @@ services:
         set -uo pipefail
         FAIL=0
         echo "=== In-container checks ==="
-        bash /acceptance/in-container/run-all.sh || FAIL=$((FAIL + 1))
+        bash /acceptance/in-container/run-all.sh || FAIL=$$((FAIL + 1))
         echo ""
         echo "=== Stack-level checks (need proxy) ==="
         for c in /acceptance/stack-level/*.sh; do
             echo ""
-            echo "--- $(basename $c) ---"
-            bash "$c" || FAIL=$((FAIL + 1))
+            echo "--- $$(basename $$c) ---"
+            bash "$$c" || FAIL=$$((FAIL + 1))
         done
-        exit $FAIL
+        exit $$FAIL
     user: "1001:0"
     security_opt:
       - no-new-privileges:true

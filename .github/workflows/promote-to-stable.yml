@@ -1,27 +1,10 @@
 # ============================================================================
-# RunSecure — Promote Canary to Stable
+# RunSecure — Promote Verified Immutable Manifests to Stable
 # ============================================================================
-# After post-publish-acceptance.yml validates a -canary release and an operator
-# verifies the live three-runner Vladislav backlog, this workflow promotes the
-# same image digest to the stable tag.
-#
-# Promotion is server-side via `docker buildx imagetools create` —
-# no rebuild, no scan re-run. The bytes that consumers pull from
-# `:1.1.2` are byte-identical to the bytes that just passed acceptance
-# as `:1.1.2-canary`.
-#
-# Tag transitions:
-#   base:1.1.2-canary            ───retag──>  base:1.1.2
-#   base:nightly                              base:latest
-#   <lang>:1.1.2-canary-24       ───retag──>  <lang>:1.1.2-24
-#   <lang>:nightly-24                         <lang>:latest-24
-#   proxy:1.1.2-canary           ───retag──>  proxy:1.1.2
-#   proxy:nightly                             proxy:latest
-#
-# Triggered manually only. Automatic post-publish acceptance remains enabled,
-# but stable tags and the GitHub Release must wait for both that workflow and
-# live multi-runner acceptance. Operators promote with:
-#   gh workflow run promote-to-stable.yml -f image_version=1.1.2
+# Manual-only after automatic post-publish acceptance and operator-performed
+# live multi-runner acceptance. The exact Publish Images workflow run is an
+# explicit input. Its validated release manifest, not a mutable canary tag, is
+# the source for every server-side retag.
 # ============================================================================
 
 name: promote-to-stable
@@ -30,95 +13,183 @@ on:
   workflow_dispatch:
     inputs:
       image_version:
-        description: 'Canary image version to promote (e.g. 1.1.2 — without -canary suffix)'
+        description: 'Release version to promote (e.g. 2.1.8, without v)'
+        required: true
+        type: string
+      publish_run_id:
+        description: 'Successful Publish Images workflow run ID accepted by CI and live verification'
         required: true
         type: string
 
-permissions:
-  # contents:write needed by the `release` job to create a GitHub Release
-  # after successful promotion. Other jobs only need read.
-  contents: write
-  packages: write
+permissions: {}
+
+concurrency:
+  group: promote-stable-${{ inputs.image_version }}
+  cancel-in-progress: false
 
 jobs:
-  resolve-version:
+  resolve-manifest:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
-      version: ${{ steps.v.outputs.version }}
+      version: ${{ steps.verify.outputs.version }}
+      build_sha: ${{ steps.verify.outputs.build_sha }}
+      publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
-      - name: Resolve version to promote
-        id: v
+      - name: Download manifest from the exact Publish Images run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-image-manifest-${{ inputs.image_version }}
+          path: .publish-manifest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.publish_run_id }}
+
+      - name: Verify workflow-run and immutable manifest provenance
+        id: verify
         env:
-          DISPATCH_VERSION: ${{ inputs.image_version }}
+          EXPECTED_VERSION: ${{ inputs.image_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VERSION="$DISPATCH_VERSION"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::image_version must be an exact semver without v or -canary"
+          if [[ ! "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::image_version must be an exact semver without v"
             exit 1
           fi
-          echo "Promoting canary-$VERSION → stable $VERSION"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$PUBLISH_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::publish_run_id must be a positive integer"
+            exit 1
+          fi
+
+          gh api "/repos/${REPOSITORY}/actions/runs/${PUBLISH_RUN_ID}" \
+            > .publish-manifest/workflow-run.json
+          BUILD_SHA=$(python3 - .publish-manifest/workflow-run.json <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          run = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if run.get("name") != "Publish Images":
+              raise SystemExit("not a Publish Images workflow run")
+          if run.get("path") != ".github/workflows/publish-images.yml":
+              raise SystemExit("workflow path does not match publish-images.yml")
+          if run.get("event") != "push" or run.get("conclusion") != "success":
+              raise SystemExit("Publish Images run must be a successful tag push")
+          build_sha = run.get("head_sha", "")
+          if re.fullmatch(r"[0-9a-f]{40,64}", build_sha) is None:
+              raise SystemExit("Publish Images run has an invalid head SHA")
+          print(build_sha)
+          PY
+          )
+
+          python3 infra/scripts/verify-release-manifest.py \
+            .publish-manifest/release-images.json \
+            --expected-release "$EXPECTED_VERSION" \
+            --expected-build-sha "$BUILD_SHA" \
+            --expected-publish-run-id "$PUBLISH_RUN_ID"
+
+          {
+            echo "version=$EXPECTED_VERSION"
+            echo "build_sha=$BUILD_SHA"
+            echo "publish_run_id=$PUBLISH_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preserve the verified manifest for promotion and release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release-image-manifest-${{ inputs.image_version }}
+          path: .publish-manifest/release-images.json
+          if-no-files-found: error
+          retention-days: 90
 
   promote:
-    needs: resolve-version
+    needs: resolve-manifest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          # base + proxy: <ver>-canary → <ver>, nightly → latest
-          - kind: base
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+          - manifest_key: base
+            kind: base
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
             also_alias: latest
-          - kind: proxy
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+          - manifest_key: proxy
+            kind: proxy
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
             also_alias: latest
-          # Control-plane images (orchestrator + socket-proxy) — same retag
-          # shape as base/proxy. Previously omitted, so they were stuck at
-          # <ver>-canary and never got the stable <ver>/latest tags.
-          - kind: orchestrator
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+          - manifest_key: orchestrator
+            kind: orchestrator
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
             also_alias: latest
-          - kind: socket-proxy
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}'
+          - manifest_key: socket-proxy
+            kind: socket-proxy
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
             also_alias: latest
-          # Language images: <ver>-canary-<langver> → <ver>-<langver>, nightly-<langver> → latest-<langver>
-          - kind: node
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-24'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}-24'
+          - manifest_key: node-24
+            kind: node
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-24'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-24'
             also_alias: latest-24
-          - kind: node
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-22'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}-22'
+          - manifest_key: node-22
+            kind: node
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-22'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-22'
             also_alias: latest-22
-          - kind: python
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-3.12'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}-3.12'
+          - manifest_key: python-3.12
+            kind: python
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-3.12'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-3.12'
             also_alias: latest-3.12
-          - kind: rust
-            canary_tag: '${{ needs.resolve-version.outputs.version }}-canary-stable'
-            stable_tag: '${{ needs.resolve-version.outputs.version }}-stable'
+          - manifest_key: rust-stable
+            kind: rust
+            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-stable'
+            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-stable'
             also_alias: latest-stable
     env:
-      KIND: ${{ matrix.kind }}
-      CANARY: ${{ matrix.canary_tag }}
-      STABLE: ${{ matrix.stable_tag }}
       ALIAS: ${{ matrix.also_alias }}
+      CANARY: ${{ matrix.canary_tag }}
+      KIND: ${{ matrix.kind }}
+      MANIFEST_KEY: ${{ matrix.manifest_key }}
       REPO: ghcr.io/andend-collective/runsecure
+      STABLE: ${{ matrix.stable_tag }}
     steps:
+      - name: Download verified immutable manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release-image-manifest-${{ needs.resolve-manifest.outputs.version }}
+          path: .verified-manifest
+
+      - name: Resolve exact immutable promotion source
+        id: source
+        run: |
+          set -euo pipefail
+          python3 - .verified-manifest/release-images.json "$MANIFEST_KEY" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          reference = manifest["images"][sys.argv[2]]
+          with pathlib.Path(sys.argv[3]).open("a", encoding="utf-8") as output:
+              output.write(f"reference={reference}\n")
+              output.write(f"digest={reference.rsplit('@', 1)[1]}\n")
+          PY
+
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -127,96 +198,128 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify canary tag exists
+      - name: Verify canary still resolves to the accepted manifest
+        env:
+          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
+          SOURCE_REF: ${{ steps.source.outputs.reference }}
         run: |
           set -euo pipefail
-          if ! docker buildx imagetools inspect "${REPO}/${KIND}:${CANARY}" >/dev/null 2>&1; then
-            echo "::error::canary tag not found: ${REPO}/${KIND}:${CANARY}"
-            echo "Either acceptance never ran for this version, or the publish job didn't run."
+          docker buildx imagetools inspect "$SOURCE_REF" >/dev/null
+          canary_digest=$(docker buildx imagetools inspect \
+            "${REPO}/${KIND}:${CANARY}" --format '{{.Manifest.Digest}}')
+          if [ "$canary_digest" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::canary tag moved after acceptance: expected $EXPECTED_DIGEST, got $canary_digest"
             exit 1
           fi
-          echo "Found canary: ${REPO}/${KIND}:${CANARY}"
 
-      - name: Promote canary digest to stable + alias (server-side retag)
+      - name: Refuse to move an existing version tag
+        env:
+          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
         run: |
           set -euo pipefail
-          # `imagetools create -t target source` retargets `target` at the
-          # exact same digest as `source`. Multi-platform manifests are
-          # preserved. No rebuild, no pull, no push of new bytes.
+          if existing_digest=$(docker buildx imagetools inspect \
+              "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}' 2>/dev/null); then
+            if [ "$existing_digest" != "$EXPECTED_DIGEST" ]; then
+              echo "::error::immutable version tag ${REPO}/${KIND}:${STABLE} already points at $existing_digest"
+              exit 1
+            fi
+            echo "Version tag already matches the verified manifest; promotion is idempotent."
+          fi
+
+      - name: Promote the immutable digest to stable and alias
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.reference }}
+        run: |
+          set -euo pipefail
           docker buildx imagetools create \
             --tag "${REPO}/${KIND}:${STABLE}" \
             --tag "${REPO}/${KIND}:${ALIAS}" \
-            "${REPO}/${KIND}:${CANARY}"
-          echo "Promoted: ${REPO}/${KIND}:${CANARY} → :${STABLE} + :${ALIAS}"
+            "$SOURCE_REF"
 
-      - name: Verify both stable tags resolve to the canary digest
+      - name: Verify stable tags resolve to the manifest digest
+        env:
+          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
         run: |
           set -euo pipefail
-          canary_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${CANARY}" --format '{{.Manifest.Digest}}')
-          stable_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}')
-          alias_digest=$(docker buildx imagetools inspect "${REPO}/${KIND}:${ALIAS}" --format '{{.Manifest.Digest}}')
-          echo "canary:   $canary_digest"
-          echo "stable: $stable_digest"
-          echo "alias:  $alias_digest"
-          if [ "$canary_digest" != "$stable_digest" ] || [ "$canary_digest" != "$alias_digest" ]; then
-            echo "::error::digest mismatch after retag — promotion failed"
+          stable_digest=$(docker buildx imagetools inspect \
+            "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}')
+          alias_digest=$(docker buildx imagetools inspect \
+            "${REPO}/${KIND}:${ALIAS}" --format '{{.Manifest.Digest}}')
+          if [ "$stable_digest" != "$EXPECTED_DIGEST" ] \
+              || [ "$alias_digest" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::stable tags do not match the verified release manifest"
             exit 1
           fi
-          echo "Digests match — promotion verified atomic."
 
-  # --- Create GitHub Release for the promoted version ------------------------
-  # Fires only after the entire promote matrix succeeds. The Release reflects
-  # what's actually pullable as stable from GHCR (canary that passed
-  # acceptance and was retagged), not just what got tagged in git. Notes are
-  # auto-generated from PRs/commits since the previous tag.
   release:
-    needs: [resolve-version, promote]
+    needs: [resolve-manifest, promote]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     env:
-      VERSION: ${{ needs.resolve-version.outputs.version }}
+      VERSION: ${{ needs.resolve-manifest.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Delete orphan draft + skip if a real Release already exists
+      - name: Download verified release manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release-image-manifest-${{ needs.resolve-manifest.outputs.version }}
+          path: .verified-manifest
+
+      - name: Prepare durable release asset
+        run: |
+          cp .verified-manifest/release-images.json \
+            "runsecure-v${VERSION}-release-images.json"
+
+      - name: Delete orphan draft and detect an existing release
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Idempotency: skip ONLY if a PUBLISHED (non-draft) release exists.
-          # A leftover draft from a cancelled prior attempt must be deleted —
-          # otherwise the create step is skipped and the new tag never gets
-          # a real release (caught when v1.1.5 first shipped: a stale draft
-          # from a cancelled attempt orphaned the actual release).
           if existing=$(gh release view "v${VERSION}" --json isDraft --jq '.isDraft' 2>/dev/null); then
             if [ "$existing" = "true" ]; then
-              echo "Found orphan draft for v${VERSION} — deleting before creating real release"
               gh release delete "v${VERSION}" --yes
-              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
             else
-              echo "Published Release v${VERSION} already exists — skipping creation"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release with auto-generated notes
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # --generate-notes: GitHub auto-builds notes from merged PRs and
-          # commits between the previous tag and this one. No external action
-          # needed; gh CLI is preinstalled on ubuntu-latest.
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
             --generate-notes \
             --notes-start-tag "$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -A1 "^v${VERSION}$" | tail -1)"
-          echo "Created Release: v${VERSION}"
+
+      - name: Attach or compare the immutable release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ASSET="runsecure-v${VERSION}-release-images.json"
+          mkdir .downloaded-release-asset
+          if gh release download "v${VERSION}" \
+              --pattern "$ASSET" \
+              --dir .downloaded-release-asset 2>/dev/null; then
+            cmp "$ASSET" ".downloaded-release-asset/$ASSET"
+            echo "Existing release manifest matches exactly; leaving it unchanged."
+            exit 0
+          fi
+          gh release upload "v${VERSION}" "$ASSET"
+          gh release download "v${VERSION}" \
+            --pattern "$ASSET" \
+            --dir .downloaded-release-asset
+          cmp "$ASSET" ".downloaded-release-asset/$ASSET"

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 EXPECTED_IMAGES = {
+    "release-digest-base": "base",
     "release-digest-node-22": "node",
     "release-digest-node-24": "node",
     "release-digest-orchestrator": "orchestrator",
@@ -20,17 +21,19 @@ EXPECTED_IMAGES = {
 }
 REFERENCE = re.compile(
     r"^ghcr\.io/andend-collective/runsecure/"
-    r"(?P<package>node|orchestrator|proxy|python|rust|socket-proxy)"
+    r"(?P<package>base|node|orchestrator|proxy|python|rust|socket-proxy)"
     r"@sha256:[0-9a-f]{64}$"
 )
 RELEASE = re.compile(r"^(?:[0-9]+\.[0-9]+\.[0-9]+|manual-build)$")
 BUILD_SHA = re.compile(r"^[0-9a-f]{40,64}$")
+PUBLISH_RUN_ID = re.compile(r"^[1-9][0-9]*$")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release", required=True)
     parser.add_argument("--build-sha", required=True)
+    parser.add_argument("--publish-run-id", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("digest_files", nargs="+", type=Path)
     return parser.parse_args()
@@ -52,6 +55,8 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(f"invalid release: {args.release}")
     if not BUILD_SHA.fullmatch(args.build_sha):
         raise ValueError(f"invalid build SHA: {args.build_sha}")
+    if not PUBLISH_RUN_ID.fullmatch(args.publish_run_id):
+        raise ValueError(f"invalid Publish Images run ID: {args.publish_run_id}")
 
     images: dict[str, str] = {}
     for path in args.digest_files:
@@ -84,6 +89,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         "schema_version": 1,
         "release": args.release,
         "build_sha": args.build_sha,
+        "publish_run_id": int(args.publish_run_id),
         "images": dict(sorted(images.items())),
     }
 

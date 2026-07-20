@@ -45,7 +45,9 @@ else
     echo "[run-locally] PUBLISHED mode — using IMAGE_VERSION=${IMAGE_VERSION}"
 fi
 
-export LANG LANG_VERSION
+PROXY_IMAGE_REF="${PROXY_IMAGE_REF:-ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX:-}}"
+RUNNER_IMAGE_REF="${RUNNER_IMAGE_REF:-ghcr.io/andend-collective/runsecure/${LANG}:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX:-}-${LANG_VERSION}}"
+export LANG LANG_VERSION PROXY_IMAGE_REF RUNNER_IMAGE_REF
 
 cd "$SCRIPT_DIR"
 trap 'docker compose -f docker-compose.acceptance.yml down -v 2>/dev/null || true' EXIT
