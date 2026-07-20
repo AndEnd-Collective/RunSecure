@@ -239,6 +239,67 @@ func TestTeardownBlockedRetainsCapacityUntilExactResolution(t *testing.T) {
 	}
 }
 
+func TestTeardownBlockedTracksOrphanedBackendCapacityDebt(t *testing.T) {
+	s := New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+
+	require.True(t, s.MarkTeardownBlocked(
+		"orphan-spawn", "o/r", "initial teardown failure", now,
+	))
+	s.UpdateTeardownFailure("orphan-spawn", "network still exists")
+	s.UpdateTeardownFailure("unknown-spawn", "must remain a no-op")
+
+	snap := s.Snapshot()
+	require.True(t, snap.TeardownBlocked)
+	require.True(t, s.SchedulingBlocked())
+	require.Equal(t, 1, snap.GlobalInFlight)
+	require.Equal(t, 1, snap.PerRepo["o/r"].InFlight)
+	require.Equal(t, 1, snap.PerRepo["o/r"].TeardownBlocked)
+	require.Equal(t, int64(1), snap.TeardownFailuresTotal)
+	require.Equal(t, SpawnState{
+		SpawnID:           "orphan-spawn",
+		Repo:              "o/r",
+		Phase:             PhaseTeardownBlocked,
+		ReservedAt:        now,
+		TeardownBlockedAt: now,
+		TeardownFailure:   "network still exists",
+	}, snap.Reservations["orphan-spawn"])
+	require.False(t, s.TryReserve("replacement", "o/r", 2, 2, now))
+
+	require.True(t, s.ResolveTeardown("orphan-spawn"))
+	require.False(t, s.SchedulingBlocked())
+	require.Zero(t, s.GlobalInFlight())
+	require.Equal(t, int64(1), s.Snapshot().TeardownReconciledTotal)
+}
+
+func TestResolveTeardownKeepsAdmissionClosedUntilEveryDebtIsReconciled(t *testing.T) {
+	s := New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	require.True(t, s.TryReserve("spawn-1", "o/r", 3, 3, now))
+	require.True(t, s.TryReserve("spawn-2", "o/r", 3, 3, now))
+	require.False(t, s.ResolveTeardown("spawn-1"), "ordinary reservations are not teardown debt")
+	require.True(t, s.MarkTeardownBlocked("spawn-1", "o/r", "network delete failed", now))
+	require.True(t, s.MarkTeardownBlocked("spawn-2", "o/r", "proxy delete failed", now))
+
+	require.True(t, s.ResolveTeardown("spawn-1"))
+	snap := s.Snapshot()
+	require.True(t, snap.TeardownBlocked)
+	require.True(t, s.SchedulingBlocked())
+	require.Equal(t, 1, snap.GlobalInFlight)
+	require.Equal(t, 1, snap.PerRepo["o/r"].TeardownBlocked)
+	require.Contains(t, snap.Reservations, "spawn-2")
+	require.Equal(t, int64(2), snap.TeardownFailuresTotal)
+	require.Equal(t, int64(1), snap.TeardownReconciledTotal)
+	require.False(t, s.TryReserve("replacement", "o/r", 3, 3, now))
+
+	require.True(t, s.ResolveTeardown("spawn-2"))
+	snap = s.Snapshot()
+	require.False(t, snap.TeardownBlocked)
+	require.False(t, s.SchedulingBlocked())
+	require.Zero(t, snap.GlobalInFlight)
+	require.Equal(t, int64(2), snap.TeardownReconciledTotal)
+}
+
 func TestDrainingBlocksAtomicReservation(t *testing.T) {
 	s := New()
 	s.SetDraining(true)

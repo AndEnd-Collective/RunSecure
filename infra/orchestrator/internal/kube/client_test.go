@@ -280,8 +280,48 @@ func TestDeleteSpawn_MissingSecretIsIdempotentSuccess(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ListSpawns
+// DeleteSpawn confirmation failures
 // ──────────────────────────────────────────────────────────────────────────────
+
+func TestDeleteSpawn_ConfirmationReadErrorIsPropagated(t *testing.T) {
+	ns := "runsecure-confirm-error"
+	secretName := "rs-secret-confirm-error"
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns}}
+	cs := fake.NewSimpleClientset(secret)
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		// Simulate an API server that accepted foreground deletion while the
+		// object remains visible until its dependents have been removed.
+		return true, nil, nil
+	})
+	confirmErr := errors.New("injected confirmation read failure")
+	cs.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, confirmErr
+	})
+
+	err := NewClient(cs).DeleteSpawn(context.Background(), ns, secretName)
+	require.ErrorIs(t, err, confirmErr)
+	require.ErrorContains(t, err, "confirm secret \"rs-secret-confirm-error\" deletion")
+}
+
+func TestDeleteSpawn_ContextCancellationStopsConfirmation(t *testing.T) {
+	ns := "runsecure-confirm-cancel"
+	secretName := "rs-secret-confirm-cancel"
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns}}
+	cs := fake.NewSimpleClientset(secret)
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		// Keep the Secret present so DeleteSpawn must wait for foreground
+		// deletion rather than treating API acceptance as cleanup completion.
+		return true, nil, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewClient(cs).DeleteSpawn(ctx, ns, secretName)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "confirm secret \"rs-secret-confirm-cancel\" deletion")
+}
+
+// ListSpawns
 
 func TestListSpawns(t *testing.T) {
 	scope := "myscope"

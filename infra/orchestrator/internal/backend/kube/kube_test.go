@@ -342,8 +342,40 @@ func TestTeardown_RemovesExactEgressConfigDir(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Reconcile
+// Teardown error aggregation
 // ──────────────────────────────────────────────────────────────────────────────
+
+func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	deleteErr := errors.New("injected secret deletion failure")
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, deleteErr
+	})
+	b := backendkube.New(kube.NewClient(cs))
+
+	// A child below a regular file makes RemoveAll fail with ENOTDIR without
+	// relying on process permissions. Teardown must still attempt this cleanup
+	// after the Kubernetes deletion fails, then preserve both causes.
+	blockingParent := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blockingParent, []byte("fixture"), 0o600))
+	h := backend.Handle{
+		SpawnID: "spawn-cleanup-errors",
+		Backend: "kube",
+		Refs: map[string]string{
+			"namespace":         "runsecure-cleanup-errors",
+			"secret":            "rs-secret-cleanup-errors",
+			"egress_config_dir": filepath.Join(blockingParent, "spawn"),
+		},
+	}
+
+	err := b.Teardown(context.Background(), h, true)
+	require.Error(t, err)
+	require.ErrorIs(t, err, deleteErr)
+	require.ErrorContains(t, err, "teardown spawn \"spawn-cleanup-errors\"")
+	require.ErrorContains(t, err, "remove egress config")
+}
+
+// Reconcile
 
 func TestReconcile_FindsSpawnAfterSpawn(t *testing.T) {
 	b, _ := newBackend(t)
