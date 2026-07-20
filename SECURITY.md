@@ -49,6 +49,17 @@ Reduces the attack surface inside the container by removing tools and capabiliti
 
 Enforced by Docker flags when the container starts. Cannot be circumvented by code inside the container.
 
+**Note (runner rootfs):** the runner container's rootfs is writable, not
+read-only — the actions-runner writes `run-helper.sh` and other files into
+its own install directory at job start, and a read-only rootfs breaks every
+job. This is the one hardening axis relaxed on the runner; the proxy
+container's rootfs remains read-only, and every other runner control below
+(non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, resource
+limits, internal-only network, no host binds) stays intact. This holds on
+**both** backends — Compose sets `HostConfig.ReadonlyRootfs=false` on the
+runner only, and Kubernetes sets `readOnlyRootFilesystem: false` on the
+runner container only (proxy Pod containers stay read-only).
+
 | Flag | What it prevents | Verified by |
 |------|-----------------|-------------|
 | `--rm` | State persisting between jobs | `run-all-tests.sh` (cleanup test) |

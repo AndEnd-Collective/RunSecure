@@ -6,7 +6,12 @@
 # This script runs INSIDE a container to validate both security and function.
 #
 # Usage:
-#   docker run --rm [hardening flags] runner-node:24 /path/to/validate-runner.sh
+#   docker run --rm --entrypoint "" [hardening flags] runner-node:24 bash /path/to/validate-runner.sh
+#
+# Note (G2/G3): runner images bake an ENTRYPOINT that launches the JIT agent
+# and expects RUNNER_JIT_CONFIG[_FILE]. Pass --entrypoint "" to run this
+# script directly instead — see tests/validation/run-all-tests.sh for the
+# real invocation.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 # ============================================================================

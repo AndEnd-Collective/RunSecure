@@ -131,8 +131,9 @@ repos:
     max_concurrent: 3
 ```
 
-Create a `.env` file (gitignored — see `.gitignore:69`) that points the
-compose stack at your local images, PAT, and project workspace:
+Create a `.env` file (gitignored — see `infra/orchestrator/scopes/*` in
+`.gitignore`) that points the compose stack at your local images, PAT, and
+project workspace:
 
 ```sh
 cat > infra/orchestrator/scopes/datacentric.env <<EOF
@@ -142,18 +143,57 @@ RUNSECURE_ORCHESTRATOR_IMAGE=runsecure-orchestrator:local
 RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
 RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/runner-node:24
 RUNSECURE_PAT_FILE=$HOME/.config/runsecure/datacentric.pat
+RUNSECURE_PROJECTS_ROOT=$HOME/Code/Naor
 EOF
 ```
 
-Add a project bind-mount to `infra/orchestrator/compose.scope.yml` under
-`orchestrator.volumes`:
+`RUNSECURE_PROJECTS_ROOT` is the *parent* directory holding every repo
+checkout this scope will serve — `compose.scope.yml` mounts it once,
+read-only, at `/projects` inside the orchestrator container (the mount
+defaults to a harmless `/dev/null` when the variable is unset, so nothing
+breaks if you don't set it). Each repo's `project_dir` in the scope YAML
+must then point at the matching subdirectory, e.g. a checkout at
+`$RUNSECURE_PROJECTS_ROOT/datacentric` is `project_dir: /projects/datacentric`.
 
-```yaml
-      - $HOME/Code/Naor/datacentric:/projects/datacentric:ro
-```
+This means `infra/orchestrator/compose.scope.yml` never needs hand-editing
+per repo or per operator — the tracked file stays untouched, and everything
+operator- or project-specific lives in the gitignored `.env` file and scope
+YAML instead.
 
-(Per-repo bind paths must match each repo's `project_dir` in the scope
-YAML.)
+### Choosing runner images (and bringing your own)
+
+Each project's `.github/runner.yml` `runtime:` field selects which runner
+image the orchestrator spawns. The orchestrator resolves it from an env var
+in your scope `.env` file:
+
+- `runtime: node` → `RUNSECURE_RUNNER_IMAGE_NODE`
+- `runtime: python` → `RUNSECURE_RUNNER_IMAGE_PYTHON`
+- `runtime: rust` → `RUNSECURE_RUNNER_IMAGE_RUST`
+- anything else / unset → `RUNSECURE_RUNNER_IMAGE_DEFAULT`
+
+Point any of these at a **custom runner image** (your own registry digest)
+and it works on both backends with no code changes — the orchestrator
+applies the identical hardening to whatever image you name. Two requirements:
+
+1. **Allowlist it.** The socket-proxy only lets the daemon create containers
+   from digests in its allowlist. Add your image's `@sha256:…` digest to
+   `infra/socket-proxy/allowed-images.txt` (rebuild the socket-proxy image),
+   or use the `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` stopgap (see
+   Troubleshooting).
+2. **Satisfy the runner-image contract.** Your image MUST ship:
+   - the GitHub Actions runner at `/home/runner/actions-runner`, and
+   - RunSecure's JIT launcher at `/home/runner/entrypoint.sh`
+     (the orchestrator pins the runner's entrypoint/command to this path on
+     both backends, so it must exist and be executable by UID 1001).
+
+   **Easiest path — don't hand-roll an image.** Add your extra tools via the
+   project's `runner.yml` `tools:` block instead. `compose-image.sh` layers
+   them onto a RunSecure base image *before* finalize-hardening, so the
+   result inherits the runner binary, the baked entrypoint, and every
+   hardening property automatically. Only reach for a fully custom image ref
+   when the `tools:` block genuinely can't express what you need — and if you
+   do, the cleanest way to meet the contract is to build `FROM` your own base
+   and `COPY infra/scripts/entrypoint.sh /home/runner/entrypoint.sh` yourself.
 
 ---
 
@@ -232,7 +272,7 @@ runsecure.orchestrator.spawn.completed
 | Orchestrator exits with `auth.pat_file ... mode 0400` | PAT file has wrong perms | `chmod 0400 <pat>` |
 | `auth.pat_file ... no such file` | Bind-mount in compose.scope.yml is wrong | Verify `RUNSECURE_PAT_FILE` in .env points at the real file |
 | Many `runsecure.orchestrator.auth.degraded` events | PAT lacks Administration:RW for one or more listed repos | Re-issue with correct permissions; the orchestrator reloads on PAT-file mtime change |
-| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need |
+| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need. As a stopgap for a just-released digest not yet baked into the socket-proxy image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it in automatically, no tracked-file edits needed. |
 | Breaker stuck open (no spawns) | 5 consecutive spawn failures | `docker logs rs-orch-* \| grep breaker.opened` — fix the upstream cause; the breaker enters half-open after 5min cooldown |
 | Lots of `ratelimit.paused` events | GitHub API quota exhausted (rare at 15s polling) | Increase `poll_interval_seconds` or reduce scope size |
 | Runner containers accumulate (`docker ps` shows many) | Orchestrator died mid-flight without graceful drain | Restart it; A4 cold-start reconciliation re-counts in-flight; orphan proxy containers are torn down on the same path |

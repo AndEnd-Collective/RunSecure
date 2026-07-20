@@ -123,7 +123,7 @@ func hardPodSecCtx() *corev1.PodSecurityContext {
 }
 
 // hardContainerSecCtx returns the per-container SecurityContext shared by every
-// container in the stack.
+// container in the stack EXCEPT the runner (see runnerContainerSecCtx).
 func hardContainerSecCtx() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr(false),
@@ -133,6 +133,23 @@ func hardContainerSecCtx() *corev1.SecurityContext {
 			Drop: []corev1.Capability{"ALL"},
 		},
 	}
+}
+
+// runnerContainerSecCtx returns the runner container's SecurityContext. It is
+// identical to hardContainerSecCtx() EXCEPT ReadOnlyRootFilesystem is false
+// (G1): the GitHub Actions runner writes run-helper.sh (and other files) into
+// its own install dir (/home/runner/actions-runner) at job start, so a
+// read-only rootfs breaks every job. Only the runner is relaxed on this one
+// axis — the proxy containers keep hardContainerSecCtx() (read-only). This
+// mirrors the Compose backend (HostConfig.ReadonlyRootfs=false on the runner
+// only) and the run.sh path. All other runner hardening (no-privilege-
+// escalation, non-privileged, cap_drop ALL, RunAsNonRoot 1001, seccomp
+// RuntimeDefault, no host namespaces, no SA token, per-spawn NetworkPolicy)
+// stays intact.
+func runnerContainerSecCtx() *corev1.SecurityContext {
+	sc := hardContainerSecCtx()
+	sc.ReadOnlyRootFilesystem = ptr(false)
+	return sc
 }
 
 // objectMeta builds a standard ObjectMeta for spawn objects.
@@ -373,7 +390,12 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		Name:            "runner",
 		Image:           in.RunnerImage,
 		ImagePullPolicy: corev1.PullAlways,
-		SecurityContext: hardContainerSecCtx(),
+		// G2/G3: pin the launcher explicitly (belt-and-suspenders) so a
+		// custom runner image that omits or overrides its ENTRYPOINT still
+		// starts the JIT agent. In k8s, Command overrides the image ENTRYPOINT;
+		// leaving Args empty preserves the baked default behavior.
+		Command:         []string{backend.RunnerEntrypoint},
+		SecurityContext: runnerContainerSecCtx(),
 		Env:             runnerEnv,
 		VolumeMounts:    []corev1.VolumeMount{tmpMount, jitMount},
 	}

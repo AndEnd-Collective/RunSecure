@@ -64,10 +64,16 @@ jobs:
 
       - name: Run security validation (Node)
         run: |
+          # G2/G3: runner images now bake an ENTRYPOINT that launches the JIT
+          # agent (expects RUNNER_JIT_CONFIG[_FILE]). This check runs an ad
+          # hoc verification command instead, so clear the entrypoint to
+          # fully replace the container's process, as before the image
+          # shipped an ENTRYPOINT.
           docker run --rm \
             --user 1001:0 \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
+            --entrypoint "" \
             runner-node:24 \
             bash -c '
               echo "=== Security Checks ==="
@@ -81,10 +87,13 @@ jobs:
 
       - name: Run security validation (Python)
         run: |
+          # G2/G3: see the Node step above — clear the baked ENTRYPOINT so
+          # this ad hoc verification command replaces the process.
           docker run --rm \
             --user 1001:0 \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
+            --entrypoint "" \
             runner-python:3.12 \
             bash -c '
               echo "=== Security Checks ==="

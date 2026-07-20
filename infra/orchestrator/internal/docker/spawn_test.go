@@ -110,12 +110,124 @@ func TestSpawn_ProxyDualHomed_RunnerInternalOnly(t *testing.T) {
 	if !hasEnv(runner.Env, "HTTPS_PROXY=http://proxy:3128") {
 		t.Fatal("runner HTTPS_PROXY not set")
 	}
-	if !hasEnv(runner.Env, "NO_PROXY=localhost") {
+	if !hasEnv(runner.Env, "NO_PROXY=localhost,127.0.0.1") {
 		t.Fatal("runner NO_PROXY not set")
 	}
 	// Start order: proxy must come before runner.
 	if len(fc.started) < 2 || fc.started[0] != "id-proxy" {
 		t.Fatalf("proxy must start before runner; start order: %v", fc.started)
+	}
+}
+
+// TestSpawn_RunnerRootfsWritable verifies fix G1: the runner container's
+// rootfs is writable (ReadonlyRootfs == false) because the actions-runner
+// writes run-helper.sh and other files into its install directory at job
+// start; a read-only rootfs breaks every job. The proxy MUST remain
+// read-only — only the runner's hardening is relaxed on this one axis.
+func TestSpawn_RunnerRootfsWritable(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := fc.created["runner"]
+	if runner.HostConfig.ReadonlyRootfs {
+		t.Fatal("G1: runner rootfs must be writable (ReadonlyRootfs == false)")
+	}
+	proxy := fc.created["proxy"]
+	if !proxy.HostConfig.ReadonlyRootfs {
+		t.Fatal("SECURITY: proxy rootfs must remain read-only")
+	}
+}
+
+// TestSpawn_RunnerProxyEnv_BothCasesAndLocalhostIP verifies fix G4: the
+// runner env carries BOTH uppercase and lowercase proxy vars (some tools
+// only honor lowercase), and NO_PROXY/no_proxy include 127.0.0.1 in
+// addition to localhost.
+func TestSpawn_RunnerProxyEnv_BothCasesAndLocalhostIP(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := fc.created["runner"]
+	for _, kv := range []string{
+		"HTTP_PROXY=http://proxy:3128",
+		"HTTPS_PROXY=http://proxy:3128",
+		"NO_PROXY=localhost,127.0.0.1",
+		"http_proxy=http://proxy:3128",
+		"https_proxy=http://proxy:3128",
+		"no_proxy=localhost,127.0.0.1",
+	} {
+		if !hasEnv(runner.Env, kv) {
+			t.Fatalf("runner env must contain %q, got %v", kv, runner.Env)
+		}
+	}
+}
+
+// TestSpawn_RunnerEntrypoint_SetToConstant verifies fixes G2/G3: the runner
+// container's Entrypoint is explicitly set to RunnerEntrypoint
+// (/home/runner/entrypoint.sh) as belt-and-suspenders in case an image
+// overrides ENTRYPOINT. The proxy container must NOT have this set (it has
+// its own entrypoint baked into the proxy image).
+func TestSpawn_RunnerEntrypoint_SetToConstant(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := fc.created["runner"]
+	if len(runner.Entrypoint) != 1 || runner.Entrypoint[0] != RunnerEntrypoint {
+		t.Fatalf("runner Entrypoint must be [%q], got %v", RunnerEntrypoint, runner.Entrypoint)
+	}
+	proxy := fc.created["proxy"]
+	if len(proxy.Entrypoint) != 0 {
+		t.Fatalf("proxy Entrypoint must not be set by Spawn, got %v", proxy.Entrypoint)
+	}
+}
+
+// TestSpawn_SecurityHardeningIntactOnRunner is a regression guard: despite
+// G1 relaxing ReadonlyRootfs, every other runner hardening property must
+// remain intact — no host binds, cap_drop ALL, no-new-privileges, and it
+// must never be attached to the egress network.
+func TestSpawn_SecurityHardeningIntactOnRunner(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		SpawnID: "s1", NetworkID: "net-int", EgressNetwork: "spawn-egress",
+		RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+		ResourcesMemory: 1 << 30, ResourcesNanoCPUs: 2_000_000_000, ResourcesPIDs: 2048,
+		SeccompProfilePath: "/host/seccomp/node-runner.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := fc.created["runner"]
+	if len(runner.HostConfig.Binds) != 0 {
+		t.Fatalf("SECURITY: runner must have no host binds, got %v", runner.HostConfig.Binds)
+	}
+	if len(runner.HostConfig.CapDrop) != 1 || runner.HostConfig.CapDrop[0] != "ALL" {
+		t.Fatalf("SECURITY: runner must cap_drop ALL, got %v", runner.HostConfig.CapDrop)
+	}
+	foundNNP := false
+	for _, s := range runner.HostConfig.SecurityOpt {
+		if s == "no-new-privileges:true" {
+			foundNNP = true
+		}
+	}
+	if !foundNNP {
+		t.Fatalf("SECURITY: runner must set no-new-privileges:true, got %v", runner.HostConfig.SecurityOpt)
+	}
+	if _, ok := runner.NetworkingConfig.EndpointsConfig["spawn-egress"]; ok {
+		t.Fatal("SECURITY: runner must never be attached to the egress network")
 	}
 }
 

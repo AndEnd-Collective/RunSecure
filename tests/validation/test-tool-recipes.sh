@@ -94,6 +94,11 @@ HARDENING_FLAGS=(
     --user 1001:0
     --security-opt=no-new-privileges
     --cap-drop=ALL
+    # G2/G3: base.Dockerfile now bakes an ENTRYPOINT that launches the JIT
+    # agent. These smoke tests run arbitrary tool-verification commands
+    # instead, so clear the entrypoint to fully replace the process, as
+    # before the image shipped an ENTRYPOINT.
+    --entrypoint ""
 )
 
 # ============================================================================
