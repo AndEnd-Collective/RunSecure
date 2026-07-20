@@ -75,18 +75,22 @@ services:
     # orchestrator). Named-volume delivery avoids the host-ownership problem:
     # the init runs as root and writes the secret into the volume with the
     # correct uid/mode before the orchestrator starts.
-    # CAP_CHOWN is required to change file ownership; dropped when this exits.
+    # CHOWN transfers the copy to the orchestrator UID; DAC_OVERRIDE permits
+    # root to read the host user's mode-0400 bind. Both drop when this exits.
     image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
     container_name: rs-test-pat-init
     restart: "no"
+    read_only: true
     user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
     entrypoint:
       - sh
       - -euc
       - |
         cp /host-pat /secret/runsecure-pat
-        chown 65532:65532 /secret/runsecure-pat
         chmod 400 /secret/runsecure-pat
+        chown 65532:65532 /secret/runsecure-pat
     volumes:
       - ./testdata/pat:/host-pat:ro
       - pat-secret:/secret

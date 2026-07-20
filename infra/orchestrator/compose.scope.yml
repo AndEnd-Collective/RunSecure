@@ -111,8 +111,10 @@ services:
       - -euc
       - |
         cp /host-pat /secret/runsecure-pat
-        chown 65532:65532 /secret/runsecure-pat
+        # Set the mode while root still owns the copy. After chown, chmod
+        # would require CAP_FOWNER, which this least-privilege init lacks.
         chmod 400 /secret/runsecure-pat
+        chown 65532:65532 /secret/runsecure-pat
     volumes:
       - ${RUNSECURE_PAT_FILE:?RUNSECURE_PAT_FILE is required}:/host-pat:ro
       - pat-secret:/secret

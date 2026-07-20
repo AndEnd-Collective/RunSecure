@@ -78,6 +78,11 @@ assert pat_mounts["/secret"]["type"] == "volume"
 assert pat_init["read_only"] is True
 assert "ALL" in pat_init["cap_drop"]
 assert set(pat_init["cap_add"]) == {"CHOWN", "DAC_OVERRIDE"}
+pat_init_script = pat_init["entrypoint"][2]
+assert pat_init_script.index("chmod 400 /secret/runsecure-pat") < pat_init_script.index(
+    "chown 65532:65532 /secret/runsecure-pat"
+)
+assert "FOWNER" not in pat_init["cap_add"]
 assert orchestrator["depends_on"]["pat-init"]["condition"] == "service_completed_successfully"
 
 socket_mounts = {mount["target"]: mount for mount in socket_proxy["volumes"]}
