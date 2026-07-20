@@ -187,9 +187,8 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
-	// State counter is bumped here (Acquire already incremented; this just
-	// transitions ownership conceptually — the counter stays at +1 until
-	// teardown decrements it via ReleaseSemaphores in the defer).
+	// The pending reservation now represents a live runner. It remains counted
+	// against repository and global capacity until the deferred release runs.
 	_ = w.deps.Emit().EmitSpawnRunnerCreated(cornerstone.SpawnRunnerCreatedFields{
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		ContainerName: containerName, ImageDigest: imageDigest,
@@ -233,11 +232,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return errors.New("spawn timed out")
 	}
-	if err := w.deregister(ctx, intent.Repo, jit.RunnerID); err != nil {
-		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
-		return w.fail(intent, containerName, "runner_deregistration_failed", err)
-	}
-
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	runnerContainerID := h.Refs["runner"]
 	w.deps.State().RecordCompleted()
@@ -246,6 +240,11 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		ContainerName: containerName, GitHubRunnerID: jit.RunnerID,
 		ExitCode: exitCode, DurationMillis: durationMs,
 	})
+	if err := w.deregister(ctx, intent.Repo, jit.RunnerID); err != nil {
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
+		return w.fail(intent, containerName, "runner_deregistration_failed", err)
+	}
+
 	if exitCode == 0 {
 		w.recordSuccessAndMaybeEmit(intent.Scope, intent.Repo)
 		_ = w.deps.Emit().EmitSpawnCompleted(cornerstone.SpawnCompletedFields{
@@ -282,7 +281,9 @@ func (w *SpawnWorker) deregister(ctx context.Context, repo string, runnerID int6
 	if runnerID <= 0 {
 		return nil
 	}
-	if err := w.deps.GitHub().DeleteRunner(ctx, repo, runnerID); err != nil {
+	cleanupCtx, cancel := runnerCleanupContext(ctx)
+	defer cancel()
+	if err := w.deps.GitHub().DeleteRunner(cleanupCtx, repo, runnerID); err != nil {
 		return err
 	}
 	w.deps.State().RecordDeregistered()
@@ -305,7 +306,9 @@ func (w *SpawnWorker) fail(intent SpawnIntent, containerName, reason string, err
 // a job. Implements A1: delete the orphan runner registration.
 func (w *SpawnWorker) failAndLeak(ctx context.Context, intent SpawnIntent, containerName, reason string, err error, runnerID int64) error {
 	if runnerID > 0 {
-		if delErr := w.deps.GitHub().DeleteRunner(ctx, intent.Repo, runnerID); delErr == nil {
+		cleanupCtx, cancel := runnerCleanupContext(ctx)
+		defer cancel()
+		if delErr := w.deps.GitHub().DeleteRunner(cleanupCtx, intent.Repo, runnerID); delErr == nil {
 			_ = w.deps.Emit().EmitRunnerLeakCleaned(cornerstone.RunnerLeakCleanedFields{
 				Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 				GitHubRunnerID: runnerID,
@@ -313,6 +316,14 @@ func (w *SpawnWorker) failAndLeak(ctx context.Context, intent SpawnIntent, conta
 		}
 	}
 	return w.fail(intent, containerName, reason, err)
+}
+
+// runnerCleanupContext bounds GitHub cleanup independently from the worker
+// context. Shutdown cancels workers only after the drain deadline; reusing that
+// cancelled context would make DeleteRunner fail immediately and leave an
+// orphaned JIT registration.
+func runnerCleanupContext(context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), teardownGracePeriod())
 }
 
 // recordFailureAndMaybeEmit calls the breaker's RecordFailure and emits

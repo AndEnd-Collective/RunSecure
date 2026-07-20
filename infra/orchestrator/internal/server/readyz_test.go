@@ -28,7 +28,7 @@ func TestReadyz_ReadyOnlyAfterSuccessfulFreshDemandAndBackend(t *testing.T) {
 	rr := httpRec()
 	NewReadyz(d).ServeHTTP(rr, httpReq(http.MethodGet, "/readyz"))
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.JSONEq(t, `{"status":"ready"}`, rr.Body.String())
+	require.JSONEq(t, `{"status":"ready","ready":true}`, rr.Body.String())
 }
 
 func TestReadyz_FailsForBackendDependency(t *testing.T) {
@@ -37,6 +37,7 @@ func TestReadyz_FailsForBackendDependency(t *testing.T) {
 	rr := httpRec()
 	NewReadyz(d).ServeHTTP(rr, httpReq(http.MethodGet, "/readyz"))
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	require.Contains(t, rr.Body.String(), `"ready":false`)
 	require.Contains(t, rr.Body.String(), "backend_unreachable")
 }
 

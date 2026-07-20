@@ -157,6 +157,7 @@ func Run(ctx context.Context, scopePath string) error {
 				// An intent whose load won the race immediately before Store(true)
 				// is already admitted work and participates in the drain deadline.
 				if draining.Load() {
+					pdeps.ReleaseReservation(intent.SpawnID)
 					continue
 				}
 				_ = worker.Execute(workerCtx, intent)
@@ -190,6 +191,7 @@ func Run(ctx context.Context, scopePath string) error {
 	// closed channel. Active runners drain until the deadline; only then is their
 	// context cancelled so SpawnWorker can force-teardown with a fresh cleanup
 	// context rather than the already-cancelled worker context.
+	st.SetDraining(true)
 	drainTimeout := time.Duration(envIntOr("RUNSECURE_DRAIN_SECONDS", 60)) * time.Second
 	result := drainAndStop(drainTimeout, stopPolling, pollDone, intentCh,
 		&draining, stopWorkers, workersDone)

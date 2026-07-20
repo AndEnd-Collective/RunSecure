@@ -21,6 +21,7 @@ type ReadyDeps interface {
 
 type readinessResponse struct {
 	Status  string   `json:"status"`
+	Ready   bool     `json:"ready"`
 	Reasons []string `json:"reasons,omitempty"`
 }
 
@@ -38,10 +39,10 @@ func (h *Readyz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(reasons)
 	w.Header().Set("Content-Type", "application/json")
 	status := http.StatusOK
-	body := readinessResponse{Status: "ready"}
+	body := readinessResponse{Status: "ready", Ready: true}
 	if len(reasons) > 0 {
 		status = http.StatusServiceUnavailable
-		body = readinessResponse{Status: "not_ready", Reasons: reasons}
+		body = readinessResponse{Status: "not_ready", Ready: false, Reasons: reasons}
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)

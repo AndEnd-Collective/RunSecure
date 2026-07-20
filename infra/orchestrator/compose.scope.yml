@@ -94,6 +94,30 @@ services:
       - egress-configs:/data
     security_opt: ["no-new-privileges:true"]
 
+  pat-init:
+    # The operator requires a host PAT owned by the invoking user at mode 0400.
+    # UID 65532 in the orchestrator cannot read that bind mount on native Linux,
+    # so copy it into an owned named volume before the service starts. The host
+    # file remains read-only and is never exposed through the environment.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-orch-${RUNSECURE_SCOPE}-pat-init
+    restart: "no"
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        cp /host-pat /secret/runsecure-pat
+        chown 65532:65532 /secret/runsecure-pat
+        chmod 400 /secret/runsecure-pat
+    volumes:
+      - ${RUNSECURE_PAT_FILE:?RUNSECURE_PAT_FILE is required}:/host-pat:ro
+      - pat-secret:/secret
+    security_opt: ["no-new-privileges:true"]
+
   orchestrator:
     image: ${RUNSECURE_ORCHESTRATOR_IMAGE}
     container_name: rs-orch-${RUNSECURE_SCOPE}
@@ -113,6 +137,8 @@ services:
       orch-egress:
         condition: service_started
       egress-init:
+        condition: service_completed_successfully
+      pat-init:
         condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
@@ -136,7 +162,7 @@ services:
       # variables are required so `docker compose config` fails before launch
       # instead of silently substituting a file that cannot serve the scope.
       - ${RUNSECURE_SCOPE_FILE_HOST:?RUNSECURE_SCOPE_FILE_HOST is required}:/etc/runsecure/scope.yml:ro
-      - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
+      - pat-secret:/run/secrets:ro
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
       - egress-configs:/var/run/runsecure/egress:rw
@@ -153,6 +179,8 @@ services:
 volumes:
   egress-configs:
     name: ${RUNSECURE_SCOPE}-egress-configs
+  pat-secret:
+    name: ${RUNSECURE_SCOPE}-pat-secret
 
 networks:
   orch-internal:

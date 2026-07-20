@@ -209,6 +209,8 @@ func TestSpawn_DeregistrationFailureFailsRuntimeCleanup(t *testing.T) {
 	})
 	require.ErrorIs(t, err, github.ErrAuthFailed)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_deregistration_failed"`)
+	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
+	require.Equal(t, int64(1), d.st.Snapshot().CompletedTotal)
 	require.Zero(t, d.st.Snapshot().DeregistrationsTotal)
 }
 
@@ -651,6 +653,27 @@ func TestDeregister_ZeroRunnerIDIsNoop(t *testing.T) {
 	d := newSpawnDeps(t)
 	require.NoError(t, NewSpawnWorker(d).deregister(context.Background(), "o/r", 0))
 	require.Zero(t, d.st.Snapshot().DeregistrationsTotal)
+}
+
+func TestDeregister_CancelledWorkerUsesFreshCleanupContext(t *testing.T) {
+	d := newSpawnDeps(t)
+	deleteCalls := atomic.Int64{}
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete {
+			deleteCalls.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(ghSrv.Close)
+	gh, err := github.NewClient(ghSrv.URL, makePATFile(t))
+	require.NoError(t, err)
+	d.gh = gh
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, NewSpawnWorker(d).deregister(workerCtx, "o/r", 99))
+	require.Equal(t, int64(1), deleteCalls.Load())
+	require.Equal(t, int64(1), d.st.Snapshot().DeregistrationsTotal)
 }
 
 // Mutation kill: spawn.go `if imageDigest == ""`. Mutation `!=` would
