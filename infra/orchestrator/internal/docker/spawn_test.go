@@ -171,6 +171,25 @@ func TestSpawn_RunnerProxyEnv_BothCasesAndLocalhostIP(t *testing.T) {
 	}
 }
 
+func TestSpawn_RunnerReceivesNonSecretProvenance(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		Scope: "vladislav", Repo: "NaorPenso/vladislav", SpawnID: "spawn-123",
+		Version: "v2.1.8", BuildSHA: "abc123", NetworkID: "net-int",
+		EgressNetwork: "spawn-egress", RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	require.NoError(t, err)
+	runner := fc.created["runner"]
+	for _, kv := range []string{
+		"RUNSECURE_SCOPE=vladislav",
+		"RUNSECURE_VERSION=v2.1.8",
+		"RUNSECURE_BUILD_SHA=abc123",
+		"RUNSECURE_SPAWN_ID=spawn-123",
+	} {
+		require.True(t, hasEnv(runner.Env, kv), "runner env missing %q", kv)
+	}
+}
+
 // TestSpawn_RunnerEntrypoint_SetToConstant verifies fixes G2/G3: the runner
 // container's Entrypoint is explicitly set to RunnerEntrypoint
 // (/home/runner/entrypoint.sh) as belt-and-suspenders in case an image

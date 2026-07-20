@@ -92,11 +92,23 @@ func (p *Poll) tick(ctx context.Context) {
 			continue
 		}
 
-		queued, err := p.deps.GitHub().QueuedJobs(ctx, repo.Repo)
+		p.deps.RecordPollAttempt(repo.Repo)
+		labels, err := p.deps.LabelsForRepo(repo.Repo)
 		if err != nil {
+			p.deps.RecordPollFailure(repo.Repo, "runner_config", err.Error())
+			continue
+		}
+		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels)
+		if err != nil {
+			lim := github.ErrorRateLimit(err)
+			p.deps.RecordRateLimit(p.scope.Name, lim)
+			p.deps.RecordPollFailure(repo.Repo, classifyPollError(err), err.Error())
 			p.handlePollError(repo.Repo, err)
 			continue
 		}
+		p.deps.RecordRateLimit(p.scope.Name, demand.RateLimit)
+		queued := demand.Count()
+		p.deps.RecordPollSuccess(repo.Repo, queued)
 		if queued > 0 {
 			_ = p.deps.Emit().EmitPollQueuedJobsObserved(cornerstone.PollQueuedJobsObservedFields{
 				Scope: p.scope.Name, Repo: repo.Repo, Count: queued,
@@ -116,12 +128,27 @@ func (p *Poll) tick(ctx context.Context) {
 				Repo:    repo.Repo,
 				SpawnID: p.deps.NewSpawnID(),
 			}
+			if !p.deps.TryReserve(intent.SpawnID, intent.Repo, repo.MaxConcurrent, p.scope.GlobalMaxRunners) {
+				break
+			}
 			select {
 			case p.deps.IntentChannel() <- intent:
 			case <-ctx.Done():
+				p.deps.ReleaseReservation(intent.SpawnID)
 				return
 			}
 		}
+	}
+}
+
+func classifyPollError(err error) string {
+	switch {
+	case errors.Is(err, github.ErrRateLimited):
+		return "github_rate_limited"
+	case errors.Is(err, github.ErrAuthFailed):
+		return "github_auth_failed"
+	default:
+		return "github_demand_failed"
 	}
 }
 
@@ -135,7 +162,7 @@ func (p *Poll) handlePollError(repo string, err error) {
 		})
 	case errors.Is(err, github.ErrAuthFailed):
 		_ = p.deps.Emit().EmitAuthDegraded(cornerstone.AuthDegradedFields{
-			Scope: p.scope.Name, Repo: repo, Status: 401,
+			Scope: p.scope.Name, Repo: repo, Status: github.ErrorStatus(err),
 		})
 	default:
 		// Other errors: do not retry-storm or crash; next poll tries again.

@@ -57,6 +57,11 @@ func Run(ctx context.Context, scopePath string) error {
 		return err
 	}
 	st := state.New()
+	repoNames := make([]string, 0, len(s.Repos))
+	for _, repo := range s.Repos {
+		repoNames = append(repoNames, repo.Repo)
+	}
+	st.Configure(repoNames, s.GlobalMaxRunners, s.GlobalMaxRunners, version, buildSHA)
 
 	// Server (healthz + metrics + snapshot) starts first so /healthz can
 	// surface "we're booting" status to docker HEALTHCHECK / k8s probes.
@@ -100,21 +105,26 @@ func Run(ctx context.Context, scopePath string) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: backend init: %w", err)
 	}
+	serverDeps.setBackendReady(func(ctx context.Context) error {
+		_, err := be.Reconcile(ctx, s.Name)
+		return err
+	})
 	pdeps := &productionDeps{
-		gh:         gh,
-		dc:         dc,
-		be:         be,
-		em:         em,
-		clk:        clk,
-		st:         st,
-		eg:         eg,
-		basePolicy: basePolicy,
-		allowKeys:  s.AllowProjectOverrides,
-		bucket:     rl,
-		brks:       brks,
-		intents:    intentCh,
-		scopeRef:   s,
-		serverDeps: serverDeps,
+		gh:          gh,
+		dc:          dc,
+		be:          be,
+		em:          em,
+		clk:         clk,
+		st:          st,
+		eg:          eg,
+		basePolicy:  basePolicy,
+		allowKeys:   s.AllowProjectOverrides,
+		bucket:      rl,
+		brks:        brks,
+		intents:     intentCh,
+		scopeRef:    s,
+		serverDeps:  serverDeps,
+		runnerCache: map[string]*orchestrator.RunnerYMLSnapshot{},
 	}
 	serverDeps.breakerSnap = brks.snapshot
 
@@ -138,7 +148,7 @@ func Run(ctx context.Context, scopePath string) error {
 	defer stopWorkers()
 	var draining atomic.Bool
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for i := 0; i < s.GlobalMaxRunners; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -272,13 +282,15 @@ func (b *breakerMap) snapshot() map[string]bool {
 // ------------- server-deps shim ----------------------------------------
 
 type serverDeps struct {
-	st          *state.State
-	clk         clock.Clock
-	intervalS   int
-	lastPoll    atomic.Pointer[time.Time]
-	api         sync.Map // server.APICallKey → *int64
-	spawns      sync.Map
-	breakerSnap func() map[string]bool
+	st           *state.State
+	clk          clock.Clock
+	intervalS    int
+	lastPoll     atomic.Pointer[time.Time]
+	api          sync.Map // server.APICallKey → *int64
+	spawns       sync.Map
+	breakerSnap  func() map[string]bool
+	readyMu      sync.RWMutex
+	backendReady func(context.Context) error
 }
 
 func newServerDeps(st *state.State, clk clock.Clock, intervalS int) *serverDeps {
@@ -295,9 +307,35 @@ func (d *serverDeps) LastPollAt() time.Time {
 	}
 	return *p
 }
-func (d *serverDeps) Now() time.Time                { return d.clk.Now() }
-func (d *serverDeps) PollIntervalSeconds() int      { return d.intervalS }
-func (d *serverDeps) StateSnapshot() state.Snapshot { return d.st.Snapshot() }
+func (d *serverDeps) Now() time.Time           { return d.clk.Now() }
+func (d *serverDeps) PollIntervalSeconds() int { return d.intervalS }
+func (d *serverDeps) StateSnapshot() state.Snapshot {
+	snap := d.st.Snapshot()
+	if d.breakerSnap != nil {
+		for repo, open := range d.breakerSnap() {
+			r := snap.PerRepo[repo]
+			r.BreakerOpen = open
+			snap.PerRepo[repo] = r
+		}
+	}
+	return snap
+}
+
+func (d *serverDeps) setBackendReady(fn func(context.Context) error) {
+	d.readyMu.Lock()
+	d.backendReady = fn
+	d.readyMu.Unlock()
+}
+
+func (d *serverDeps) BackendReady(ctx context.Context) error {
+	d.readyMu.RLock()
+	fn := d.backendReady
+	d.readyMu.RUnlock()
+	if fn == nil {
+		return errors.New("backend not initialized")
+	}
+	return fn(ctx)
+}
 func (d *serverDeps) APICalls() map[server.APICallKey]int64 {
 	out := map[server.APICallKey]int64{}
 	d.api.Range(func(k, v any) bool {
@@ -325,20 +363,22 @@ func (d *serverDeps) BreakerOpen() map[string]bool {
 // ------------- production deps for poll + spawn ------------------------
 
 type productionDeps struct {
-	gh         *github.Client
-	dc         docker.Client
-	be         backend.Backend
-	em         *cornerstone.Emitter
-	clk        clock.Clock
-	st         *state.State
-	eg         egress.Generator
-	basePolicy security.Policy
-	allowKeys  []string
-	bucket     *state.TokenBucket
-	brks       *breakerMap
-	intents    chan orchestrator.SpawnIntent
-	scopeRef   *config.Scope
-	serverDeps *serverDeps
+	gh          *github.Client
+	dc          docker.Client
+	be          backend.Backend
+	em          *cornerstone.Emitter
+	clk         clock.Clock
+	st          *state.State
+	eg          egress.Generator
+	basePolicy  security.Policy
+	allowKeys   []string
+	bucket      *state.TokenBucket
+	brks        *breakerMap
+	intents     chan orchestrator.SpawnIntent
+	scopeRef    *config.Scope
+	serverDeps  *serverDeps
+	runnerMu    sync.Mutex
+	runnerCache map[string]*orchestrator.RunnerYMLSnapshot
 
 	// rate-limit state
 	rlMu     sync.Mutex
@@ -359,12 +399,27 @@ func (p *productionDeps) Egress() orchestrator.EgressGenerator {
 func (p *productionDeps) State() orchestrator.StateLike { return p.st }
 
 func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot, error) {
+	p.runnerMu.Lock()
+	defer p.runnerMu.Unlock()
+	if p.runnerCache == nil {
+		p.runnerCache = map[string]*orchestrator.RunnerYMLSnapshot{}
+	}
 	for _, r := range p.scopeRef.Repos {
 		if r.Repo != repo {
 			continue
 		}
 		if p.scopeRef.Backend == "kube" {
-			return loadRunnerYMLFromAPI(context.Background(), p.gh, p.st, repo)
+			snapshot, err := loadRunnerYMLFromAPI(context.Background(), p.gh, p.st, repo)
+			if errors.Is(err, errRunnerYMLNotModified) {
+				if cached, ok := p.runnerCache[repo]; ok {
+					return cached, nil
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
+			p.runnerCache[repo] = snapshot
+			return snapshot, nil
 		}
 		yml, err := runneryml.Parse(filepath_join(r.ProjectDir, ".github", "runner.yml"))
 		if err != nil {
@@ -376,7 +431,9 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 		if err := yml.ValidateEgress(); err != nil {
 			return nil, fmt.Errorf("runner.yml egress validation: %w", err)
 		}
-		return &orchestrator.RunnerYMLSnapshot{YML: yml}, nil
+		snapshot := &orchestrator.RunnerYMLSnapshot{YML: yml}
+		p.runnerCache[repo] = snapshot
+		return snapshot, nil
 	}
 	return nil, errors.New("unknown repo")
 }
@@ -479,6 +536,34 @@ func (p *productionDeps) NewSpawnID() string {
 	return fmt.Sprintf("%d%d", time.Now().UnixNano(), nextSeq())
 }
 
+func (p *productionDeps) LabelsForRepo(repo string) ([]string, error) {
+	snapshot, err := p.RunnerYML(repo)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), snapshot.YML.Labels...), nil
+}
+
+func (p *productionDeps) TryReserve(spawnID, repo string, repoCap, globalCap int) bool {
+	return p.st.TryReserve(spawnID, repo, repoCap, globalCap, p.clk.Now())
+}
+
+func (p *productionDeps) ReleaseReservation(spawnID string) {
+	p.st.ReleaseReservation(spawnID)
+}
+
+func (p *productionDeps) RecordPollAttempt(repo string) {
+	p.st.RecordPollAttempt(repo, p.clk.Now())
+}
+
+func (p *productionDeps) RecordPollSuccess(repo string, queued int) {
+	p.st.RecordPollSuccess(repo, queued, p.clk.Now())
+}
+
+func (p *productionDeps) RecordPollFailure(repo, class, detail string) {
+	p.st.RecordPollFailure(repo, class, detail)
+}
+
 // RecordPollTick (bug #2 fix) updates the serverDeps freshness signal that
 // /healthz reads. Without this, lastPoll is set once at boot and /healthz
 // goes red after 3*poll_interval and stays there.
@@ -532,6 +617,11 @@ func (p *productionDeps) RateLimiter() orchestrator.TokenBucket {
 	return tokenBucketAdapter{b: p.bucket}
 }
 func (p *productionDeps) Breakers() orchestrator.BreakerMap { return p.brks }
+func (p *productionDeps) LifecycleTiming() orchestrator.LifecycleTiming {
+	return orchestrator.DefaultLifecycleTiming()
+}
+func (p *productionDeps) Version() string  { return version }
+func (p *productionDeps) BuildSHA() string { return buildSHA }
 
 // ------------- small adapters --------------------------------------------
 

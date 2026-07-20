@@ -67,6 +67,16 @@ func NewSpawnWorker(deps SpawnDeps) *SpawnWorker {
 // success or a wrapped error on failure (in either case, the result is
 // also reported via Cornerstone events).
 func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
+	// Poll normally creates the reservation before enqueueing. The defensive
+	// TryReserve keeps direct callers fail-closed without double-counting an
+	// existing reservation.
+	if !w.deps.State().HasReservation(intent.SpawnID, intent.Repo) &&
+		!w.deps.State().TryReserve(intent.SpawnID, intent.Repo,
+			w.deps.RepoMaxConcurrent(intent.Repo), w.deps.GlobalMaxRunners(), w.deps.Clock().Now()) {
+		return ErrSemaphoreUnavailable
+	}
+	defer w.deps.State().ReleaseReservation(intent.SpawnID)
+
 	// Pre-step: B1 rate limit. Defensive — the poll loop already shaped the
 	// stream, but a misconfigured pool could still try to spawn faster than
 	// the bucket allows. Emit spawn.failed on deny so a rate-limited backlog
@@ -79,15 +89,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		})
 		return ErrRateLimitBackoff
 	}
-
-	// Step 0: acquire semaphores. Defensive — poll loop already filtered, but
-	// a race between two workers picking up adjacent intents could collide.
-	if !w.deps.State().AcquireSemaphores(intent.Repo,
-		w.deps.RepoMaxConcurrent(intent.Repo),
-		w.deps.GlobalMaxRunners()) {
-		return ErrSemaphoreUnavailable
-	}
-	defer w.deps.State().ReleaseSemaphores(intent.Repo)
 
 	containerName := fmt.Sprintf("rs-%s-runner", intent.SpawnID)
 
@@ -124,6 +125,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 		ContainerName: containerName, GitHubRunnerID: jit.RunnerID,
 	})
+	w.deps.State().RecordJIT(intent.SpawnID, jit.RunnerID, containerName)
 
 	// Step 2: generate per-spawn egress configs.
 	// Render also returns the resolved operator-approved private CIDRs so they
@@ -163,6 +165,8 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		Scope:               intent.Scope,
 		Repo:                intent.Repo,
 		SpawnID:             intent.SpawnID,
+		Version:             w.deps.Version(),
+		BuildSHA:            w.deps.BuildSHA(),
 		RunnerImage:         imageDigest,
 		ProxyImage:          w.deps.ProxyImageDigest(),
 		SeccompProfilePath:  w.deps.SeccompProfileHostPath(r.Orchestrator.SeccompProfile),
@@ -195,16 +199,30 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		NetworkName: h.Refs["network_name"],
 	})
 
-	// Step 6: wait for exit OR wall-clock timeout (A2).
+	// Step 6: observe GitHub delivery while waiting for process exit. A runner
+	// that exits zero without ever being assigned is a runtime failure.
 	start := w.deps.Clock().Now()
 	timeoutSecs := defaultTimeoutSeconds(snapshot.YML.Orchestrator.TimeoutSeconds)
 	timeout := secondsToDuration(timeoutSecs)
-	exitCode, timedOut := w.deps.Backend().WaitForExit(ctx, h, timeout)
+	lifecycle := w.waitForLifecycle(ctx, intent, containerName, jit.RunnerID, h, timeout)
+	exitCode, timedOut := lifecycle.exitCode, lifecycle.timedOut
 
-	// Step 7: teardown.
-	teardownSpawn(ctx, w.deps.Backend(), h, timedOut)
+	// Step 7: teardown. Lifecycle failures are force conditions, and cleanup
+	// always receives a fresh bounded context so cancellation cannot leak the
+	// runner/proxy resources.
+	teardownSpawn(ctx, w.deps.Backend(), h, timedOut || lifecycle.err != nil)
+
+	if lifecycle.err != nil {
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
+		if lifecycle.unassigned {
+			w.deps.State().RecordUnassignedExit()
+		}
+		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
+		return w.fail(intent, containerName, lifecycle.failureReason, lifecycle.err)
+	}
 
 	if timedOut {
+		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
 		_ = w.deps.Emit().EmitSpawnTimeoutForcedTeardown(cornerstone.SpawnTimeoutForcedTeardownFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
@@ -215,9 +233,19 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
 		return errors.New("spawn timed out")
 	}
+	if err := w.deregister(ctx, intent.Repo, jit.RunnerID); err != nil {
+		w.recordFailureAndMaybeEmit(intent.Scope, intent.Repo)
+		return w.fail(intent, containerName, "runner_deregistration_failed", err)
+	}
 
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	runnerContainerID := h.Refs["runner"]
+	w.deps.State().RecordCompleted()
+	_ = w.deps.Emit().EmitRunnerCompleted(cornerstone.RunnerCompletedFields{
+		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+		ContainerName: containerName, GitHubRunnerID: jit.RunnerID,
+		ExitCode: exitCode, DurationMillis: durationMs,
+	})
 	if exitCode == 0 {
 		w.recordSuccessAndMaybeEmit(intent.Scope, intent.Repo)
 		_ = w.deps.Emit().EmitSpawnCompleted(cornerstone.SpawnCompletedFields{
@@ -249,6 +277,17 @@ func teardownSpawn(runCtx context.Context, be backend.Backend, h backend.Handle,
 }
 
 func teardownGracePeriod() time.Duration { return 15 * time.Second }
+
+func (w *SpawnWorker) deregister(ctx context.Context, repo string, runnerID int64) error {
+	if runnerID <= 0 {
+		return nil
+	}
+	if err := w.deps.GitHub().DeleteRunner(ctx, repo, runnerID); err != nil {
+		return err
+	}
+	w.deps.State().RecordDeregistered()
+	return nil
+}
 
 // fail emits spawn.failed and returns the error. Used for failures BEFORE
 // JIT generation (no leak cleanup needed).

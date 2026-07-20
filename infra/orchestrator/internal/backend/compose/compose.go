@@ -70,6 +70,8 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 		Scope:              in.Scope,
 		Repo:               in.Repo,
 		SpawnID:            in.SpawnID,
+		Version:            in.Version,
+		BuildSHA:           in.BuildSHA,
 		NetworkID:          netID,
 		EgressNetwork:      in.EgressNetwork,
 		RunnerImage:        in.RunnerImage,

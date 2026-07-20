@@ -344,6 +344,10 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 	noProxy := "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc.cluster.local,.cluster.local"
 
 	runnerEnv := []corev1.EnvVar{
+		{Name: "RUNSECURE_SCOPE", Value: in.Scope},
+		{Name: "RUNSECURE_VERSION", Value: in.Version},
+		{Name: "RUNSECURE_BUILD_SHA", Value: in.BuildSHA},
+		{Name: "RUNSECURE_SPAWN_ID", Value: in.SpawnID},
 		{Name: "HTTP_PROXY", Value: proxyURL},
 		{Name: "HTTPS_PROXY", Value: proxyURL},
 		{Name: "http_proxy", Value: proxyURL},

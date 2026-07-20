@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,9 +16,10 @@ import (
 // pollDeps wraps spawnDeps + an intent channel and rate-limit state.
 type pollDeps struct {
 	*spawnDeps
-	intents       chan SpawnIntent
-	pollTickCount atomic.Int64
-	rl            struct {
+	intents          chan SpawnIntent
+	pollTickCount    atomic.Int64
+	denyReservations bool
+	rl               struct {
 		paused      atomic.Bool
 		stickPaused atomic.Bool // when set, MaybeClearRateLimit never clears
 		remaining   int
@@ -67,6 +69,25 @@ func (d *pollDeps) NewSpawnID() string {
 }
 
 func (d *pollDeps) RecordPollTick() { d.pollTickCount.Add(1) }
+func (d *pollDeps) LabelsForRepo(_ string) ([]string, error) {
+	return append([]string(nil), d.runnerYML.Labels...), d.runnerYMLErr
+}
+func (d *pollDeps) TryReserve(spawnID, repo string, repoCap, globalCap int) bool {
+	if d.denyReservations {
+		return false
+	}
+	return d.st.TryReserve(spawnID, repo, repoCap, globalCap, d.clk.Now())
+}
+func (d *pollDeps) ReleaseReservation(spawnID string) { d.st.ReleaseReservation(spawnID) }
+func (d *pollDeps) RecordPollAttempt(repo string) {
+	d.st.RecordPollAttempt(repo, d.clk.Now())
+}
+func (d *pollDeps) RecordPollSuccess(repo string, queued int) {
+	d.st.RecordPollSuccess(repo, queued, d.clk.Now())
+}
+func (d *pollDeps) RecordPollFailure(repo, class, detail string) {
+	d.st.RecordPollFailure(repo, class, detail)
+}
 
 func itoa(n int64) string {
 	if n == 0 {
@@ -110,6 +131,70 @@ func TestPoll_EnqueuesSpawnsUpToCaps(t *testing.T) {
 	p.tick(ctx)
 
 	require.Len(t, d.intents, 3)
+	require.Equal(t, 3, d.st.Snapshot().PerRepo["o/r"].Pending)
+}
+
+func TestPoll_ReservationsPreventDuplicateCapacityAcrossTicks(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 4
+	srv.mu.Unlock()
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	p := NewPoll(scope, d)
+	p.tick(context.Background())
+	p.tick(context.Background())
+	require.Len(t, d.intents, 3, "second poll must not duplicate pending capacity")
+	require.Equal(t, 3, d.st.GlobalInFlight())
+}
+
+func TestPoll_QueuedJobsInInProgressWorkflowCreateCapacity(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.inProgressFor["o/r"] = 2
+	srv.mu.Unlock()
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Len(t, d.intents, 2)
+	require.Equal(t, 2, d.st.Snapshot().PerRepo["o/r"].QueuedJobs)
+}
+
+func TestPoll_RecordsRunnerConfigFailure(t *testing.T) {
+	d := newPollDeps(t)
+	d.runnerYMLErr = errors.New("invalid runner config")
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	snap := d.st.Snapshot()
+	require.Equal(t, "runner_config", snap.PerRepo["o/r"].LastPollError)
+	require.Empty(t, d.intents)
+}
+
+func TestPoll_StopsWhenAtomicReservationIsDenied(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 2
+	srv.mu.Unlock()
+	d.denyReservations = true
+	scope := ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}
+	NewPoll(scope, d).tick(context.Background())
+	require.Empty(t, d.intents)
 }
 
 func TestPoll_SkipsBreakerOpen(t *testing.T) {
@@ -469,4 +554,5 @@ func TestPoll_IntentChannelFull_CtxCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("tick did not return after ctx cancellation with a full intent channel")
 	}
+	require.Equal(t, 0, d.st.GlobalInFlight(), "cancelled enqueue must release its reservation")
 }

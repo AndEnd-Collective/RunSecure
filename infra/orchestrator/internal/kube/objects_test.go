@@ -19,6 +19,8 @@ func testInput() backend.SpawnInput {
 		Scope:              "ci",
 		Repo:               "acme/widget",
 		SpawnID:            "spawn-abc123",
+		Version:            "v2.1.8",
+		BuildSHA:           "abc123",
 		RunnerImage:        "ghcr.io/acme/runner@sha256:aaaa",
 		ProxyImage:         "ghcr.io/acme/proxy@sha256:bbbb",
 		SeccompProfilePath: "/etc/seccomp/node-runner.json",
@@ -434,6 +436,21 @@ func TestRunnerPod_HasJITConfigFileEnv(t *testing.T) {
 	envMap := containerEnvMap(pod.Spec.Containers[0])
 	if v, ok := envMap["RUNNER_JIT_CONFIG_FILE"]; !ok || v != "/var/run/runsecure/jit-config" {
 		t.Errorf("runner container RUNNER_JIT_CONFIG_FILE = %q, want /var/run/runsecure/jit-config", v)
+	}
+}
+
+func TestRunnerPod_HasRunSecureProvenanceEnv(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	envMap := containerEnvMap(pod.Spec.Containers[0])
+	want := map[string]string{
+		"RUNSECURE_SCOPE": in.Scope, "RUNSECURE_VERSION": in.Version,
+		"RUNSECURE_BUILD_SHA": in.BuildSHA, "RUNSECURE_SPAWN_ID": in.SpawnID,
+	}
+	for name, value := range want {
+		if envMap[name] != value {
+			t.Errorf("runner container %s = %q, want %q", name, envMap[name], value)
+		}
 	}
 }
 

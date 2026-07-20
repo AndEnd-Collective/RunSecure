@@ -23,6 +23,7 @@ const RunnerEntrypoint = backend.RunnerEntrypoint
 // in sync if either changes.
 type SpawnInputs struct {
 	Scope, Repo, SpawnID string
+	Version, BuildSHA    string
 	NetworkID            string // pre-created by caller; Spawn attaches containers to it
 	EgressNetwork        string // external network the proxy is dual-homed onto
 	RunnerImage          string // digest-pinned
@@ -167,6 +168,10 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	// the proxy. This mirrors infra/docker-compose.yml (the run.sh path).
 	runnerEnv := []string{
 		"RUNNER_JIT_CONFIG=" + in.JITConfigB64,
+		"RUNSECURE_SCOPE=" + in.Scope,
+		"RUNSECURE_VERSION=" + in.Version,
+		"RUNSECURE_BUILD_SHA=" + in.BuildSHA,
+		"RUNSECURE_SPAWN_ID=" + in.SpawnID,
 		"HTTP_PROXY=http://proxy:3128",
 		"HTTPS_PROXY=http://proxy:3128",
 		"NO_PROXY=localhost,127.0.0.1",

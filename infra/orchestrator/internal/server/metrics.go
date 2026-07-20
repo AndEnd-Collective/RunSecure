@@ -56,12 +56,32 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 	for _, repo := range sortedKeys(snap.PerRepo) {
 		fmt.Fprintf(w, "runsecure_orchestrator_in_flight_runners{repo=%q} %d\n", repo, snap.PerRepo[repo].InFlight)
 	}
-	// queued_jobs (best-effort: not in snapshot — emit 0 placeholder per repo)
-	fmt.Fprintln(w, "# HELP runsecure_orchestrator_queued_jobs Queued workflow runs observed at last poll.")
+	// queued_jobs
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_queued_jobs Eligible queued workflow jobs observed at the last successful poll.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_queued_jobs gauge")
 	for _, repo := range sortedKeys(snap.PerRepo) {
-		fmt.Fprintf(w, "runsecure_orchestrator_queued_jobs{repo=%q} 0\n", repo)
+		fmt.Fprintf(w, "runsecure_orchestrator_queued_jobs{repo=%q} %d\n", repo, snap.PerRepo[repo].QueuedJobs)
 	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_repo_last_poll_attempt_timestamp_seconds Unix epoch of the last GitHub demand-refresh attempt.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_repo_last_poll_attempt_timestamp_seconds gauge")
+	for _, repo := range sortedKeys(snap.PerRepo) {
+		fmt.Fprintf(w, "runsecure_orchestrator_repo_last_poll_attempt_timestamp_seconds{repo=%q} %d\n", repo, epochOrZero(snap.PerRepo[repo].LastPollAt))
+	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_repo_last_poll_success_timestamp_seconds Unix epoch of the last successful GitHub demand refresh.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_repo_last_poll_success_timestamp_seconds gauge")
+	for _, repo := range sortedKeys(snap.PerRepo) {
+		fmt.Fprintf(w, "runsecure_orchestrator_repo_last_poll_success_timestamp_seconds{repo=%q} %d\n", repo, epochOrZero(snap.PerRepo[repo].LastPollSuccess))
+	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_poll_error_info Last classified GitHub demand-refresh error.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_poll_error_info gauge")
+	for _, repo := range sortedKeys(snap.PerRepo) {
+		if class := snap.PerRepo[repo].LastPollError; class != "" {
+			fmt.Fprintf(w, "runsecure_orchestrator_poll_error_info{repo=%q,class=%q} 1\n", repo, class)
+		}
+	}
+	renderPhaseGauge(w, "pending_runners", "Reserved runners not yet observed online.", snap, func(r state.RepoState) int { return r.Pending })
+	renderPhaseGauge(w, "online_runners", "Online runners waiting for assignment.", snap, func(r state.RepoState) int { return r.Online })
+	renderPhaseGauge(w, "assigned_runners", "Runners observed assigned to a job.", snap, func(r state.RepoState) int { return r.Assigned })
 	// spawns_total
 	fmt.Fprintln(w, "# HELP runsecure_orchestrator_spawns_total Total spawn attempts.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_spawns_total counter")
@@ -81,7 +101,7 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_api_rate_limit_remaining gauge")
 	fmt.Fprintf(w, "runsecure_orchestrator_api_rate_limit_remaining %d\n", snap.RateLimitRemaining)
 	// last_poll_timestamp_seconds
-	fmt.Fprintln(w, "# HELP runsecure_orchestrator_last_poll_timestamp_seconds Unix epoch of the last successful poll.")
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_last_poll_timestamp_seconds Unix epoch of the last poll-loop tick.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_last_poll_timestamp_seconds gauge")
 	fmt.Fprintf(w, "runsecure_orchestrator_last_poll_timestamp_seconds %d\n", deps.LastPollAt().Unix())
 	// breaker_open
@@ -94,7 +114,50 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 		}
 		fmt.Fprintf(w, "runsecure_orchestrator_breaker_open{repo=%q} %d\n", repo, v)
 	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_configured_capacity Configured global runner capacity.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_configured_capacity gauge")
+	fmt.Fprintf(w, "runsecure_orchestrator_configured_capacity %d\n", snap.ConfiguredCapacity)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_worker_capacity Spawn worker pool size.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_worker_capacity gauge")
+	fmt.Fprintf(w, "runsecure_orchestrator_worker_capacity %d\n", snap.WorkerCapacity)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_assignments_total Runners observed assigned to jobs.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_assignments_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_assignments_total %d\n", snap.AssignmentsTotal)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_completed_runners_total Assigned runners whose process completed.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_completed_runners_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_completed_runners_total %d\n", snap.CompletedTotal)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_unassigned_exits_total Runners that exited without observed assignment.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_unassigned_exits_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_unassigned_exits_total %d\n", snap.UnassignedExitsTotal)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_deregistrations_total JIT runner registrations confirmed removed.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_deregistrations_total counter")
+	fmt.Fprintf(w, "runsecure_orchestrator_deregistrations_total %d\n", snap.DeregistrationsTotal)
+	draining := 0
+	if snap.Draining {
+		draining = 1
+	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_draining Whether the orchestrator is draining.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_draining gauge")
+	fmt.Fprintf(w, "runsecure_orchestrator_draining %d\n", draining)
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_build_info Build provenance for this orchestrator.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_build_info gauge")
+	fmt.Fprintf(w, "runsecure_orchestrator_build_info{version=%q,build_sha=%q} 1\n", snap.Version, snap.BuildSHA)
 	return nil
+}
+
+func epochOrZero(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.Unix()
+}
+
+func renderPhaseGauge(w io.Writer, name, help string, snap state.Snapshot, value func(state.RepoState) int) {
+	fmt.Fprintf(w, "# HELP runsecure_orchestrator_%s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE runsecure_orchestrator_%s gauge\n", name)
+	for _, repo := range sortedKeys(snap.PerRepo) {
+		fmt.Fprintf(w, "runsecure_orchestrator_%s{repo=%q} %d\n", name, repo, value(snap.PerRepo[repo]))
+	}
 }
 
 func sortedKeys(m map[string]state.RepoState) []string {

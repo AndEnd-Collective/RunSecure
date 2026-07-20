@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// Set by Docker builds via -ldflags. Local go builds intentionally retain the
+// explicit development values.
+var (
+	version  = "dev"
+	buildSHA = "unknown"
+)
+
 //coverage:ignore main is a thin entrypoint; tested via integration tests
 func main() {
 	args := os.Args[1:]
@@ -20,7 +27,7 @@ func main() {
 		case "status":
 			os.Exit(runStatus())
 		case "version":
-			fmt.Println("runsecure-orchestrator dev")
+			fmt.Printf("runsecure-orchestrator %s (%s)\n", version, buildSHA)
 			return
 		}
 	}

@@ -29,29 +29,42 @@ import (
 // ------------- fake github wired to a real httptest.Server ----------------
 
 type fakeGitHubBackend struct {
-	mu              sync.Mutex
-	queuedFor       map[string]int
-	queueErrCode    map[string]int // map repo → HTTP status to return
-	jitOnRunnerID   int64
-	jitLabels       []string
-	jitMismatch     bool
-	deletedRunners  map[int64]bool
-	createCalled    int
-	deleteCalled    int
-	rlLimit         int
-	rlRemaining     int
-	rlReset         string
-	rlAfterResponse bool // include X-RateLimit-Remaining=0 in 403 response
+	mu                sync.Mutex
+	queuedFor         map[string]int
+	inProgressFor     map[string]int
+	queueErrCode      map[string]int // map repo → HTTP status to return
+	jitOnRunnerID     int64
+	jitLabels         []string
+	jitMismatch       bool
+	deletedRunners    map[int64]bool
+	createCalled      int
+	deleteCalled      int
+	deleteErrCode     int
+	rlLimit           int
+	rlRemaining       int
+	rlReset           string
+	rlAfterResponse   bool // include X-RateLimit-Remaining=0 in 403 response
+	runnerStatus      string
+	runnerBusy        bool
+	runnerErrCode     int
+	runnerGetCalled   int
+	runnerErrAfter    int
+	runnerStatusAfter string
+	runnerBusyAfter   bool
+	runnerChangeAfter int
 }
 
 func newFakeGH() *fakeGitHubBackend {
 	return &fakeGitHubBackend{
 		queuedFor:      map[string]int{},
+		inProgressFor:  map[string]int{},
 		queueErrCode:   map[string]int{},
 		deletedRunners: map[int64]bool{},
 		jitOnRunnerID:  100,
 		rlLimit:        5000,
 		rlRemaining:    4999,
+		runnerStatus:   "online",
+		runnerBusy:     true,
 	}
 }
 
@@ -66,8 +79,8 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 			w.Header().Set("X-RateLimit-Reset", g.rlReset)
 		}
 
-		// /repos/o/r/actions/runs?status=queued
-		if strings.Contains(r.URL.Path, "/actions/runs") && r.Method == http.MethodGet {
+		// /repos/o/r/actions/runs/<id>/jobs?filter=latest
+		if strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs") && r.Method == http.MethodGet {
 			// Extract owner/repo
 			parts := strings.Split(r.URL.Path, "/")
 			if len(parts) < 4 {
@@ -82,10 +95,56 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				w.WriteHeader(code)
 				return
 			}
-			w.WriteHeader(200)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"total_count": g.queuedFor[repo],
-			})
+			runID := parts[len(parts)-2]
+			count := g.queuedFor[repo]
+			if runID == "2" {
+				count = g.inProgressFor[repo]
+			}
+			if r.URL.Query().Get("page") != "1" {
+				count = 0
+			}
+			jobs := make([]map[string]any, 0, count)
+			for i := 0; i < count; i++ {
+				id := i + 1
+				if runID == "2" {
+					id += 100000
+				}
+				jobs = append(jobs, map[string]any{
+					"id": id, "name": fmt.Sprintf("job-%d", id), "status": "queued",
+					"labels": []string{"self-hosted", "Linux"},
+				})
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+			return
+		}
+		// /repos/o/r/actions/runs?status=queued|in_progress
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") && r.Method == http.MethodGet {
+			parts := strings.Split(r.URL.Path, "/")
+			if len(parts) < 4 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			repo := parts[2] + "/" + parts[3]
+			if code, ok := g.queueErrCode[repo]; ok {
+				if g.rlAfterResponse {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(code)
+				return
+			}
+			count := g.queuedFor[repo]
+			runID := 1
+			if r.URL.Query().Get("status") == "in_progress" {
+				count = g.inProgressFor[repo]
+				runID = 2
+			}
+			runs := []map[string]any{}
+			if count > 0 {
+				runs = append(runs, map[string]any{"id": runID})
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
 			return
 		}
 		// /repos/o/r/actions/runners/generate-jitconfig
@@ -123,6 +182,10 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 		// DELETE /repos/o/r/actions/runners/<id>
 		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete {
 			g.deleteCalled++
+			if g.deleteErrCode != 0 {
+				w.WriteHeader(g.deleteErrCode)
+				return
+			}
 			parts := strings.Split(r.URL.Path, "/")
 			if id := parts[len(parts)-1]; id != "" {
 				var n int64
@@ -130,6 +193,22 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				g.deletedRunners[n] = true
 			}
 			w.WriteHeader(204)
+			return
+		}
+		// GET /repos/o/r/actions/runners/<id>
+		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet {
+			g.runnerGetCalled++
+			if g.runnerErrCode != 0 && (g.runnerErrAfter == 0 || g.runnerGetCalled >= g.runnerErrAfter) {
+				w.WriteHeader(g.runnerErrCode)
+				return
+			}
+			status, busy := g.runnerStatus, g.runnerBusy
+			if g.runnerChangeAfter > 0 && g.runnerGetCalled >= g.runnerChangeAfter {
+				status, busy = g.runnerStatusAfter, g.runnerBusyAfter
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": g.jitOnRunnerID, "name": "runner", "status": status, "busy": busy,
+			})
 			return
 		}
 		// /repos/o/r (validation ping)
@@ -311,6 +390,7 @@ type fakeBackend struct {
 	// inspectExitDelay simulates a runner that never exits (WaitForExit blocks
 	// until timeout fires). When non-zero WaitForExit returns (-1, true).
 	inspectExitDelay time.Duration
+	waitDelay        time.Duration
 }
 
 func newFakeBackend() *fakeBackend { return &fakeBackend{} }
@@ -341,6 +421,10 @@ func (f *fakeBackend) WaitForExit(_ context.Context, h backend.Handle, _ time.Du
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.waitCalls = append(f.waitCalls, h)
+	if f.waitDelay > 0 {
+		time.Sleep(f.waitDelay)
+		return f.waitExitCode, f.waitTimedOut
+	}
 	if f.inspectExitDelay > 0 {
 		// Simulate never-exiting runner: block briefly then return timedOut.
 		// Use a small real sleep so callers that advance a fake clock can drive
@@ -408,6 +492,9 @@ type spawnDeps struct {
 	proxyDigest    string
 	breakers       *fakeBreakers
 	bucket         TokenBucket
+	lifecycle      LifecycleTiming
+	version        string
+	buildSHA       string
 }
 
 func (d *spawnDeps) GitHub() *github.Client     { return d.gh }
@@ -436,6 +523,9 @@ func (d *spawnDeps) RunnerImageDigestFor(_ string) string {
 func (d *spawnDeps) SeccompProfileHostPath(_ string) string { return "/seccomp/p.json" }
 func (d *spawnDeps) RateLimiter() TokenBucket               { return d.bucket }
 func (d *spawnDeps) Breakers() BreakerMap                   { return d.breakers }
+func (d *spawnDeps) LifecycleTiming() LifecycleTiming       { return d.lifecycle }
+func (d *spawnDeps) Version() string                        { return d.version }
+func (d *spawnDeps) BuildSHA() string                       { return d.buildSHA }
 
 func newSpawnDeps(t *testing.T) *spawnDeps {
 	t.Helper()
@@ -456,9 +546,15 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 				"runner":             map[string]any{"id": 42, "labels": labels},
 				"encoded_jit_config": "b64",
 			})
-		case strings.Contains(r.URL.Path, "/actions/runs"):
+		case strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs"):
 			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"total_count":0}`))
+			_, _ = w.Write([]byte(`{"jobs":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"id":42,"name":"runner","status":"online","busy":true}`))
 		case strings.Contains(r.URL.Path, "/actions/runners/"):
 			w.WriteHeader(204)
 		default:
@@ -499,6 +595,12 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 		proxyDigest: "ghcr.io/test/proxy@sha256:pp",
 		breakers:    newFakeBreakers(),
 		bucket:      &fakeBucket{},
+		lifecycle: LifecycleTiming{
+			OnlineTimeout: 100 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
+			PollInterval: time.Millisecond,
+		},
+		version:  "v-test",
+		buildSHA: "sha-test",
 	}
 }
 

@@ -36,6 +36,7 @@ const RunnerEntrypoint = "/home/runner/entrypoint.sh"
 // SpawnInput is everything a backend needs to create one per-spawn stack.
 type SpawnInput struct {
 	Scope, Repo, SpawnID                              string
+	Version, BuildSHA                                 string
 	RunnerImage, ProxyImage                           string // digest-pinned
 	SeccompProfilePath                                string
 	ResourcesMemory, ResourcesNanoCPUs, ResourcesPIDs int64

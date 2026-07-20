@@ -13,6 +13,7 @@ type Server struct {
 	healthzAddr string
 	debugAddr   string
 	healthz     http.Handler
+	readyz      http.Handler
 	metrics     http.Handler
 	snapshot    http.Handler
 }
@@ -20,6 +21,7 @@ type Server struct {
 // AllDeps is the union of all server-side dependency interfaces.
 type AllDeps interface {
 	HealthDeps
+	ReadyDeps
 	MetricsDeps
 	SnapshotDeps
 }
@@ -44,6 +46,7 @@ func New(healthzAddr, debugAddr string, deps AllDeps, em *cornerstone.Emitter) *
 		healthzAddr: healthzAddr,
 		debugAddr:   debugAddr,
 		healthz:     NewHealthz(deps, em),
+		readyz:      NewReadyz(deps),
 		metrics:     NewMetrics(deps),
 		snapshot:    NewSnapshot(deps),
 	}
@@ -54,6 +57,7 @@ func New(healthzAddr, debugAddr string, deps AllDeps, em *cornerstone.Emitter) *
 func (s *Server) Run(ctx context.Context) error {
 	healthzMux := http.NewServeMux()
 	healthzMux.Handle("/healthz", s.healthz)
+	healthzMux.Handle("/readyz", s.readyz)
 
 	debugMux := http.NewServeMux()
 	debugMux.Handle("/metrics", s.metrics)

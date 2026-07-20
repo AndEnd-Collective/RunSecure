@@ -49,8 +49,167 @@ func TestSpawn_HappyPath(t *testing.T) {
 		cornerstone.EventSpawnStarted,
 		cornerstone.EventSpawnJITAcquired,
 		cornerstone.EventSpawnRunnerCreated,
+		cornerstone.EventRunnerOnline,
+		cornerstone.EventJobAssigned,
+		cornerstone.EventRunnerCompleted,
 		cornerstone.EventSpawnCompleted,
 	)
+	snap := d.st.Snapshot()
+	require.Equal(t, int64(1), snap.AssignmentsTotal)
+	require.Equal(t, int64(1), snap.CompletedTotal)
+	require.Equal(t, int64(1), snap.DeregistrationsTotal)
+	d.be.mu.Lock()
+	spawnInput := d.be.spawnCalls[0]
+	d.be.mu.Unlock()
+	require.Equal(t, "v-test", spawnInput.Version)
+	require.Equal(t, "sha-test", spawnInput.BuildSHA)
+}
+
+func TestSpawn_ZeroExitWithoutAssignmentIsRuntimeFailure(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "unassigned",
+	})
+	require.ErrorContains(t, err, "before GitHub reported a job assignment")
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventRunnerExitedUnassigned, cornerstone.EventSpawnFailed)
+	require.Equal(t, int64(1), d.st.Snapshot().UnassignedExitsTotal)
+	require.NotContains(t, d.emBuf.String(), `"event.sub.type":"`+cornerstone.EventSpawnCompleted+`"`)
+}
+
+func TestSpawn_NeverOnlineFailsAtRegistrationDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusNotFound
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 20 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.inspectExitDelay = 30 * time.Millisecond
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "never-online",
+	})
+	require.ErrorContains(t, err, "did not become online")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_online_timeout"`)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerCompleted)
+}
+
+func TestSpawn_OnlineButNeverAssignedFailsAtAssignmentDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.runnerErrCode = http.StatusNotFound
+	fake.runnerErrAfter = 2
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 20 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.inspectExitDelay = 30 * time.Millisecond
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "never-assigned",
+	})
+	require.ErrorContains(t, err, "did not receive a job")
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventSpawnFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_assignment_timeout"`)
+}
+
+func TestSpawn_RunnerBecomesBusyOnLifecyclePoll(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.runnerChangeAfter = 2
+	fake.runnerStatusAfter = "online"
+	fake.runnerBusyAfter = true
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 20 * time.Millisecond, AssignmentTimeout: 20 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.waitDelay = 5 * time.Millisecond
+	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "poll-transition",
+	}))
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestSpawn_RunnerObservationRateLimitFailsDelivery(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusTooManyRequests
+	fake.mu.Unlock()
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "rate-limited-observation",
+	})
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_rate_limited"`)
+}
+
+func TestSpawn_ContextCancellationWhileObservingRunner(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+	d.be.inspectExitDelay = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(time.Millisecond)
+		cancel()
+	}()
+	err := NewSpawnWorker(d).Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "cancelled"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_observation_cancelled"`)
+}
+
+func TestSpawn_RunnerObservationAuthFailureFailsDelivery(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "auth-failure",
+	})
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_failed"`)
+}
+
+func TestSpawn_DeregistrationFailureFailsRuntimeCleanup(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "deregister-failure",
+	})
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_deregistration_failed"`)
+	require.Zero(t, d.st.Snapshot().DeregistrationsTotal)
 }
 
 func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
@@ -130,6 +289,7 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	d.requireEmitted(t, cornerstone.EventSpawnFailed)
+	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
 }
 
 // Bug #1 regression test: breaker.opened fires when the breaker transitions
@@ -473,6 +633,24 @@ func TestDefaultTimeoutSeconds(t *testing.T) {
 	require.Equal(t, 21600, defaultTimeoutSeconds(-1))
 	require.Equal(t, 60, defaultTimeoutSeconds(60))
 	require.Equal(t, 1, defaultTimeoutSeconds(1))
+}
+
+func TestLifecycleTimingDefaultsAndTimerDrain(t *testing.T) {
+	defaults := DefaultLifecycleTiming()
+	require.Equal(t, 60*time.Second, defaults.OnlineTimeout)
+	require.Equal(t, 120*time.Second, defaults.AssignmentTimeout)
+	require.Equal(t, 2*time.Second, defaults.PollInterval)
+	require.Equal(t, defaults, normalizedLifecycleTiming(LifecycleTiming{}))
+	expired := time.NewTimer(time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+	stopTimer(expired)
+	stopTimer(nil)
+}
+
+func TestDeregister_ZeroRunnerIDIsNoop(t *testing.T) {
+	d := newSpawnDeps(t)
+	require.NoError(t, NewSpawnWorker(d).deregister(context.Background(), "o/r", 0))
+	require.Zero(t, d.st.Snapshot().DeregistrationsTotal)
 }
 
 // Mutation kill: spawn.go `if imageDigest == ""`. Mutation `!=` would

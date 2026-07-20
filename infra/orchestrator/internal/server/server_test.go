@@ -17,14 +17,15 @@ import (
 
 // fakeDeps implements all the server dep interfaces for testing.
 type fakeDeps struct {
-	lastPoll  time.Time
-	now       time.Time
-	intervalS int
-	snap      state.Snapshot
-	api       map[APICallKey]int64
-	spawns    map[SpawnKey]int64
-	durations map[string][]float64
-	breakers  map[string]bool
+	lastPoll   time.Time
+	now        time.Time
+	intervalS  int
+	snap       state.Snapshot
+	api        map[APICallKey]int64
+	spawns     map[SpawnKey]int64
+	durations  map[string][]float64
+	breakers   map[string]bool
+	backendErr error
 }
 
 func (f *fakeDeps) LastPollAt() time.Time                { return f.lastPoll }
@@ -35,6 +36,7 @@ func (f *fakeDeps) APICalls() map[APICallKey]int64       { return f.api }
 func (f *fakeDeps) SpawnsTotal() map[SpawnKey]int64      { return f.spawns }
 func (f *fakeDeps) SpawnDurations() map[string][]float64 { return f.durations }
 func (f *fakeDeps) BreakerOpen() map[string]bool         { return f.breakers }
+func (f *fakeDeps) BackendReady(context.Context) error   { return f.backendErr }
 
 func newDeps(t *testing.T) *fakeDeps {
 	t.Helper()
@@ -44,10 +46,22 @@ func newDeps(t *testing.T) *fakeDeps {
 		now:       now,
 		intervalS: 15,
 		snap: state.Snapshot{
-			PerRepo:            map[string]state.RepoState{"o/r": {InFlight: 2}},
-			GlobalInFlight:     2,
-			RateLimitRemaining: 4321,
-			RateLimitLimit:     5000,
+			PerRepo: map[string]state.RepoState{"o/r": {
+				InFlight: 2, QueuedJobs: 4, Pending: 1, Online: 1, Assigned: 0,
+				LastPollAt: now.Add(-time.Second), LastPollSuccess: now.Add(-2 * time.Second),
+				LastPollError: "github_auth_failed",
+			}},
+			GlobalInFlight:       2,
+			RateLimitRemaining:   4321,
+			RateLimitLimit:       5000,
+			ConfiguredCapacity:   3,
+			WorkerCapacity:       3,
+			Version:              "v2.1.8",
+			BuildSHA:             "abc123",
+			AssignmentsTotal:     7,
+			CompletedTotal:       6,
+			UnassignedExitsTotal: 1,
+			DeregistrationsTotal: 6,
 		},
 		api:      map[APICallKey]int64{{Endpoint: "queued", Status: "200"}: 100},
 		spawns:   map[SpawnKey]int64{{Scope: "s", Repo: "o/r", Outcome: "success"}: 5},
@@ -111,6 +125,17 @@ func TestMetrics_RendersTextFormat(t *testing.T) {
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_api_rate_limit_remaining 4321`))
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_spawns_total{scope="s",repo="o/r",outcome="success"} 5`))
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_breaker_open{repo="o/r"} 0`))
+	require.Contains(t, body, `runsecure_orchestrator_queued_jobs{repo="o/r"} 4`)
+	require.Contains(t, body, `runsecure_orchestrator_pending_runners{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_online_runners{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_poll_error_info{repo="o/r",class="github_auth_failed"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_configured_capacity 3`)
+	require.Contains(t, body, `runsecure_orchestrator_worker_capacity 3`)
+	require.Contains(t, body, `runsecure_orchestrator_assignments_total 7`)
+	require.Contains(t, body, `runsecure_orchestrator_completed_runners_total 6`)
+	require.Contains(t, body, `runsecure_orchestrator_unassigned_exits_total 1`)
+	require.Contains(t, body, `runsecure_orchestrator_deregistrations_total 6`)
+	require.Contains(t, body, `runsecure_orchestrator_build_info{version="v2.1.8",build_sha="abc123"} 1`)
 }
 
 func TestSnapshot_RoundTrip(t *testing.T) {

@@ -26,7 +26,7 @@ func TestProjectSignature_IsStableConstant(t *testing.T) {
 
 func TestAllEventNames_CountMatchesConstantCount(t *testing.T) {
 	// Sanity guard against accidentally adding a constant without listing it.
-	require.Len(t, AllEventNames(), 18)
+	require.Len(t, AllEventNames(), 22)
 }
 
 // repoRoot walks up from the test file until it finds a .git directory.

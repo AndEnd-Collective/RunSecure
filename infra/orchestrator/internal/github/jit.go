@@ -25,6 +25,17 @@ type JITConfigResponse struct {
 	EncodedJITConfig string
 }
 
+// Runner is the lifecycle subset returned by GitHub's runner detail endpoint.
+type Runner struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Busy   bool   `json:"busy"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
 // rawJITResponse mirrors GitHub's wire format closely enough for our needs.
 type rawJITResponse struct {
 	Runner struct {
@@ -105,4 +116,23 @@ func (c *Client) DeleteRunner(ctx context.Context, repo string, runnerID int64) 
 	default:
 		return fmt.Errorf("github: delete runner %d: status %d", runnerID, resp.StatusCode)
 	}
+}
+
+// GetRunner returns the current GitHub lifecycle state for a JIT runner.
+func (c *Client) GetRunner(ctx context.Context, repo string, runnerID int64) (Runner, RateLimit, error) {
+	resp, err := c.Do(ctx, http.MethodGet,
+		fmt.Sprintf("/repos/%s/actions/runners/%d", repo, runnerID), nil)
+	if err != nil {
+		return Runner{}, RateLimit{}, err
+	}
+	defer resp.Body.Close()
+	lim := ParseRateLimit(resp.Header)
+	if resp.StatusCode != http.StatusOK {
+		return Runner{}, lim, responseError(resp, "get runner")
+	}
+	var runner Runner
+	if err := json.NewDecoder(resp.Body).Decode(&runner); err != nil {
+		return Runner{}, lim, fmt.Errorf("github: decode runner: %w", err)
+	}
+	return runner, lim, nil
 }

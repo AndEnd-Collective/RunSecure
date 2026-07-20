@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.job.assigned
+  uuid: 2c0f457f-c0bc-461e-83d4-51e471e74a70
+  description: |
+    GitHub reported the JIT runner busy, proving that a queued job was assigned
+    before the runner's assignment deadline.
+  status: active
+  tags: [runsecure, orchestrator, runner]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context
+    - audit_context

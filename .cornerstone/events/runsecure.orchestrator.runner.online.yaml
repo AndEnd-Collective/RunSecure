@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.runner.online
+  uuid: d1edd05b-1ce9-439c-9af2-31f60e5aad43
+  description: |
+    A newly created JIT runner became online in GitHub before its registration
+    deadline. This proves runner delivery beyond container creation.
+  status: active
+  tags: [runsecure, orchestrator, runner]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context
+    - audit_context

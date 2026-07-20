@@ -41,6 +41,15 @@ type StateLike interface {
 	DecrementInFlight(repo string)
 	AcquireSemaphores(repo string, repoCap, globalCap int) bool
 	ReleaseSemaphores(repo string)
+	TryReserve(spawnID, repo string, repoCap, globalCap int, now time.Time) bool
+	HasReservation(spawnID, repo string) bool
+	RecordJIT(spawnID string, runnerID int64, runnerName string)
+	MarkOnline(spawnID string, now time.Time) bool
+	MarkAssigned(spawnID string, now time.Time) bool
+	ReleaseReservation(spawnID string)
+	RecordCompleted()
+	RecordUnassignedExit()
+	RecordDeregistered()
 }
 
 // BreakerMap is per-repo breaker storage. Implementations are concrete in
@@ -101,6 +110,12 @@ type PollDeps interface {
 	MaybeClearRateLimit(scope string) bool
 
 	NewSpawnID() string
+	LabelsForRepo(repo string) ([]string, error)
+	TryReserve(spawnID, repo string, repoCap, globalCap int) bool
+	ReleaseReservation(spawnID string)
+	RecordPollAttempt(repo string)
+	RecordPollSuccess(repo string, queued int)
+	RecordPollFailure(repo, class, detail string)
 
 	// RecordPollTick records that a poll cycle just ticked. Production
 	// implementations update the /healthz freshness signal here. Fix for
@@ -136,6 +151,17 @@ type SpawnDeps interface {
 
 	RateLimiter() TokenBucket
 	Breakers() BreakerMap
+	LifecycleTiming() LifecycleTiming
+	Version() string
+	BuildSHA() string
+}
+
+// LifecycleTiming controls GitHub runner registration/assignment observation.
+// Production uses conservative deadlines; tests inject millisecond values.
+type LifecycleTiming struct {
+	OnlineTimeout     time.Duration
+	AssignmentTimeout time.Duration
+	PollInterval      time.Duration
 }
 
 // Errors surfaced through SpawnWorker.Execute for callers that want to
