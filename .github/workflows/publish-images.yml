@@ -536,7 +536,7 @@ jobs:
   # are found WITH a fix available (unfixed CVEs upload to the Security tab
   # but don't block — chasing unfixable issues creates noise).
   #
-  # Grype is installed directly (not via anchore/scan-action) because the
+  # Syft and Grype are installed directly (not via anchore/scan-action) because the
   # action wrapper bundles a pinned grype binary that periodically fails
   # with "vulnerability database was built N weeks ago" when the upstream
   # CDN drifts past the pinned grype's tolerance.
@@ -555,11 +555,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install Syft + Grype (latest catalogers and CVE DB)
         run: |
           set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
+          syft version
           grype version
 
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
@@ -571,13 +574,8 @@ jobs:
           IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-base.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "$IMAGE_REF" grype-base.sarif ca-certificates
 
       - name: Upload Grype scan results (base) to GitHub Security
         if: always() && hashFiles('grype-base.sarif') != ''
@@ -602,15 +600,27 @@ jobs:
           - name: node
             lang_version: "24"
             sarif_name: node-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
           - name: node
             lang_version: "22"
             sarif_name: node-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
           - name: python
             lang_version: "3.12"
             sarif_name: python-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
           - name: rust
             lang_version: stable
             sarif_name: rust-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -620,26 +630,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install Syft + Grype (latest catalogers and CVE DB)
         run: |
           set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
+          syft version
           grype version
 
       - name: Grype scan (terminal language image) — fail on HIGH/CRITICAL with fix
         env:
           IMAGE_REF: "${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}"
           SARIF_FILE: "grype-${{ matrix.sarif_name }}.sarif"
+          EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
+          EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
+          EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file "$SARIF_FILE" --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
+            "$EXPECTED_CATALOGER_PACKAGE"
 
       - name: Upload Grype scan results (terminal language image)
         if: always() && hashFiles(format('grype-{0}.sarif', matrix.sarif_name)) != ''
@@ -664,11 +677,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install Syft + Grype (latest catalogers and CVE DB)
         run: |
           set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
+          syft version
           grype version
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
@@ -676,13 +692,8 @@ jobs:
           IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-proxy.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "$IMAGE_REF" grype-proxy.sarif ca-certificates
 
       - name: Upload Grype scan results (proxy) to GitHub Security
         if: always() && hashFiles('grype-proxy.sarif') != ''
@@ -709,11 +720,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install Syft + Grype (latest catalogers and CVE DB)
         run: |
           set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
+          syft version
           grype version
 
       - name: Grype scan (orchestrator image) — fail on HIGH/CRITICAL with fix
@@ -721,13 +735,9 @@ jobs:
           IMAGE_REF: "${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-orchestrator.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "$IMAGE_REF" grype-orchestrator.sarif \
+            '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (orchestrator) to GitHub Security
         if: always() && hashFiles('grype-orchestrator.sarif') != ''
@@ -754,11 +764,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install Syft + Grype (latest catalogers and CVE DB)
         run: |
           set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
+          syft version
           grype version
 
       - name: Grype scan (socket-proxy image) — fail on HIGH/CRITICAL with fix
@@ -766,13 +779,9 @@ jobs:
           IMAGE_REF: "${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary"
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-socket-proxy.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "$IMAGE_REF" grype-socket-proxy.sarif \
+            '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (socket-proxy) to GitHub Security
         if: always() && hashFiles('grype-socket-proxy.sarif') != ''

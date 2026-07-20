@@ -45,6 +45,11 @@ Reduces the attack surface inside the container by removing tools and capabiliti
 | `--no-install-recommends` on all apt installs | Reducing unneeded packages | `base.Dockerfile` |
 | Multi-stage builds (compilers not in final image) | Building exploits on-host | `compose-image.sh` |
 
+Image CVE gates generate an ecosystem-aware Syft SBOM and feed that exact file
+to both Grype's blocking table and SARIF output. Only generic raw ELF/PE/version
+classifiers are disabled; OS and language package catalogers remain enabled and
+required so distro patch metadata is not replaced by upstream-version guesses.
+
 ### Layer 2: Runtime Containment (launch-time)
 
 Enforced by Docker flags when the container starts. Cannot be circumvented by code inside the container.

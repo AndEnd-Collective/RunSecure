@@ -338,10 +338,14 @@ Docker network and exercise CI workflows end-to-end:
 A separate Grype CVE scan runs in CI on every PR that touches image
 construction, terminal hardening, scanner validation, or `tools/`. For the
 finalized Node image, Syft must still catalogue the language-layer `nodejs`
-Debian package from the read-only `/var/lib/dpkg/status` inventory, and Grype
-must successfully consume that SBOM. The post-publish workflow re-scans every
-image that gets pushed to GHCR — a HIGH/CRITICAL CVE with an upstream fix
-blocks the publish.
+Debian package from the read-only `/var/lib/dpkg/status` inventory and `npm`
+through its JavaScript package cataloger. The blocking scan uses one explicit
+Syft SBOM for both Grype outputs. It excludes only Syft's generic raw-binary
+classifiers, which otherwise lose distro patch context after dpkg ownership
+files are removed; dpkg, npm, Python, Go, Cargo, and .NET catalogers remain
+enabled and are checked before Grype runs. The post-publish workflow re-scans
+every image pushed to GHCR — a HIGH/CRITICAL ecosystem-aware CVE with an
+upstream fix blocks the publish.
 
 ---
 

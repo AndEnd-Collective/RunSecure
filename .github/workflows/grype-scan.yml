@@ -9,13 +9,14 @@
 # upstream fixes are uploaded to the Security tab as SARIF but don't block
 # (chasing unfixable issues creates noise).
 #
-# Implementation note: grype is installed directly via Anchore's official
-# install script rather than via anchore/scan-action. The action wrapper
+# Implementation note: Syft and Grype are installed directly via Anchore's
+# official install scripts rather than via anchore/scan-action. The action wrapper
 # bundles a pinned grype binary that has periodically failed with a
 # "vulnerability database was built N weeks ago (max allowed age is 5
 # days)" error when Anchore's DB CDN drifts past the pinned grype's
-# tolerance. Direct install pulls the latest grype, which always uses
-# the current DB schema.
+# tolerance. The gate scans one explicit ecosystem-aware Syft SBOM, excluding
+# only generic raw-binary classifiers that lose distro patch context after
+# terminal hardening. Dpkg, npm, Python, Go, Cargo, and .NET catalogers remain.
 #
 # A separate post-publish Grype scan runs in publish-images.yml against
 # the images that actually got pushed to GHCR.
@@ -28,6 +29,9 @@ on:
     paths:
       - 'images/**'
       - 'infra/scripts/finalize-hardening.sh'
+      - 'infra/scripts/grype-scan-image.sh'
+      - 'tests/validation/test-cve-scanner-config.sh'
+      - 'tests/validation/test-grype-scan-image.sh'
       - 'tests/validation/test-scanner-package-inventory.sh'
       - 'tools/**'
       - '.github/workflows/grype-scan.yml'
@@ -47,12 +51,21 @@ jobs:
           - image_name: runner-base
             dockerfile: images/base.Dockerfile
             build_arg: ''
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
           - image_name: runner-node-24
             dockerfile: images/node.Dockerfile
             build_arg: 'NODE_VERSION=24'
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
           - image_name: runner-python-3.12
             dockerfile: images/python.Dockerfile
             build_arg: 'PYTHON_VERSION=3.12'
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
     env:
       IMAGE_NAME: ${{ matrix.image_name }}
       DOCKERFILE: ${{ matrix.dockerfile }}
@@ -90,26 +103,18 @@ jobs:
 
       - name: Grype scan — fail on HIGH/CRITICAL with fix
         id: grype
+        env:
+          EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
+          EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
+          EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
         run: |
           set -euo pipefail
-          # Run scan twice: once for the human-readable table (logged),
-          # once for the SARIF upload. We can't pipe a single run to two
-          # outputs without losing the exit code on the SARIF leg.
-          grype "${IMAGE_NAME}:scan" \
-            --output table \
-            --fail-on high \
-            --only-fixed \
-            || GRYPE_FAILED=1
-          # Always emit SARIF (even on fail) so the Security tab is
-          # populated. The fail-build decision is made on the table run.
-          grype "${IMAGE_NAME}:scan" \
-            --output sarif \
-            --file grype-results.sarif \
-            --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes."
-            exit 1
-          fi
+          bash infra/scripts/grype-scan-image.sh \
+            "${IMAGE_NAME}:scan" \
+            grype-results.sarif \
+            "$EXPECTED_DPKG_PACKAGE" \
+            "$EXPECTED_CATALOGER" \
+            "$EXPECTED_CATALOGER_PACKAGE"
 
       - name: Upload SARIF to GitHub Security tab
         if: always() && hashFiles('grype-results.sarif') != ''
