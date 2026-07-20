@@ -340,6 +340,11 @@ func TestValidateNetworkCreate_RequiresInternalBridge(t *testing.T) {
 		"Driver":     "bridge",
 		"Internal":   true,
 		"Attachable": false,
+		"Labels": map[string]string{
+			"runsecure.scope":    "test",
+			"runsecure.repo":     "owner/repo",
+			"runsecure.spawn_id": "spawn-1",
+		},
 	})
 	require.NoError(t, ValidateNetworkCreate(body))
 
@@ -351,6 +356,34 @@ func TestValidateNetworkCreate_RequiresInternalBridge(t *testing.T) {
 
 	bad3, _ := json.Marshal(map[string]any{"Name": "x", "Driver": "bridge", "Internal": true, "Attachable": true})
 	require.Error(t, ValidateNetworkCreate(bad3))
+}
+
+func TestValidateNetworkCreate_RequiresOwnershipLabels(t *testing.T) {
+	base := map[string]any{
+		"Name":       "rs-net-owner_repo-spawn-1",
+		"Driver":     "bridge",
+		"Internal":   true,
+		"Attachable": false,
+		"Labels": map[string]string{
+			"runsecure.scope":    "test",
+			"runsecure.repo":     "owner/repo",
+			"runsecure.spawn_id": "spawn-1",
+		},
+	}
+	for _, key := range []string{"runsecure.scope", "runsecure.repo", "runsecure.spawn_id"} {
+		t.Run(key, func(t *testing.T) {
+			labels := map[string]string{
+				"runsecure.scope":    "test",
+				"runsecure.repo":     "owner/repo",
+				"runsecure.spawn_id": "spawn-1",
+			}
+			delete(labels, key)
+			base["Labels"] = labels
+			body, err := json.Marshal(base)
+			require.NoError(t, err)
+			require.ErrorContains(t, ValidateNetworkCreate(body), key)
+		})
+	}
 }
 
 func TestValidateNetworkCreate_RefusesMalformedJSON(t *testing.T) {

@@ -61,6 +61,11 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 		Driver:     "bridge",
 		Internal:   true,
 		Attachable: false,
+		Labels: map[string]string{
+			"runsecure.scope":    in.Scope,
+			"runsecure.repo":     in.Repo,
+			"runsecure.spawn_id": in.SpawnID,
+		},
 	})
 	if err != nil {
 		return backend.Handle{}, fmt.Errorf("compose: create network: %w", err)

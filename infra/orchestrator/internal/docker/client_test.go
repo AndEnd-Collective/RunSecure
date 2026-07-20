@@ -181,15 +181,25 @@ func TestDeleteContainer_OtherError(t *testing.T) {
 }
 
 func TestCreateNetwork_HappyPath(t *testing.T) {
+	labels := map[string]string{
+		"runsecure.scope":    "test",
+		"runsecure.repo":     "owner/repo",
+		"runsecure.spawn_id": "spawn-1",
+	}
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1.44/networks/create", r.URL.Path)
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.True(t, body["Internal"].(bool))
+		require.Equal(t, "test", body["Labels"].(map[string]any)["runsecure.scope"])
+		require.Equal(t, "owner/repo", body["Labels"].(map[string]any)["runsecure.repo"])
+		require.Equal(t, "spawn-1", body["Labels"].(map[string]any)["runsecure.spawn_id"])
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"Id": "net-xyz"})
 	})
-	id, err := c.CreateNetwork(context.Background(), CreateNetworkRequest{Name: "rs-net", Driver: "bridge", Internal: true})
+	id, err := c.CreateNetwork(context.Background(), CreateNetworkRequest{
+		Name: "rs-net", Driver: "bridge", Internal: true, Labels: labels,
+	})
 	require.NoError(t, err)
 	require.Equal(t, "net-xyz", id)
 }
@@ -250,8 +260,10 @@ func TestListContainersForScope_EmptyNamesNoPanic(t *testing.T) {
 func TestListContainersForScope(t *testing.T) {
 	_, c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1.44/containers/json", r.URL.Path)
+		require.Equal(t, "true", r.URL.Query().Get("all"))
 		q, _ := url.QueryUnescape(r.URL.RawQuery)
 		require.Contains(t, q, `runsecure.scope=test`)
+		require.NotContains(t, q, `"status"`)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"Id": "a", "Names": []string{"/rs-test-1"}, "Labels": map[string]string{"runsecure.scope": "test"}},

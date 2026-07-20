@@ -30,6 +30,7 @@ type fakeDocker struct {
 
 	// Network state.
 	networkID       string
+	networkRequest  docker.CreateNetworkRequest
 	networksDeleted []string
 
 	// DeleteContainer records.
@@ -57,6 +58,7 @@ func newFakeDocker() *fakeDocker {
 func (f *fakeDocker) CreateNetwork(_ context.Context, r docker.CreateNetworkRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.networkRequest = r
 	return f.networkID, nil
 }
 
@@ -172,6 +174,16 @@ func TestSpawn_HappyPath(t *testing.T) {
 	// runner_created event. Regression guard for the backend refactor.
 	if name := h.Refs["network_name"]; !strings.HasPrefix(name, "rs-net-") {
 		t.Errorf("Handle.Refs['network_name'] = %q, want an 'rs-net-' name", name)
+	}
+	wantLabels := map[string]string{
+		"runsecure.scope":    "myscope",
+		"runsecure.repo":     "owner/repo",
+		"runsecure.spawn_id": "sp1",
+	}
+	for key, want := range wantLabels {
+		if got := fd.networkRequest.Labels[key]; got != want {
+			t.Errorf("network label %q = %q, want %q", key, got, want)
+		}
 	}
 }
 

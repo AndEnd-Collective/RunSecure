@@ -88,10 +88,11 @@ type HostConfig struct {
 }
 
 type CreateNetworkRequest struct {
-	Name       string `json:"Name"`
-	Driver     string `json:"Driver"`
-	Internal   bool   `json:"Internal"`
-	Attachable bool   `json:"Attachable"`
+	Name       string            `json:"Name"`
+	Driver     string            `json:"Driver"`
+	Internal   bool              `json:"Internal"`
+	Attachable bool              `json:"Attachable"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 type Inspect struct {
@@ -339,10 +340,11 @@ type containerJSON struct {
 }
 
 func (c *httpClient) ListContainersForScope(ctx context.Context, scope string) ([]Container, error) {
-	// Only return RUNNING containers. Status filtering server-side avoids
-	// returning hundreds of stopped containers from prior runs.
-	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"],"status":["running"]}`, scope)
-	path := "/containers/json?filters=" + url.QueryEscape(filter)
+	// Include every state. Cold-start cleanup must see exited spawn containers
+	// as well as running ones; otherwise a crash between runner exit and
+	// teardown leaves an owned container (and often its network) behind.
+	filter := fmt.Sprintf(`{"label":["runsecure.scope=%s"]}`, scope)
+	path := "/containers/json?all=true&filters=" + url.QueryEscape(filter)
 	resp, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
