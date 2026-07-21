@@ -416,8 +416,19 @@ func TestSpawn_DeregistrationRetryResolvesDebtOnlyAfterExactSuccess(t *testing.T
 		defer fake.mu.Unlock()
 		return fake.deleteCalled >= 2 && d.st.Snapshot().TeardownBlocked
 	}, time.Second, time.Millisecond)
-	d.clk.Advance(d.lifecycle.CleanupRetryInterval)
-	err := <-done
+	// The second HTTP response is observable just before the retry loop
+	// registers its fake-clock timer. Advance until the worker consumes a tick
+	// so the test cannot lose the only tick under the race detector.
+	var err error
+	require.Eventually(t, func() bool {
+		d.clk.Advance(d.lifecycle.CleanupRetryInterval)
+		select {
+		case err = <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
 
 	require.ErrorContains(t, err, "runner deregistration failed")
 	snap := d.st.Snapshot()

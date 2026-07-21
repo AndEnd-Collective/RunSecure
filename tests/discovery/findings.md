@@ -2,13 +2,19 @@
 
 **Date:** 2026-04-29
 **Method:** Source-based research (actions-runner GitHub repository)
-**Status:** PROVISIONAL — empirical verification pending; see "Future empirical verification" below.
+**Status:** EMPIRICALLY CORRECTED — the marker proves local queue drain only;
+it does not prove remote log persistence.
 
 ## Why source-based?
 
 The original plan called for empirical discovery: build an instrumented entrypoint, trigger workflows against a real GitHub repository, observe `_diag/Worker_*.log` tails. This requires a scratch GitHub repo + `gh` CLI access + actually running workflows. We did not have that infrastructure available for this PR.
 
-The alternative used here: the GitHub actions-runner is open source. Read its source code, identify the log line consistently emitted *after* upload completion, use that as the marker. The risk is that source-derived markers might miss subtle runtime details (timing, exact format). Mitigations: PR3's `entrypoint.sh` has a 30-second timeout (configurable via `RUNSECURE_LOG_UPLOAD_TIMEOUT`) and a host-mounted `_diag/` volume — if the marker is wrong, the wait times out and logs are still recoverable from the host.
+The alternative used here: the GitHub actions-runner is open source. Its source identified a
+line consistently emitted after local upload-queue processing stops. The original analysis
+mistook that local lifecycle boundary for remote-delivery confirmation. The v2.1.8 empirical
+result below corrected that interpretation. The bounded wait and host-mounted `_diag/` volume
+still reduce premature teardown and preserve the local trace, but neither proves remote
+persistence.
 
 ## Identified marker
 
@@ -18,8 +24,9 @@ The alternative used here: the GitHub actions-runner is open source. Read its so
 - **Why this string:** It is emitted by `Trace.Info(...)` inside `ShutdownAsync()` only after
   `ProcessFilesUploadQueueAsync`, `ProcessResultsUploadQueueAsync`, and
   `ProcessTimelinesUpdateQueueAsync` have all been awaited to completion, and after both the
-  job server and results server have been disposed — making it the last observable evidence
-  that every upload queue has been fully drained.
+  job server and results server have been disposed. It is the last observable evidence that
+  every local queue processor stopped. Because the marker is unconditional, it says nothing
+  about whether an attempted upload was accepted or persisted by GitHub.
 
 ## Upload sequence leading to the marker
 
@@ -28,11 +35,12 @@ Inside `JobServerQueue.ShutdownAsync()`, the sequence is:
 1. `"Fire signal to shutdown all queues."` — triggers in-flight work to wrap up
 2. `"All queue process task stopped."` — background dequeue tasks have exited
 3. `"Web console line queue drained."` — live console lines flushed (best-effort)
-4. `"File upload queue drained."` — step log file uploads complete (best-effort)
+4. `"File upload queue drained."` — local step-log upload queue drained (best-effort)
 5. `"Results upload queue drained."` — results service uploads complete
 6. `"Timeline update queue drained."` — timeline records (which carry output variables) flushed
 7. `"Disposing job server ..."` / `"Disposing results server ..."` — HTTP clients torn down
-8. **`"All queue process tasks have been stopped, and all queues are drained."`** <- MARKER
+8. **`"All queue process tasks have been stopped, and all queues are drained."`**
+   <- LOCAL-DRAIN MARKER
 
 The marker appears at step 8, unconditionally, in every code path through `ShutdownAsync()`.
 It is emitted regardless of whether the job succeeded, failed, or was cancelled.
@@ -71,17 +79,32 @@ as the default `RUNSECURE_LOG_UPLOAD_MARKER` in `entrypoint.sh`. The wait loop s
 
 1. Monitor the most-recent `_diag/Worker_*.log` for the marker via `grep -qF`.
 2. Exit the wait when the marker is found OR when `RUNSECURE_LOG_UPLOAD_TIMEOUT` (default 30s) elapses.
-3. Proceed with container exit either way.
+3. Report only that local queues drained; never call the marker remote delivery confirmation.
+4. Proceed with container exit either way.
 
 If the marker is absent within the timeout, proceed with exit; the persistent `_diag/`
 host volume preserves logs for operator-side recovery.
 
-Operators who observe BlobNotFound issues with this default can override via the env var
-while we collect empirical data.
+Remote persistence must be verified separately through GitHub's job-log API.
 
-## Future empirical verification
+## Empirical verification result (2026-07-21)
 
-To confirm the marker empirically, an operator with a scratch GitHub repository should:
+RunSecure v2.1.8 release validation observed the marker in each exercised runner while the
+GitHub job-log API returned HTTP 404 for all seven self-hosted jobs. The corresponding Squid
+evidence recorded `TCP_DENIED/403` for
+`productionresultssa15.blob.core.windows.net`, the dynamically named Azure Blob host selected
+by GitHub Actions. Therefore:
+
+- the marker correctly identifies local queue shutdown;
+- it cannot establish remote persistence or availability; and
+- live release acceptance must independently require a successful job-log API response.
+
+The egress baseline must include `.blob.core.windows.net`, which covers GitHub's dynamically
+selected Blob hostnames for logs, artifacts, and caches.
+
+## Future release acceptance
+
+For every release, an operator with a scratch GitHub repository should:
 
 1. Build the runner image with the instrumented entrypoint (`infra/scripts/entrypoint.discovery.sh`):
 
@@ -111,7 +134,7 @@ To confirm the marker empirically, an operator with a scratch GitHub repository 
    Confirm the marker `All queue process tasks have been stopped, and all queues are drained.`
    is present in all three runs, and note its position relative to the end of the file.
 
-5. Time `gh api .../jobs/<id>/logs` until 200 to verify the marker truly indicates upload completion:
+5. Time `gh api .../jobs/<id>/logs` until 200 to verify remote delivery independently:
 
    ```bash
    JOB_ID=$(gh run list -R <owner>/<repo> --workflow=discovery-failure.yml --limit 1 --json databaseId --jq '.[0].databaseId')
@@ -122,8 +145,6 @@ To confirm the marker empirically, an operator with a scratch GitHub repository 
    done
    ```
 
-   If `gh api` returns 200 at or before the marker appears, the marker is conservative (safe).
-   If `gh api` returns 200 only after the marker, the marker is the binding signal.
-   If `gh api` never returns 200, there is a deeper infrastructure issue.
+   The release passes only when the API returns 200. Marker presence alone is insufficient.
 
-6. Update this file with empirical results and remove the "PROVISIONAL" tag from the Status line.
+6. Record the API result and proxy evidence in the release acceptance receipt.

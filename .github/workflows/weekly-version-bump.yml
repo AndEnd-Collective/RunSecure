@@ -190,7 +190,30 @@ jobs:
                   infra/socket-proxy/go.mod infra/socket-proxy/go.sum
           git commit -m "chore(deps): weekly go get -u for $NEXT_VERSION"
           git push origin "HEAD:refs/heads/${BRANCH}"
-          gh pr create \
+          if PR_OUTPUT=$(gh pr create \
             --title "chore(deps): weekly Go dependency refresh for $NEXT_VERSION" \
             --body "Automated 'go get -u ./... && go mod tidy' on both Go modules so dependencies never go stale between releases. CI — including the per-image Grype scans — gates this PR." \
-            --base main --head "$BRANCH"
+            --base main --head "$BRANCH" 2>&1); then
+            printf '%s\n' "$PR_OUTPUT"
+            exit 0
+          else
+            PR_STATUS=$?
+          fi
+
+          printf '%s\n' "$PR_OUTPUT" >&2
+          POLICY_ERROR='GitHub Actions is not permitted to create or approve pull requests'
+          if [[ "$PR_OUTPUT" == *"$POLICY_ERROR"* ]]; then
+            PR_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${BRANCH}"
+            echo "::warning title=Go dependency PR requires operator action::Repository policy blocked PR creation. The dependency refresh remains on ${BRANCH}; open ${PR_URL}."
+            {
+              printf '### Go dependency refresh requires operator action\n\n'
+              printf -- '- Branch: `%s`\n' "$BRANCH"
+              printf -- '- Open the PR: %s\n' "$PR_URL"
+              printf -- '- Cause: repository policy blocks GitHub Actions from creating pull requests.\n\n'
+              printf 'The release tag and image cascade remain valid. Review and merge this dependency refresh before the next release.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "::error title=Go dependency PR creation failed::The dependency refresh remains on ${BRANCH}; gh exited with status ${PR_STATUS}."
+          exit "$PR_STATUS"

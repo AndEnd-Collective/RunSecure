@@ -1,0 +1,266 @@
+# Operator-dispatched acceptance for the exact released persistent stack.
+# Start the orchestrator at the requested capacity before dispatching this
+# workflow. The runtime jobs deliberately use no actions or project
+# dependencies: they isolate runner delivery, provenance, concurrency, and
+# GitHub log persistence from application CI.
+name: live-release-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: "Exact RunSecure version injected into each runner"
+        required: true
+        type: string
+      expected_build_sha:
+        description: "Exact RunSecure build SHA injected into each runner"
+        required: true
+        type: string
+      expected_parallelism:
+        description: "Expected simultaneous runner capacity"
+        required: true
+        default: 3
+        type: number
+
+permissions: {}
+
+concurrency:
+  # Two live gates must not interleave their four-job waves on the same
+  # repository runner pool; that would make either run's concurrency evidence
+  # ambiguous even though each verification job is scoped to its own run ID.
+  group: live-release-acceptance
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: runtime-${{ matrix.slot }}
+    runs-on: [self-hosted, Linux, ARM64, container]
+    timeout-minutes: 5
+    permissions: {}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1, 2, 3, 4]
+    steps:
+      - name: Verify released runner delivery
+        shell: bash
+        env:
+          EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+
+          [[ "${RUNSECURE_VERSION:-}" == "$EXPECTED_VERSION" ]]
+          [[ "${RUNSECURE_BUILD_SHA:-}" == "$EXPECTED_BUILD_SHA" ]]
+          [[ -n "${RUNSECURE_SCOPE:-}" ]]
+          [[ -n "${RUNSECURE_SPAWN_ID:-}" ]]
+          [[ -n "${RUNNER_NAME:-}" ]]
+          [[ "${RUNNER_NAME}" == rs-*-runner ]]
+          [[ "$(id -u)" == 1001 ]]
+          ! command -v sudo >/dev/null 2>&1
+
+          [[ "${HTTP_PROXY:-}" == "${http_proxy:-}" ]]
+          [[ "${HTTPS_PROXY:-}" == "${https_proxy:-}" ]]
+          [[ "${NO_PROXY:-}" == "${no_proxy:-}" ]]
+          [[ "${HTTP_PROXY:-}" == "http://proxy:3128" ]]
+
+          [[ -n "${RUNNER_TEMP:-}" && -w "$RUNNER_TEMP" ]]
+          probe=$(mktemp "$RUNNER_TEMP/runsecure-live.XXXXXX")
+          printf 'slot=%s spawn=%s\n' '${{ matrix.slot }}' "$RUNSECURE_SPAWN_ID" > "$probe"
+          rm -f "$probe"
+
+          curl -fsS --connect-timeout 10 --max-time 20 \
+            -o /dev/null https://api.github.com/meta
+
+          # Keep all four jobs eligible long enough to prove a three-runner
+          # wave and the fourth-job replacement after one slot is released.
+          sleep 30
+          echo "RUNSECURE_LIVE_COMPLETE slot=${{ matrix.slot }} spawn=${RUNSECURE_SPAWN_ID}"
+
+  verify:
+    name: verify-runtime-delivery-and-logs
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Verify concurrency, runner identities, and persisted logs
+        shell: bash
+        env:
+          EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha }}
+          EXPECTED_PARALLELISM: ${{ inputs.expected_parallelism }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          GH_TOKEN: ${{ github.token }}
+          RECEIPT_PATH: .live-acceptance/receipt.json
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import time
+
+          repository = os.environ["REPOSITORY"]
+          run_id = os.environ["RUN_ID"]
+          run_attempt = int(os.environ["RUN_ATTEMPT"])
+          expected_version = os.environ["EXPECTED_VERSION"]
+          expected_build_sha = os.environ["EXPECTED_BUILD_SHA"]
+          expected_parallelism = int(os.environ["EXPECTED_PARALLELISM"])
+          receipt_path = pathlib.Path(os.environ["RECEIPT_PATH"])
+          if not 1 <= expected_parallelism <= 4:
+              raise SystemExit("expected_parallelism must be between 1 and 4")
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected_version) is None:
+              raise SystemExit("expected_version must be an exact semver")
+          if re.fullmatch(r"[0-9a-f]{40,64}", expected_build_sha) is None:
+              raise SystemExit("expected_build_sha must be a full hexadecimal commit SHA")
+          endpoint = f"repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
+
+          response = subprocess.run(
+              ["gh", "api", "-X", "GET", endpoint],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          jobs = [
+              job
+              for job in json.loads(response.stdout)["jobs"]
+              if job["name"].startswith("runtime-")
+          ]
+          if len(jobs) != 4:
+              raise SystemExit(f"expected 4 runtime jobs, found {len(jobs)}")
+          if any(job["conclusion"] != "success" for job in jobs):
+              raise SystemExit("not every runtime job succeeded")
+
+          runner_ids = {job["runner_id"] for job in jobs}
+          runner_names = {job["runner_name"] for job in jobs}
+          if 0 in runner_ids or len(runner_ids) != 4 or len(runner_names) != 4:
+              raise SystemExit("runtime jobs did not use four distinct JIT runners")
+
+          def timestamp(value: str) -> dt.datetime:
+              if not value:
+                  raise SystemExit("runtime job is missing a lifecycle timestamp")
+              return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          # Half-open intervals: an end at T releases capacity before a start
+          # at T. This prevents second-resolution timestamps from inventing a
+          # fourth concurrent runner at the handoff boundary.
+          events: list[tuple[dt.datetime, int, int]] = []
+          for job in jobs:
+              started = timestamp(job.get("started_at", ""))
+              completed = timestamp(job.get("completed_at", ""))
+              if completed <= started:
+                  raise SystemExit(f"runtime job {job['id']} has invalid timestamps")
+              events.append((started, 1, job["id"]))
+              events.append((completed, 0, job["id"]))
+          active = 0
+          maximum = 0
+          for _, event_order, _ in sorted(events):
+              active += 1 if event_order == 1 else -1
+              maximum = max(maximum, active)
+          if maximum != expected_parallelism:
+              raise SystemExit(
+                  f"expected maximum parallelism {expected_parallelism}, observed {maximum}"
+              )
+
+          jobs_by_id = {job["id"]: job for job in jobs}
+          missing = set(jobs_by_id)
+          log_evidence: dict[int, dict[str, object]] = {}
+          deadline = time.monotonic() + 120
+          while missing and time.monotonic() < deadline:
+              for job_id in tuple(missing):
+                  job = jobs_by_id[job_id]
+                  slot_match = re.fullmatch(r"runtime-([1-4])", job["name"])
+                  runner_match = re.fullmatch(r"rs-(.+)-runner", job["runner_name"])
+                  if slot_match is None or runner_match is None:
+                      raise SystemExit(f"runtime job {job_id} has an invalid job or runner name")
+                  slot = int(slot_match.group(1))
+                  spawn_id = runner_match.group(1)
+                  expected_marker = (
+                      f"RUNSECURE_LIVE_COMPLETE slot={slot} spawn={spawn_id}"
+                  ).encode()
+                  result = subprocess.run(
+                      [
+                          "gh",
+                          "api",
+                          "-X",
+                          "GET",
+                          f"repos/{repository}/actions/jobs/{job_id}/logs",
+                      ],
+                      check=False,
+                      capture_output=True,
+                  )
+                  if (
+                      result.returncode == 0
+                      and len(result.stdout) > 0
+                      and expected_marker in result.stdout
+                  ):
+                      log_evidence[job_id] = {
+                          "bytes": len(result.stdout),
+                          "completion_marker": expected_marker.decode(),
+                          "verified": True,
+                      }
+                      missing.remove(job_id)
+              if missing:
+                  time.sleep(5)
+          if missing:
+              raise SystemExit(
+                  "GitHub job logs never contained their exact runtime completion "
+                  f"markers: {sorted(missing)}"
+              )
+
+          receipt_jobs = []
+          for job in sorted(jobs, key=lambda item: item["name"]):
+              receipt_jobs.append(
+                  {
+                      "completed_at": job["completed_at"],
+                      "conclusion": job["conclusion"],
+                      "job_id": job["id"],
+                      "job_name": job["name"],
+                      "log": log_evidence[job["id"]],
+                      "runner_id": job["runner_id"],
+                      "runner_name": job["runner_name"],
+                      "started_at": job["started_at"],
+                  }
+              )
+          receipt = {
+              "all_logs_verified": True,
+              "all_runtime_jobs_successful": True,
+              "expected_build_sha": expected_build_sha,
+              "expected_parallelism": expected_parallelism,
+              "expected_version": expected_version,
+              "jobs": receipt_jobs,
+              "observed_max_parallelism": maximum,
+              "repository": repository,
+              "run_attempt": run_attempt,
+              "run_id": int(run_id),
+              "runtime_job_count": len(receipt_jobs),
+              "schema_version": 1,
+              "workflow_path": ".github/workflows/live-release-acceptance.yml",
+          }
+          receipt_path.parent.mkdir(parents=True, exist_ok=True)
+          receipt_path.write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          print(
+              f"verified 4 runners, maximum parallelism {maximum}, "
+              f"and 4 persisted job logs; receipt={receipt_path}"
+          )
+          PY
+
+      - name: Upload exact live-acceptance receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-release-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .live-acceptance/receipt.json
+          if-no-files-found: error
+          retention-days: 90

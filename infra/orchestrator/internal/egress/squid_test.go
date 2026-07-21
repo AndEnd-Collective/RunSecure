@@ -2,6 +2,9 @@ package egress
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -431,42 +434,32 @@ func TestRenderSquid_GitHubCoreBaseline_WithProjectDomains(t *testing.T) {
 	}
 }
 
-// TestRenderSquid_GitHubCoreConstant_MatchesBaseConf is a static consistency
-// check: GitHubCoreDomains must contain all 11 domains from base.conf's
-// github_core ACL. If a domain is added to base.conf and not here (or vice
-// versa) a runner in the compose backend will have a different allowlist than
-// one running through run.sh, creating a latent divergence.
+// TestRenderSquid_GitHubCoreConstant_MatchesBaseConf verifies the two runtime
+// paths use the exact same GitHub control-plane baseline. The one-shot path
+// reads base.conf while the persistent orchestrator renders the Go constant.
 func TestRenderSquid_GitHubCoreConstant_MatchesBaseConf(t *testing.T) {
-	// These are the domains from infra/squid/base.conf's github_core ACL.
-	// Sync: if base.conf changes, update this test AND GitHubCoreDomains.
-	wantDomains := []string{
-		".github.com",
-		"api.github.com",
-		".githubusercontent.com",
-		".actions.githubusercontent.com",
-		".objects.githubusercontent.com",
-		".github.githubassets.com",
-		".ghcr.io",
-		".pkg.github.com",
-		".pipelines.actions.githubusercontent.com",
-		".results-receiver.actions.githubusercontent.com",
-		".vstoken.actions.githubusercontent.com",
+	baseConfPath := filepath.Join("..", "..", "..", "squid", "base.conf")
+	baseConf, err := os.ReadFile(baseConfPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", baseConfPath, err)
 	}
 
-	inConst := map[string]bool{}
-	for _, d := range GitHubCoreDomains {
-		inConst[d] = true
-	}
-
-	for _, want := range wantDomains {
-		if !inConst[want] {
-			t.Errorf("domain %q is in base.conf github_core but missing from GitHubCoreDomains", want)
+	const prefix = "acl github_core dstdomain "
+	var baseDomains []string
+	for line := range strings.SplitSeq(string(baseConf), "\n") {
+		if domain, ok := strings.CutPrefix(line, prefix); ok {
+			baseDomains = append(baseDomains, domain)
 		}
 	}
 
-	if len(GitHubCoreDomains) != len(wantDomains) {
-		t.Errorf("GitHubCoreDomains has %d entries, base.conf github_core has %d; they must match",
-			len(GitHubCoreDomains), len(wantDomains))
+	if !slices.Equal(GitHubCoreDomains, baseDomains) {
+		t.Fatalf("GitHub core baseline differs between Go renderer and base.conf:\nGo:   %v\nSquid: %v",
+			GitHubCoreDomains, baseDomains)
+	}
+
+	const blobSuffix = ".blob.core.windows.net"
+	if !slices.Contains(GitHubCoreDomains, blobSuffix) {
+		t.Fatalf("GitHub Actions log/artifact host suffix %q missing from core baseline", blobSuffix)
 	}
 }
 

@@ -16,14 +16,17 @@ _safe() { "$@" 2>/dev/null || true; }
 
 echo "::group::RunSecure container — exit summary"
 echo "Job ended:       $(_safe date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The awk program must keep its field references literal for awk to expand.
+# shellcheck disable=SC2016
 echo "Memory peak:     $(_safe awk '/VmHWM/ {print $2 " " $3}' /proc/self/status)"
 echo "Process count:   $(_safe ls /proc | grep -cE '^[0-9]+$')"
 # Inspect /tmp for leftover artifacts (jobs that downloaded things)
 TMP_FILES=$(_safe find /tmp -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
 echo "/tmp entries:    ${TMP_FILES:-0}  (will be discarded — container is --rm)"
 echo ""
-echo "Container will exit and be destroyed. Worker log uploaded to GitHub."
-echo "If logs show 'BlobNotFound', orchestrator's _diag/Worker_*.log has the full trace."
+echo "Container will exit and be destroyed after runner shutdown."
+echo "This hook does not confirm remote GitHub log availability."
+echo "If GitHub logs are unavailable, orchestrator's _diag/Worker_*.log has the local trace."
 echo "::endgroup::"
 
 exit 0

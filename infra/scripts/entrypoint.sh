@@ -4,13 +4,15 @@
 # ============================================================================
 # Starts the GitHub Actions runner with JIT configuration.
 #
-# After the runner exits, this entrypoint waits for the runner's log
-# upload to complete (so the GitHub UI shows actual stderr instead of
-# BlobNotFound) and then exits with the runner's exit code.
+# After the runner exits, this entrypoint checks the runner's local upload-
+# queue drain marker before exiting with the runner's exit code. The marker
+# proves only that the runner finished processing its local queues; it does
+# not prove that GitHub persisted the remote job log.
 #
 # The wait is bounded by RUNSECURE_LOG_UPLOAD_TIMEOUT (default 30s).
 # The marker we wait for is in RUNSECURE_LOG_UPLOAD_MARKER. Both are
-# overridable via the orchestrator environment.
+# overridable via the orchestrator environment. Remote log availability must
+# be validated independently through GitHub's job-log API.
 #
 # If the wait times out, the host-mounted _diag/ volume preserves the
 # logs for operator-side recovery. See infra/scripts/run.sh.
@@ -72,8 +74,9 @@ unset RUNNER_JIT_CONFIG
 # --- Default values for log-upload wait ---
 LOG_UPLOAD_TIMEOUT="${RUNSECURE_LOG_UPLOAD_TIMEOUT:-30}"
 # Default marker is the final unconditional Trace.Info() emitted by
-# JobServerQueue.ShutdownAsync() after all upload queues drain. Source-
-# verified in PR2; see tests/discovery/findings.md.
+# JobServerQueue.ShutdownAsync() after all local queue processors stop. It is
+# emitted even when a remote upload failed, so it is a local drain marker, not
+# a remote-delivery receipt. See tests/discovery/findings.md.
 LOG_UPLOAD_MARKER="${RUNSECURE_LOG_UPLOAD_MARKER:-All queue process tasks have been stopped, and all queues are drained.}"
 
 # --- Start the runner as a foreground child ---
@@ -93,9 +96,9 @@ wait "${RUNNER_PID}"
 RUNNER_EXIT_CODE=$?
 set -e
 
-echo "[RunSecure] Runner exited (code: ${RUNNER_EXIT_CODE}). Waiting for log upload (timeout: ${LOG_UPLOAD_TIMEOUT}s)..."
+echo "[RunSecure] Runner exited (code: ${RUNNER_EXIT_CODE}). Waiting for local upload queues to drain (timeout: ${LOG_UPLOAD_TIMEOUT}s)..."
 
-# --- Wait for the upload-complete marker ---
+# --- Wait for the local upload-queue drain marker ---
 # Portable "newest matching file": uses bash's -nt comparison instead of
 # `find -printf` (GNU-only) or `ls -t` (shellcheck SC2012). Works on
 # Linux containers AND on macOS hosts running the integration tests.
@@ -112,18 +115,20 @@ DEADLINE=$(( $(date +%s) + LOG_UPLOAD_TIMEOUT ))
 
 if [[ -z "${WORKER_LOG}" ]]; then
     echo "[RunSecure] WARNING: no Worker_*.log found in _diag/. Skipping wait."
-elif grep -q "${LOG_UPLOAD_MARKER}" "${WORKER_LOG}" 2>/dev/null; then
-    echo "[RunSecure] Log upload already confirmed in worker log."
+elif grep -qF -- "${LOG_UPLOAD_MARKER}" "${WORKER_LOG}" 2>/dev/null; then
+    echo "[RunSecure] Runner upload queues drained locally."
+    echo "[RunSecure] Remote GitHub log availability is not independently verified."
 else
     while (( $(date +%s) < DEADLINE )); do
-        if grep -q "${LOG_UPLOAD_MARKER}" "${WORKER_LOG}" 2>/dev/null; then
-            echo "[RunSecure] Log upload confirmed."
+        if grep -qF -- "${LOG_UPLOAD_MARKER}" "${WORKER_LOG}" 2>/dev/null; then
+            echo "[RunSecure] Runner upload queues drained locally."
+            echo "[RunSecure] Remote GitHub log availability is not independently verified."
             break
         fi
         sleep 1
     done
     if (( $(date +%s) >= DEADLINE )); then
-        echo "[RunSecure] WARNING: log upload wait timed out after ${LOG_UPLOAD_TIMEOUT}s."
+        echo "[RunSecure] WARNING: local upload-queue drain marker was not observed after ${LOG_UPLOAD_TIMEOUT}s."
         echo "[RunSecure] _diag/ is host-mounted; logs are recoverable from the host."
     fi
 fi

@@ -373,12 +373,33 @@ PROMOTION: the `-canary` tag exists and consumers can opt into it, but
 the stable `<version>` and `latest` tags are not created until the
 acceptance suite is fully green. Promotion is manual so an operator can also
 require the live multi-runner backlog acceptance before releasing stable tags.
+
+Before promotion, make sure no older matching jobs are queued, start the
+persistent orchestrator from the exact canary release at the intended
+capacity, then dispatch the dependency-free live gate at the release tag:
+
+```bash
+gh workflow run live-release-acceptance.yml --ref v<release-version> \
+  -f expected_version=<release-version> \
+  -f expected_build_sha=<tag-commit-sha> \
+  -f expected_parallelism=3
+```
+
+The gate submits four matching jobs. It requires four distinct JIT runners,
+exactly three jobs in progress at once, the fourth job to consume the released
+slot, injected release provenance, writable runner state, proxy parity, and a
+successful GitHub job-log API response for every job. The local runner queue
+drain marker is not accepted as proof that GitHub persisted a log. The hosted
+verifier uploads a receipt bound to the release version, commit, run attempt,
+jobs, runners, observed parallelism, and log evidence.
+
 The promotion (`promote-to-stable.yml`) runs server-side via
 `docker buildx imagetools create` — no rebuild, no pull, the stable tag points
 at the exact same digest the acceptance suite validated. The dispatch requires
-both the tag-push `Publish Images` run ID and its successful automatic
-`post-publish-acceptance` run ID. Promotion downloads the manifest artifact
-from each run and requires them to match byte-for-byte.
+the tag-push `Publish Images` run ID, its successful automatic
+`post-publish-acceptance` run ID, and the successful live-acceptance run ID.
+Promotion downloads the manifest and live receipt artifacts and requires their
+version and build provenance to match exactly.
 
 Before changing a tag, the promotion command resolves all 12 immutable source
 digests, matching canary tags, version-tag conflicts, and current aliases. It
@@ -390,9 +411,10 @@ that rare residual is reported explicitly and requires operator repair.
 
 ```bash
 gh workflow run promote-to-stable.yml --ref main \
-  -f image_version=2.1.8 \
+  -f image_version=<release-version> \
   -f publish_run_id=<publish-run-id> \
-  -f acceptance_run_id=<automatic-acceptance-run-id>
+  -f acceptance_run_id=<automatic-acceptance-run-id> \
+  -f live_acceptance_run_id=<live-acceptance-run-id>
 ```
 
 Each successful publish also uploads a 90-day

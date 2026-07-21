@@ -40,6 +40,10 @@ var GitHubCoreDomains = []string{
 	".pipelines.actions.githubusercontent.com",
 	".results-receiver.actions.githubusercontent.com",
 	".vstoken.actions.githubusercontent.com",
+	// GitHub Actions uses dynamically named Azure Blob hosts for job logs,
+	// artifacts, and caches. GitHub documents the full suffix as required for
+	// self-hosted runners, so an account-specific hostname is not sufficient.
+	".blob.core.windows.net",
 }
 
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
