@@ -51,7 +51,7 @@ Each CI job runs in a fresh container that:
 | **No privilege escalation** | `no-new-privileges:true`, all setuid bits stripped |
 | **Restricted syscalls** | Custom seccomp profile blocks `ptrace`, `mount`, `bpf`, `keyctl`, `swapon`, etc. |
 | **Read-only system paths** | `/etc` is `chmod 555`; `/etc/passwd` and `/etc/group` are `444` |
-| **No package manager** | `apt`/`dpkg` removed in finalize-hardening; nothing can be installed at runtime |
+| **No package manager** | `apt`/`dpkg` executables and mutable state removed; only read-only dpkg inventory remains for Syft/Grype |
 | **No network recon tools** | `ping`, `nc`, `ssh`, `wget` removed |
 | **Egress allowlist** | Network goes through Squid (HTTP/HTTPS) + HAProxy (raw TCP) + dnsmasq (DNS). Anything not on your allowlist is blocked. |
 | **Cloud-metadata blocked** | `169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254` all refused |
@@ -247,6 +247,12 @@ version: "1.1.1"                       # Pin a published release (skip for
                                        # local-build mode)
 ```
 
+For versioned configs with `tools:`, `apt:`, or hardening overrides, the
+terminal language image identifies the exact immutable `*-build` digest that
+produced it. `compose-image.sh` pulls that digest and runs the recipes and
+finalizer embedded in that release. A missing label, mismatched package, or
+failed digest pull is fatal; it never substitutes the current checkout.
+
 Validate any `runner.yml` against the schema:
 
 ```bash
@@ -329,10 +335,17 @@ Docker network and exercise CI workflows end-to-end:
 ./tests/integration/run-integration-tests.sh --test python    # Python CI lifecycle
 ```
 
-A separate Grype CVE scan runs in CI on every PR that touches
-`images/` or `tools/`. The post-publish workflow re-scans every image
-that gets pushed to GHCR — a HIGH/CRITICAL CVE with an upstream fix
-blocks the publish.
+A separate Grype CVE scan runs in CI on every PR that touches image
+construction, terminal hardening, scanner validation, or `tools/`. For the
+finalized Node image, Syft must still catalogue the language-layer `nodejs`
+Debian package from the read-only `/var/lib/dpkg/status` inventory and `npm`
+through its JavaScript package cataloger. The blocking scan uses one explicit
+Syft SBOM for both Grype outputs. It excludes only Syft's generic raw-binary
+classifiers, which otherwise lose distro patch context after dpkg ownership
+files are removed; dpkg, npm, Python, Go, Cargo, and .NET catalogers remain
+enabled and are checked before Grype runs. The post-publish workflow re-scans
+every image pushed to GHCR — a HIGH/CRITICAL ecosystem-aware CVE with an
+upstream fix blocks the publish.
 
 ---
 
@@ -358,10 +371,35 @@ Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
 to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
 PROMOTION: the `-canary` tag exists and consumers can opt into it, but
 the stable `<version>` and `latest` tags are not created until the
-acceptance suite is fully green. The promotion (`promote-to-stable.yml`)
-runs server-side via `docker buildx imagetools create` — no rebuild,
-no pull, the stable tag points at the exact same digest the acceptance
-suite validated.
+acceptance suite is fully green. Promotion is manual so an operator can also
+require the live multi-runner backlog acceptance before releasing stable tags.
+The promotion (`promote-to-stable.yml`) runs server-side via
+`docker buildx imagetools create` — no rebuild, no pull, the stable tag points
+at the exact same digest the acceptance suite validated. The dispatch requires
+both the tag-push `Publish Images` run ID and its successful automatic
+`post-publish-acceptance` run ID. Promotion downloads the manifest artifact
+from each run and requires them to match byte-for-byte.
+
+Before changing a tag, the promotion command resolves all 12 immutable source
+digests, matching canary tags, version-tag conflicts, and current aliases. It
+creates and verifies the complete immutable version-tag set before moving any
+floating `latest*` alias. If an alias update fails, aliases that existed before
+the run are restored to their captured digests. A newly created alias cannot be
+safely deleted with Buildx without risking other tags that share its manifest;
+that rare residual is reported explicitly and requires operator repair.
+
+```bash
+gh workflow run promote-to-stable.yml --ref main \
+  -f image_version=2.1.8 \
+  -f publish_run_id=<publish-run-id> \
+  -f acceptance_run_id=<automatic-acceptance-run-id>
+```
+
+Each successful publish also uploads a 90-day
+`release-image-manifest-<version>` artifact. Its JSON maps the proxy,
+orchestrator, socket-proxy, and language variants to the immutable manifest
+digests produced by their build steps, so downstream operator locks do not
+need to resolve moving tags.
 
 To run the same suite locally against your dev images:
 
@@ -395,7 +433,7 @@ What you see in the Security tab when a claim fails:
 
 | Column | Value |
 |---|---|
-| **Rule** | `H03` — *"Package manager removed (apt/dpkg/aptitude)"* |
+| **Rule** | `H03` — *"Package-manager functionality removed; scanner inventory retained read-only"* |
 | **Severity** | error |
 | **Description** | "Acceptance claim H03 FAILED for ghcr.io/.../node:1.2.3-canary-24: package manager 'apt' still present at /usr/bin/apt" |
 | **Location** | `SECURITY.md` line 1 (anchor: layer-1-image-hardening-build-time) |
@@ -423,11 +461,12 @@ Images are at `ghcr.io/andend-collective/runsecure/<image>:<tag>`. Three tag sty
 | Tag form | Example | What it points at | When to use |
 |---|---|---|---|
 | **Pinned** | `python:1.1.5-3.12` | One specific build, byte-identical forever | Production. Lock to a known-good build; bump deliberately. |
-| **Floating minor** | `python:1.1-3.12` | The latest patch of the 1.1.x line | Stable projects that want auto-patches but not breaking changes. (Tag is published only by promote-to-stable after acceptance.) |
 | **Rolling latest** | `python:latest-3.12` | Whatever the most recent successful release was | Local development, CI scratchpads. **Do not use in production** — a new release can silently change behavior under you. |
 | **Canary** | `python:1.1.5-canary-3.12` | The just-published, not-yet-acceptance-validated build | Don't pull this directly. It exists so the acceptance suite can test before promote. |
 
-The promotion is server-side via `docker buildx imagetools create` — `:1.1.5`, `:1.1`, and `:latest` are all the same digest as the canary that passed acceptance. No rebuild, no drift.
+The promotion is server-side via `docker buildx imagetools create` — `:1.1.5`
+and `:latest` are the same digest as the canary that passed acceptance. No
+rebuild, no drift.
 
 ### Verify what you pulled
 
@@ -450,7 +489,7 @@ If `revision` doesn't match a commit on `main` of the source repo, the image isn
 
 - A new patch release ships every Monday at 02:30 UTC (`weekly-version-bump.yml`).
 - Pinned tags (`:1.1.5`, `:1.1.5-3.12`, etc.) are **never moved**. Once published, the digest behind that tag is permanent.
-- Floating tags (`:1.1`, `:1.1-3.12`, `:latest`, `:latest-3.12`) move on every release.
+- Rolling tags (`:latest`, `:latest-3.12`, etc.) move on every release.
 - We do not delete old pinned tags. Consumers can stay on an older pin indefinitely; security fixes only land in newer pins.
 
 ### Anti-patterns — don't do this
@@ -616,6 +655,11 @@ To consume a release as a project:
 version: "1.1.2"
 runtime: node:24
 ```
+
+Released language packages are terminal images. Their companion
+`node-build`, `python-build`, and `rust-build` packages are immutable
+composition inputs only: they are retained by digest, never admitted by the
+runtime socket-proxy allowlist, and finalized before a project image can run.
 
 To trigger a manual release:
 

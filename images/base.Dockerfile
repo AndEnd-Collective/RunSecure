@@ -1,5 +1,5 @@
 # ============================================================================
-# RunSecure — Hardened GitHub Actions Runner Base Image
+# RunSecure — GitHub Actions Runner Composition Base Image
 # ============================================================================
 # debian:bookworm-slim (~28 MB) + GitHub Actions runner binary + minimal tools
 #
@@ -11,7 +11,7 @@
 #   5.  Non-root user (UID 1001)
 #   6.  Locked root account + no shell
 #   7.  Stripped all setuid/setgid binaries
-#   8.  Removed package manager (apt/dpkg)
+#   8.  Package manager retained for build-only language composition
 #   9.  Removed network recon tools
 #  10.  Removed su/sudo/cron
 #  11.  Minimal PATH
@@ -51,14 +51,15 @@ ARG TARGETARCH
 # (description is auto-promoted), and most container security scanners.
 # `documentation` is the single canonical pointer for consumers asking
 # "what is this and how am I supposed to use it".
-LABEL org.opencontainers.image.title="RunSecure Base"
-LABEL org.opencontainers.image.description="Hardened ephemeral GitHub Actions self-hosted runner base image. One job per container, then destroyed. See documentation for proper usage."
+LABEL org.opencontainers.image.title="RunSecure Composition Base"
+LABEL org.opencontainers.image.description="Build-only input for RunSecure language images. Contains package-manager functionality and must never be launched as a CI runner."
 LABEL org.opencontainers.image.source="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.documentation="https://github.com/AndEnd-Collective/RunSecure#consuming-runsecure-images"
 LABEL org.opencontainers.image.url="https://github.com/AndEnd-Collective/RunSecure"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="AndEnd Collective"
-LABEL security.hardening="full"
+LABEL security.hardening="build-only"
+LABEL io.runsecure.image-role="composition-base"
 
 # ---- System dependencies ----------------------------------------------------
 # Pin versions and use --no-install-recommends to minimize attack surface.
@@ -132,8 +133,12 @@ RUN mkdir -p /home/runner/_work /home/runner/_diag \
 # These binaries allow privilege escalation; none are needed for CI.
 RUN find / -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
 
-# ---- Security hardening: remove dangerous utilities -------------------------
+# ---- Security hardening: remove dangerous runtime utilities -----------------
 # Remove tools commonly used for recon, lateral movement, or escalation.
+# Account-management helpers are intentionally retained in this build-only
+# layer because Debian package maintainer scripts may need them while project
+# tools are composed. finalize-hardening.sh removes them from every terminal
+# language/project image after all package installation is complete.
 RUN rm -f \
       /usr/bin/su \
       /usr/bin/sudo \
@@ -148,16 +153,8 @@ RUN rm -f \
       /usr/bin/chsh \
       /usr/bin/chfn \
       /usr/bin/newgrp \
-      /usr/sbin/adduser \
-      /usr/sbin/useradd \
-      /usr/sbin/userdel \
-      /usr/sbin/usermod \
-      /usr/sbin/groupadd \
-      /usr/sbin/groupdel \
-      /usr/sbin/groupmod \
       /bin/mount \
       /bin/umount \
-      /usr/bin/passwd \
     2>/dev/null || true
 
 # ---- Security hardening: lock root account ----------------------------------
@@ -167,9 +164,10 @@ RUN passwd -l root 2>/dev/null || true \
 
 # ---- NOTE: apt is intentionally KEPT in the base image ---------------------
 # Language layers (node, python, rust) and tool recipes need apt to install
-# packages. The package manager is removed in the FINAL image produced by
-# compose-image.sh via finalize-hardening.sh. In intermediate images, the
-# runner user (UID 1001) cannot install system packages without root access.
+# packages. The package manager is removed by finalize-hardening.sh in each
+# language Dockerfile's default terminal stage and in project images produced
+# by compose-image.sh. In this private intermediate image, the runner user
+# (UID 1001) cannot install system packages without root access.
 
 # ---- Security hardening: minimal PATH --------------------------------------
 ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local/bin:/usr/bin:/bin"

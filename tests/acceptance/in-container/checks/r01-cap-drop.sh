@@ -1,7 +1,20 @@
 #!/bin/bash
-# R01: cap_drop ALL — capability-using operations fail
-# Tested via syscalls that require specific caps.
+# R01: cap_drop ALL — all Linux capability masks are empty and operations
+# requiring capabilities fail. Inspecting the masks is the authoritative
+# check: Docker commonly sets net.ipv4.ip_unprivileged_port_start=0, which
+# allows an unprivileged process to bind port 80 without NET_BIND_SERVICE.
 source "$(dirname "$0")/../lib.sh"
+
+for field in CapInh CapPrm CapEff CapBnd CapAmb; do
+    value=$(awk -v key="${field}:" '$1 == key { print $2 }' /proc/self/status)
+    if [[ -z "$value" ]]; then
+        fail R01 "$field missing from /proc/self/status"
+    elif [[ "$value" =~ ^0+$ ]]; then
+        pass R01 "$field is empty (cap_drop ALL)"
+    else
+        fail R01 "$field=$value (expected all zeroes)"
+    fi
+done
 
 # CAP_NET_RAW: opening a raw socket
 # We use python because nothing else portable is left after hardening.
@@ -25,17 +38,6 @@ src = os.path.expanduser('~/.acceptance-mount-test')
 os.makedirs(src, exist_ok=True)
 ret = libc.mount(b'tmpfs', src.encode(), b'tmpfs', 0, b'')
 exit(0 if ret == 0 else 1)
-"
-fi
-
-# CAP_NET_BIND_SERVICE: binding ports < 1024
-# (only the proxy gets this cap; runner doesn't)
-if command -v python3 >/dev/null 2>&1; then
-    expect_fail R01 "cannot bind privileged port (CAP_NET_BIND_SERVICE dropped)" -- \
-        python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.bind(('0.0.0.0', 80))
 "
 fi
 

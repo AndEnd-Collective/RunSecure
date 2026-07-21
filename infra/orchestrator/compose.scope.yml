@@ -2,13 +2,14 @@
 #
 # Usage:
 #   export RUNSECURE_SCOPE=datacentric
-#   docker compose -f infra/orchestrator/compose.scope.yml \
+#   infra/scripts/orchestrator-compose.sh \
 #     --env-file infra/orchestrator/scopes/datacentric.env up -d
 #
-# Three containers per stack:
+# Long-running containers per stack:
 #   - orchestrator: distroless Go binary; polls GitHub, spawns runners via socket-proxy
 #   - socket-proxy: distroless Go binary; the ONLY thing mounting docker.sock
 #   - orch-egress:  the orchestrator's only outbound HTTP path (api.github.com allowlist)
+#   - operator-relay: path-restricted localhost bridge for health/state probes
 services:
   socket-proxy:
     image: ${RUNSECURE_SOCKET_PROXY_IMAGE}
@@ -29,14 +30,10 @@ services:
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
       # Egress-volume gate: only role=proxy may mount this named volume.
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
-      # Optional: operator-supplied extra allowlist for release-specific digests.
-      # At release time the newly-published image digests are not yet baked into
-      # the socket-proxy image (bootstrap problem, #54 fix 3). The container path
-      # is fixed; point RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST (in the scope
-      # .env file, gitignored) at a real host file to populate it — the volume
-      # mount below defaults to /dev/null (parses as zero extra entries) when
-      # unset, so this is a no-op until an operator opts in. Never hardcode a
-      # host path here; see install.md.
+      # Matching release images are baked into the same release's socket-proxy
+      # allowlist. This optional file is only for operator-supplied custom image
+      # digests. The mount defaults to /dev/null (zero extra entries) when unset;
+      # never hardcode an operator host path here. See install.md.
       RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -94,21 +91,81 @@ services:
       - egress-configs:/data
     security_opt: ["no-new-privileges:true"]
 
+  pat-init:
+    # The operator requires a host PAT owned by the invoking user at mode 0400.
+    # UID 65532 in the orchestrator cannot read that bind mount on native Linux,
+    # so copy it into an owned named volume before the service starts. The host
+    # file remains read-only and is never exposed through the environment.
+    image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    container_name: rs-orch-${RUNSECURE_SCOPE}-pat-init
+    restart: "no"
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    environment:
+      # Set only by infra/scripts/orchestrator-compose.sh after an os.lstat
+      # host check. Requiring it makes an accidental raw Compose launch fail
+      # closed; it is not a security boundary against a malicious operator.
+      RUNSECURE_PAT_HOST_VALIDATED: ${RUNSECURE_PAT_HOST_VALIDATED:?launch with infra/scripts/orchestrator-compose.sh}
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        fail() { echo "[RunSecure] ERROR: $$*" >&2; exit 1; }
+        [ "$$RUNSECURE_PAT_HOST_VALIDATED" = "runsecure-host-pat-v1" ] \
+          || fail "host PAT validation sentinel is invalid"
+        [ -f /host-pat ] && [ ! -L /host-pat ] \
+          || fail "mounted PAT source must be a regular non-symlink file"
+        [ "$$(stat -c '%a' /host-pat)" = "400" ] \
+          || fail "mounted PAT source must be mode 0400"
+
+        # Replace the destination through a new inode. A previous successful
+        # run leaves the old file UID 65532-owned and mode 0400; copying over
+        # that inode is not restart-safe with this init's reduced capability
+        # set. The volume root remains root-owned and writable by this one-shot
+        # init, so atomically renaming the prepared inode over the old name
+        # works without CAP_FOWNER and never exposes a partially-written PAT.
+        target=/secret/runsecure-pat
+        staged=/secret/.runsecure-pat.new
+        rm -f "$$staged"
+        trap 'rm -f "$$staged"' EXIT
+        umask 077
+        cp /host-pat "$$staged"
+        chmod 400 "$$staged"
+        chown 65532:65532 "$$staged"
+        mv -f "$$staged" "$$target"
+        trap - EXIT
+    volumes:
+      - ${RUNSECURE_PAT_FILE:?RUNSECURE_PAT_FILE is required}:/host-pat:ro
+      - pat-secret:/secret
+    security_opt: ["no-new-privileges:true"]
+
   orchestrator:
     image: ${RUNSECURE_ORCHESTRATOR_IMAGE}
     container_name: rs-orch-${RUNSECURE_SCOPE}
     restart: unless-stopped
+    # The binary stops polling, drains active runners for 60s, then allows a
+    # bounded forced-cleanup window. Compose's default 10s grace would SIGKILL
+    # it before either phase completed, leaking per-spawn containers/networks.
+    stop_grace_period: 90s
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     user: "65532:65532"
-    networks: [orch-internal]
+    networks:
+      - orch-internal
+      # A separate internal link lets the relay reach only the orchestrator,
+      # not the docker-socket proxy or the egress proxy.
+      - operator-internal
     depends_on:
       socket-proxy:
         condition: service_started
       orch-egress:
         condition: service_started
       egress-init:
+        condition: service_completed_successfully
+      pat-init:
         condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
@@ -126,35 +183,90 @@ services:
       # and mounted read-only into each proxy at the same path.
       RUNSECURE_EGRESS_BASE_DIR: /var/run/runsecure/egress
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
+      RUNSECURE_DRAIN_SECONDS: ${RUNSECURE_DRAIN_SECONDS:-60}
     volumes:
-      - ./scopes/${RUNSECURE_SCOPE}.yml:/etc/runsecure/scope.yml:ro
-      - ${RUNSECURE_PAT_FILE}:/run/secrets/runsecure-pat:ro
+      # Operator state is mounted explicitly from outside this checkout. Both
+      # variables are required so `docker compose config` fails before launch
+      # instead of silently substituting a file that cannot serve the scope.
+      - ${RUNSECURE_SCOPE_FILE_HOST:?RUNSECURE_SCOPE_FILE_HOST is required}:/etc/runsecure/scope.yml:ro
+      - pat-secret:/run/secrets:ro
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
       - egress-configs:/var/run/runsecure/egress:rw
-      # Operator-provided projects root (fix G6): point RUNSECURE_PROJECTS_ROOT
-      # (in the scope .env file, gitignored) at the local directory that
-      # contains all of this scope's repo checkouts. Each repo's project_dir
-      # in scopes/<name>.yml should then be /projects/<repo>, matching a
-      # subdirectory under this root. Defaults to /dev/null (a harmless
-      # single-file mount) when unset — never edit this line to hardcode a
-      # host path; see install.md.
-      - ${RUNSECURE_PROJECTS_ROOT:-/dev/null}:/projects:ro
-    ports:
-      # Localhost-only by design — never publish externally.
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:8081:8081"
+      # RUNSECURE_PROJECTS_ROOT is the directory containing every checkout in
+      # this scope; project_dir values resolve below /projects in-container.
+      - ${RUNSECURE_PROJECTS_ROOT:?RUNSECURE_PROJECTS_ROOT is required}:/projects:ro
     tmpfs:
       - /tmp:noexec,nosuid,nodev,size=64m
+
+  operator-relay:
+    # Docker does not activate host-published ports for a container attached
+    # exclusively to an internal bridge. Keep the PAT-holding orchestrator on
+    # internal-only networks and expose this secretless, path-restricted relay.
+    image: ${RUNSECURE_PROXY_IMAGE}
+    container_name: rs-orch-${RUNSECURE_SCOPE}-operator-relay
+    restart: unless-stopped
+    read_only: true
+    user: "1001:1001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint:
+      - /usr/sbin/haproxy
+      - -W
+      - -db
+      - -f
+      - /etc/runsecure/operator-relay.haproxy.cfg
+    depends_on:
+      orchestrator:
+        condition: service_started
+    networks:
+      - operator-internal
+      - operator-host
+    ports:
+      # host_ip is literal: an operator-supplied port cannot widen the bind.
+      - target: 8080
+        published: "${RUNSECURE_ORCHESTRATOR_HEALTH_PORT:-8080}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 8081
+        published: "${RUNSECURE_ORCHESTRATOR_STATE_PORT:-8081}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - ./operator-relay.haproxy.cfg:/etc/runsecure/operator-relay.haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "/usr/sbin/haproxy", "-c", "-f", "/etc/runsecure/operator-relay.haproxy.cfg"]
+      interval: 15s
+      timeout: 2s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          pids: 32
 
 volumes:
   egress-configs:
     name: ${RUNSECURE_SCOPE}-egress-configs
+  pat-secret:
+    name: ${RUNSECURE_SCOPE}-pat-secret
 
 networks:
   orch-internal:
     driver: bridge
     internal: true       # orchestrator + socket-proxy have NO host egress
+  operator-internal:
+    driver: bridge
+    internal: true       # only orchestrator + operator-relay; no host egress
+  operator-host:
+    driver: bridge
+    driver_opts:
+      # A non-internal bridge is required for Docker host-port publication,
+      # but disabling masquerade leaves it without outbound internet egress.
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+      # Defense in depth: any port without an explicit host_ip still defaults
+      # to loopback instead of all host interfaces.
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
   orch-external:
     driver: bridge       # orch-egress's external interface (host-routable)
   spawn-egress:

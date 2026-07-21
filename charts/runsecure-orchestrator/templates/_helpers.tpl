@@ -70,13 +70,16 @@ Orchestrator namespace: runsecure-<scope>.
 {{- end }}
 
 {{/*
-Orchestrator image reference (repository@digest).
-Using digest when it is a real SHA (not the placeholder zeros).
-In production deployments the digest overrides the tag.
+Immutable image reference (repository@digest). The values schema requires a
+real sha256 digest; tags are retained only as release metadata.
 */}}
+{{- define "runsecure-orchestrator.imageRef" -}}
+{{- printf "%s@%s" .repository .digest }}
+{{- end }}
+
+{{/* Orchestrator image reference. */}}
 {{- define "runsecure-orchestrator.image" -}}
-{{- $img := .Values.image.orchestrator }}
-{{- printf "%s@%s" $img.repository $img.digest }}
+{{- include "runsecure-orchestrator.imageRef" .Values.image.orchestrator }}
 {{- end }}
 
 {{/*

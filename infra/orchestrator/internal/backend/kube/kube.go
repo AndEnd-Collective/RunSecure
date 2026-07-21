@@ -7,13 +7,16 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
@@ -33,12 +36,13 @@ func New(c *kube.Client) backend.Backend {
 func (b *kubeBackend) Name() string { return "kube" }
 
 // Spawn creates a full per-spawn stack in Kubernetes:
-//  1. Ensures the scoped namespace and its default-deny NetworkPolicy exist.
+//  1. Ensures the default-deny NetworkPolicy exists in the chart-provisioned
+//     scoped namespace.
 //  2. Builds all objects (Secret, Service, NetworkPolicies, ProxyPod,
 //     RunnerPod) via the kube object builders.
 //  3. Creates all objects via ApplySpawn (owner references are stamped there).
 //
-// On any error after EnsureNamespace, a best-effort DeleteSpawn is attempted
+// On any error after EnsureDefaultDenyPolicy, a best-effort DeleteSpawn is attempted
 // to clean up partially created objects before the error is returned.
 //
 // The returned Handle carries:
@@ -50,26 +54,75 @@ func (b *kubeBackend) Name() string { return "kube" }
 //	Refs["network_name"] → "" (not used by the kube backend)
 func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend.Handle, error) {
 	ns := kube.Namespace(in.Scope)
-
-	if err := b.c.EnsureNamespace(ctx, in.Scope); err != nil {
-		return backend.Handle{}, fmt.Errorf("kube backend: ensure namespace: %w", err)
+	if in.ResourcesMemory <= 0 {
+		return backend.Handle{}, errors.New("kube backend: runner memory limit must be positive")
+	}
+	if in.ResourcesNanoCPUs <= 0 {
+		return backend.Handle{}, errors.New("kube backend: runner CPU limit must be positive")
+	}
+	seenDNSCIDRs := make(map[netip.Prefix]struct{}, len(in.KubeDNSServiceCIDRs))
+	for _, cidr := range in.KubeDNSServiceCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 || prefix != prefix.Masked() {
+			return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must contain exact IPv4 /32 values")
+		}
+		if _, ok := seenDNSCIDRs[prefix]; ok {
+			return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must contain unique CIDRs")
+		}
+		seenDNSCIDRs[prefix] = struct{}{}
+	}
+	if len(in.KubeDNSServiceCIDRs) == 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must not be empty")
+	}
+	if errs := kubevalidation.IsDNS1123Label(in.KubeDNSNamespace); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSNamespace must be a DNS-1123 label")
+	}
+	if errs := kubevalidation.IsQualifiedName(in.KubeDNSPodLabelKey); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelKey must be a Kubernetes label key")
+	}
+	if in.KubeDNSPodLabelValue == "" {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelValue must not be empty")
+	}
+	if errs := kubevalidation.IsValidLabelValue(in.KubeDNSPodLabelValue); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelValue must be a Kubernetes label value")
 	}
 
-	// Read rendered egress config files. Missing files are silently ignored —
-	// the proxy containers pick up what is available via env vars.
-	readEgressFile := func(name string) []byte {
+	if err := b.c.EnsureDefaultDenyPolicy(ctx, in.Scope); err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: ensure default-deny policy: %w", err)
+	}
+
+	// The proxy supervisor cannot start safely with a missing or empty config.
+	// Fail before creating any per-spawn API objects rather than letting a Pod
+	// crash-loop with a partially projected Secret.
+	readEgressFile := func(name string) ([]byte, error) {
 		if in.EgressConfigDir == "" {
-			return nil
+			return nil, errors.New("egress config directory is required")
 		}
-		b, err := os.ReadFile(filepath.Join(in.EgressConfigDir, name))
+		path := filepath.Join(in.EgressConfigDir, name)
+		content, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
-		return b
+		if len(content) == 0 {
+			return nil, fmt.Errorf("read %s: config is empty", name)
+		}
+		return content, nil
 	}
-	squidBytes := readEgressFile("squid.conf")
-	haproxyBytes := readEgressFile("haproxy.cfg")
-	dnsmasqBytes := readEgressFile("dnsmasq.conf")
+	squidBytes, err := readEgressFile("squid.conf")
+	if err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+	}
+	haproxyBytes, err := readEgressFile("haproxy.cfg")
+	if err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+	}
+	var dnsmasqBytes []byte
+	if in.EnableDNSMasq {
+		dnsmasqBytes, err = readEgressFile("dnsmasq.conf")
+		if err != nil {
+			return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+		}
+	}
 
 	// Build the per-spawn objects.
 	secret := kube.SpawnSecret(in, squidBytes, haproxyBytes, dnsmasqBytes)
@@ -94,24 +147,35 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		ProxyPod:  proxyPod,
 		RunnerPod: runnerPod,
 	}
-
-	if err := b.c.ApplySpawn(ctx, objs); err != nil {
-		// Best-effort cleanup: delete the owning Secret which cascades GC.
-		_ = b.c.DeleteSpawn(ctx, ns, secret.Name)
-		return backend.Handle{}, fmt.Errorf("kube backend: apply spawn: %w", err)
-	}
-
-	return backend.Handle{
+	h := backend.Handle{
 		SpawnID: in.SpawnID,
 		Backend: "kube",
 		Refs: map[string]string{
-			"namespace":    ns,
-			"secret":       secret.Name,
-			"runner_pod":   runnerPod.Name,
-			"proxy_pod":    proxyPod.Name,
-			"network_name": "",
+			"namespace":         ns,
+			"secret":            secret.Name,
+			"runner_pod":        runnerPod.Name,
+			"proxy_pod":         proxyPod.Name,
+			"network_name":      "",
+			"egress_config_dir": in.EgressConfigDir,
+			"repo_label":        kube.RepoLabel(in.Repo),
 		},
-	}, nil
+	}
+
+	if err := b.c.ApplySpawn(ctx, objs); err != nil {
+		applyErr := fmt.Errorf("kube backend: apply spawn: %w", err)
+		// Deleting the owning Secret is the exact rollback. If confirmation
+		// fails, return the handle so the orchestrator retains teardown debt
+		// and retries instead of releasing capacity around leaked objects.
+		if cleanupErr := b.c.DeleteSpawn(
+			ctx, ns, secret.Name, in.SpawnID, kube.RepoLabel(in.Repo),
+		); cleanupErr != nil {
+			return h, errors.Join(applyErr,
+				fmt.Errorf("kube backend: rollback spawn: %w", cleanupErr))
+		}
+		return backend.Handle{}, applyErr
+	}
+
+	return h, nil
 }
 
 // WaitForExit blocks until the runner pod transitions to a terminal phase or
@@ -149,10 +213,19 @@ func (b *kubeBackend) WaitForExit(ctx context.Context, h backend.Handle, timeout
 func (b *kubeBackend) Teardown(ctx context.Context, h backend.Handle, _ bool) error {
 	ns := h.Refs["namespace"]
 	secretName := h.Refs["secret"]
-	if err := b.c.DeleteSpawn(ctx, ns, secretName); err != nil {
-		return fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err)
+	repoLabel := h.Refs["repo_label"]
+	var cleanupErrors []error
+	if err := b.c.DeleteSpawn(ctx, ns, secretName, h.SpawnID, repoLabel); err != nil {
+		cleanupErrors = append(cleanupErrors,
+			fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err))
 	}
-	return nil
+	if egressDir := h.Refs["egress_config_dir"]; egressDir != "" {
+		if err := os.RemoveAll(egressDir); err != nil {
+			cleanupErrors = append(cleanupErrors,
+				fmt.Errorf("kube backend: remove egress config %q: %w", egressDir, err))
+		}
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 // Reconcile lists all active runner pods in the scoped namespace and returns
@@ -175,6 +248,7 @@ func (b *kubeBackend) Reconcile(ctx context.Context, scope string) ([]backend.Ha
 				"runner_pod":   ref.RunnerPod,
 				"proxy_pod":    "",
 				"network_name": "",
+				"repo_label":   ref.RepoLabel,
 			},
 		})
 	}

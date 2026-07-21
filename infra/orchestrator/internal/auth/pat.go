@@ -37,12 +37,26 @@ type patProvider struct {
 // The file must exist and have mode exactly 0400; any other mode is rejected
 // to prevent accidental credential exposure.
 func NewPATProvider(patFile string) (Provider, error) {
+	return newPATProvider(patFile, 0o400)
+}
+
+// NewKubernetesPATProvider accepts the 0440 mode required for a root-owned
+// Kubernetes Secret projection made group-readable through fsGroup. It does
+// not relax the host/Compose constructor above.
+func NewKubernetesPATProvider(patFile string) (Provider, error) {
+	return newPATProvider(patFile, 0o440)
+}
+
+func newPATProvider(patFile string, expectedMode os.FileMode) (Provider, error) {
 	info, err := osStat(patFile)
 	if err != nil {
 		return nil, fmt.Errorf("auth: stat pat file %s: %w", patFile, err)
 	}
-	if info.Mode().Perm() != 0o400 {
-		return nil, fmt.Errorf("auth: pat file %s must be mode 0400 (got %o)", patFile, info.Mode().Perm())
+	if info.Mode().Perm() != expectedMode {
+		return nil, fmt.Errorf(
+			"auth: pat file %s must be mode %04o (got %o)",
+			patFile, expectedMode, info.Mode().Perm(),
+		)
 	}
 	b, err := osReadFile(patFile)
 	if err != nil {

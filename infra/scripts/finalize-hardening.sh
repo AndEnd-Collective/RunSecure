@@ -2,8 +2,10 @@
 # ============================================================================
 # RunSecure — Finalize Image Hardening
 # ============================================================================
-# Called as the LAST step in the final runnable image (via compose-image.sh).
-# Removes the package manager, re-strips setuid binaries, and locks /etc.
+# Called as the LAST step in every default language image and in project images
+# produced by compose-image.sh.
+# Removes package-manager functionality, retains only inert scanner inventory,
+# re-strips setuid binaries, and locks /etc.
 #
 # This is separated from base.Dockerfile because language layers and tool
 # recipes need apt during image build. Only the final image strips it.
@@ -21,9 +23,40 @@ echo "[RunSecure] Finalizing image hardening..."
 # failure now aborts the image build instead of producing a degraded
 # image that the operator believes is hardened.
 
-# Remove package manager so nothing can be installed at runtime.
-# rm -rf with -f returns 0 for non-existent paths, so this is safe to
-# run even on images where apt was already stripped earlier.
+# Preserve the installed-package inventory Syft/Grype needs before deleting
+# dpkg's mutable database. The inventory is data only: no maintainer scripts,
+# locks, update queues, executable helpers, or writable state survives.
+_dpkg_inventory_tmp=""
+if [[ -e /var/lib/dpkg/status ]]; then
+    if [[ ! -f /var/lib/dpkg/status || -L /var/lib/dpkg/status ]]; then
+        echo "[RunSecure] ERROR: dpkg status inventory is not a regular file" >&2
+        exit 1
+    fi
+    _dpkg_inventory_tmp=$(mktemp -d /tmp/runsecure-dpkg-inventory.XXXXXX)
+    install -m 0444 /var/lib/dpkg/status "${_dpkg_inventory_tmp}/status"
+
+    if [[ -e /var/lib/dpkg/status.d ]]; then
+        if [[ ! -d /var/lib/dpkg/status.d || -L /var/lib/dpkg/status.d ]]; then
+            echo "[RunSecure] ERROR: dpkg status.d inventory is not a regular directory" >&2
+            exit 1
+        fi
+        _invalid_status_entry=$(find /var/lib/dpkg/status.d \
+            -mindepth 1 -maxdepth 1 ! -type f -print -quit)
+        if [[ -n "$_invalid_status_entry" ]]; then
+            echo "[RunSecure] ERROR: unsupported dpkg status.d entry: $_invalid_status_entry" >&2
+            exit 1
+        fi
+        install -d -m 0755 "${_dpkg_inventory_tmp}/status.d"
+        while IFS= read -r -d '' _status_file; do
+            install -m 0444 "$_status_file" \
+                "${_dpkg_inventory_tmp}/status.d/${_status_file##*/}"
+        done < <(find /var/lib/dpkg/status.d \
+            -mindepth 1 -maxdepth 1 -type f -print0)
+    fi
+fi
+
+# Remove package manager so nothing can be installed at runtime. rm -rf with
+# -f returns 0 for non-existent paths, so this remains idempotent.
 rm -rf \
     /usr/bin/apt /usr/bin/apt-get /usr/bin/apt-cache /usr/bin/apt-config \
     /usr/bin/apt-key /usr/bin/apt-mark /usr/bin/aptitude \
@@ -35,6 +68,36 @@ rm -rf \
     /var/lib/dpkg \
     /var/cache/apt \
     /etc/apt
+
+if [[ -n "$_dpkg_inventory_tmp" ]]; then
+    install -d -m 0755 /var/lib/dpkg
+    install -m 0444 "${_dpkg_inventory_tmp}/status" /var/lib/dpkg/status
+    if [[ -d "${_dpkg_inventory_tmp}/status.d" ]]; then
+        install -d -m 0755 /var/lib/dpkg/status.d
+        while IFS= read -r -d '' _status_file; do
+            install -m 0444 "$_status_file" \
+                "/var/lib/dpkg/status.d/${_status_file##*/}"
+        done < <(find "${_dpkg_inventory_tmp}/status.d" \
+            -mindepth 1 -maxdepth 1 -type f -print0)
+        chmod 0555 /var/lib/dpkg/status.d
+    fi
+    chmod 0555 /var/lib/dpkg
+    rm -rf "$_dpkg_inventory_tmp"
+fi
+
+# Debian package maintainer scripts legitimately need these helpers while the
+# build-only *-build stages are composing project packages (for example, dbus
+# creates its service account through adduser). Remove them only now, after all
+# installation is complete, so they are never present in terminal images.
+rm -f \
+    /usr/sbin/adduser \
+    /usr/sbin/useradd \
+    /usr/sbin/userdel \
+    /usr/sbin/usermod \
+    /usr/sbin/groupadd \
+    /usr/sbin/groupdel \
+    /usr/sbin/groupmod \
+    /usr/bin/passwd
 
 # Re-strip setuid/setgid bits added by any tool install. Use -print0 |
 # xargs -0 -r so an unreadable filesystem entry on `find`'s walk does
@@ -50,12 +113,36 @@ chmod 555 /etc
 
 # Belt-and-suspenders: verify the binaries we tried to remove are
 # really gone, in case a future apt+/dpkg+ glob expansion regresses.
-for bin in apt apt-get dpkg dpkg-query; do
+for bin in \
+    apt apt-get dpkg dpkg-query \
+    adduser useradd userdel usermod groupadd groupdel groupmod passwd; do
     if command -v "$bin" >/dev/null 2>&1; then
         echo "[RunSecure] ERROR: $bin still on PATH after finalize-hardening — refusing to produce a degraded image" >&2
         exit 1
     fi
 done
+
+# Scanner inventory is the only permitted dpkg state. It must be regular,
+# non-executable, read-only data; mutable package-manager state fails closed.
+if [[ -d /var/lib/dpkg ]]; then
+    if [[ ! -f /var/lib/dpkg/status || -L /var/lib/dpkg/status ]]; then
+        echo "[RunSecure] ERROR: preserved dpkg inventory is missing or unsafe" >&2
+        exit 1
+    fi
+    _unexpected_dpkg_entry=$(find /var/lib/dpkg -mindepth 1 \
+        ! -path /var/lib/dpkg/status \
+        ! -path /var/lib/dpkg/status.d \
+        ! -path '/var/lib/dpkg/status.d/*' -print -quit)
+    if [[ -n "$_unexpected_dpkg_entry" ]]; then
+        echo "[RunSecure] ERROR: mutable dpkg state survived: $_unexpected_dpkg_entry" >&2
+        exit 1
+    fi
+    _writable_dpkg_entry=$(find /var/lib/dpkg -perm /222 -print -quit)
+    if [[ -n "$_writable_dpkg_entry" ]]; then
+        echo "[RunSecure] ERROR: writable dpkg inventory survived: $_writable_dpkg_entry" >&2
+        exit 1
+    fi
+fi
 
 # ============================================================================
 # H2: optional user-requested tool removal / stubbing

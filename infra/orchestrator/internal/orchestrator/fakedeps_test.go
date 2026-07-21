@@ -29,29 +29,56 @@ import (
 // ------------- fake github wired to a real httptest.Server ----------------
 
 type fakeGitHubBackend struct {
-	mu              sync.Mutex
-	queuedFor       map[string]int
-	queueErrCode    map[string]int // map repo → HTTP status to return
-	jitOnRunnerID   int64
-	jitLabels       []string
-	jitMismatch     bool
-	deletedRunners  map[int64]bool
-	createCalled    int
-	deleteCalled    int
-	rlLimit         int
-	rlRemaining     int
-	rlReset         string
-	rlAfterResponse bool // include X-RateLimit-Remaining=0 in 403 response
+	mu                 sync.Mutex
+	queuedFor          map[string]int
+	inProgressFor      map[string]int
+	queueErrCode       map[string]int // map repo → HTTP status to return
+	jitOnRunnerID      int64
+	jitLabels          []string
+	jitRequestedLabels []string
+	jitMismatch        bool
+	jitErrCode         int
+	deletedRunners     map[int64]bool
+	createCalled       int
+	deleteCalled       int
+	deleteErrCode      int
+	deleteErrUntil     int
+	rlLimit            int
+	rlRemaining        int
+	rlReset            string
+	rlAfterResponse    bool // include X-RateLimit-Remaining=0 in 403 response
+	runnerStatus       string
+	runnerBusy         bool
+	runnerErrCode      int
+	runnerGetCalled    int
+	runnerErrAfter     int
+	runnerBlock        bool
+	runnerStatusAfter  string
+	runnerBusyAfter    bool
+	runnerChangeAfter  int
+	jobRunnerID        int64
+	jobRunnerName      string
+	jobStatus          string
+	jobConclusion      string
+	jobErrCode         int
+	recentRunID        int64
+	recentRunCount     int
+	recentJobRunnerID  int64
+	recentJobName      string
+	recentJobStatus    string
 }
 
 func newFakeGH() *fakeGitHubBackend {
 	return &fakeGitHubBackend{
 		queuedFor:      map[string]int{},
+		inProgressFor:  map[string]int{},
 		queueErrCode:   map[string]int{},
 		deletedRunners: map[int64]bool{},
 		jitOnRunnerID:  100,
 		rlLimit:        5000,
 		rlRemaining:    4999,
+		runnerStatus:   "online",
+		runnerBusy:     true,
 	}
 }
 
@@ -66,8 +93,8 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 			w.Header().Set("X-RateLimit-Reset", g.rlReset)
 		}
 
-		// /repos/o/r/actions/runs?status=queued
-		if strings.Contains(r.URL.Path, "/actions/runs") && r.Method == http.MethodGet {
+		// /repos/o/r/actions/runs/<id>/jobs?filter=latest
+		if strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs") && r.Method == http.MethodGet {
 			// Extract owner/repo
 			parts := strings.Split(r.URL.Path, "/")
 			if len(parts) < 4 {
@@ -82,21 +109,100 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				w.WriteHeader(code)
 				return
 			}
-			w.WriteHeader(200)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"total_count": g.queuedFor[repo],
-			})
+			runID := parts[len(parts)-2]
+			if g.recentRunID > 0 && runID == fmt.Sprint(g.recentRunID) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{{
+					"id": 99001, "name": "later-dependent", "status": g.recentJobStatus,
+					"runner_id": g.recentJobRunnerID, "runner_name": g.recentJobName,
+				}}})
+				return
+			}
+			count := g.queuedFor[repo]
+			if runID == "2" {
+				count = g.inProgressFor[repo]
+			}
+			if r.URL.Query().Get("page") != "1" {
+				count = 0
+			}
+			jobs := make([]map[string]any, 0, count)
+			for i := 0; i < count; i++ {
+				id := i + 1
+				if runID == "2" {
+					id += 100000
+				}
+				jobs = append(jobs, map[string]any{
+					"id": id, "name": fmt.Sprintf("job-%d", id), "status": "queued",
+					"labels": []string{"self-hosted", "Linux"},
+				})
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+			return
+		}
+		// /repos/o/r/actions/runs?status=queued|in_progress
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") && r.Method == http.MethodGet {
+			parts := strings.Split(r.URL.Path, "/")
+			if len(parts) < 4 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			repo := parts[2] + "/" + parts[3]
+			if code, ok := g.queueErrCode[repo]; ok {
+				if g.rlAfterResponse {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(code)
+				return
+			}
+			count := g.queuedFor[repo]
+			runID := 1
+			if r.URL.Query().Get("status") == "in_progress" {
+				count = g.inProgressFor[repo]
+				runID = 2
+			}
+			runs := []map[string]any{}
+			if r.URL.Query().Get("status") == "completed" && g.recentRunCount > 0 {
+				for i := 0; i < g.recentRunCount; i++ {
+					id := int64(7000 + i)
+					if i == 0 && g.recentRunID > 0 {
+						id = g.recentRunID
+					}
+					runs = append(runs, map[string]any{"id": id})
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
+				return
+			}
+			if count > 0 {
+				runs = append(runs, map[string]any{"id": runID})
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
 			return
 		}
 		// /repos/o/r/actions/runners/generate-jitconfig
 		if strings.HasSuffix(r.URL.Path, "/generate-jitconfig") && r.Method == http.MethodPost {
 			g.createCalled++
+			if g.jitErrCode != 0 {
+				if g.rlAfterResponse {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(g.jitErrCode)
+				return
+			}
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			g.jitRequestedLabels = nil
+			if reqLabels, ok := body["labels"].([]any); ok {
+				for _, label := range reqLabels {
+					if value, ok := label.(string); ok {
+						g.jitRequestedLabels = append(g.jitRequestedLabels, value)
+					}
+				}
+			}
 			labels := []map[string]any{}
 			labelSet := g.jitLabels
 			if labelSet == nil {
 				// Echo back what was requested unless explicitly told to mismatch.
-				var body map[string]any
-				_ = json.NewDecoder(r.Body).Decode(&body)
 				if reqLabels, ok := body["labels"].([]any); ok && !g.jitMismatch {
 					for _, l := range reqLabels {
 						labels = append(labels, map[string]any{"name": l})
@@ -120,9 +226,28 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 			})
 			return
 		}
+		// GET /repos/o/r/actions/jobs/<id>
+		if strings.Contains(r.URL.Path, "/actions/jobs/") && r.Method == http.MethodGet {
+			if g.jobErrCode != 0 {
+				w.WriteHeader(g.jobErrCode)
+				return
+			}
+			parts := strings.Split(r.URL.Path, "/")
+			var jobID int64
+			_, _ = fmt.Sscanf(parts[len(parts)-1], "%d", &jobID)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": jobID, "status": g.jobStatus, "conclusion": g.jobConclusion,
+				"runner_id": g.jobRunnerID, "runner_name": g.jobRunnerName,
+			})
+			return
+		}
 		// DELETE /repos/o/r/actions/runners/<id>
 		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete {
 			g.deleteCalled++
+			if g.deleteErrCode != 0 && (g.deleteErrUntil == 0 || g.deleteCalled <= g.deleteErrUntil) {
+				w.WriteHeader(g.deleteErrCode)
+				return
+			}
 			parts := strings.Split(r.URL.Path, "/")
 			if id := parts[len(parts)-1]; id != "" {
 				var n int64
@@ -130,6 +255,28 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				g.deletedRunners[n] = true
 			}
 			w.WriteHeader(204)
+			return
+		}
+		// GET /repos/o/r/actions/runners/<id>
+		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet {
+			g.runnerGetCalled++
+			if g.runnerBlock {
+				g.mu.Unlock()
+				<-r.Context().Done()
+				g.mu.Lock()
+				return
+			}
+			if g.runnerErrCode != 0 && (g.runnerErrAfter == 0 || g.runnerGetCalled >= g.runnerErrAfter) {
+				w.WriteHeader(g.runnerErrCode)
+				return
+			}
+			status, busy := g.runnerStatus, g.runnerBusy
+			if g.runnerChangeAfter > 0 && g.runnerGetCalled >= g.runnerChangeAfter {
+				status, busy = g.runnerStatusAfter, g.runnerBusyAfter
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": g.jitOnRunnerID, "name": "runner", "status": status, "busy": busy,
+			})
 			return
 		}
 		// /repos/o/r (validation ping)
@@ -224,14 +371,19 @@ func (f *fakeDockerClient) ListNetworksForScope(ctx context.Context, scope strin
 // ------------- in-memory emitter + fake breakers/buckets ------------------
 
 type fakeBreakers struct {
-	mu     sync.Mutex
-	open   map[string]bool
-	failed map[string]int
-	closed map[string]int
+	mu            sync.Mutex
+	open          map[string]bool
+	halfOpen      map[string]bool
+	allowHalfOpen map[string]bool
+	failed        map[string]int
+	closed        map[string]int
 }
 
 func newFakeBreakers() *fakeBreakers {
-	return &fakeBreakers{open: map[string]bool{}, failed: map[string]int{}, closed: map[string]int{}}
+	return &fakeBreakers{
+		open: map[string]bool{}, halfOpen: map[string]bool{}, allowHalfOpen: map[string]bool{},
+		failed: map[string]int{}, closed: map[string]int{},
+	}
 }
 
 func (b *fakeBreakers) IsOpen(repo string) bool {
@@ -239,13 +391,24 @@ func (b *fakeBreakers) IsOpen(repo string) bool {
 	defer b.mu.Unlock()
 	return b.open[repo]
 }
-func (b *fakeBreakers) MaybeHalfOpen(repo string) bool { return false }
+func (b *fakeBreakers) MaybeHalfOpen(repo string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.open[repo] && b.allowHalfOpen[repo] {
+		b.open[repo] = false
+		b.halfOpen[repo] = true
+		return true
+	}
+	return false
+}
 func (b *fakeBreakers) RecordSuccess(repo string) (closed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	wasOpen := b.open[repo]
+	wasOpen := b.open[repo] || b.halfOpen[repo]
 	b.closed[repo]++
 	b.open[repo] = false
+	b.halfOpen[repo] = false
+	b.failed[repo] = 0
 	return wasOpen
 }
 func (b *fakeBreakers) RecordFailure(repo string) (opened bool, count int) {
@@ -253,8 +416,9 @@ func (b *fakeBreakers) RecordFailure(repo string) (opened bool, count int) {
 	defer b.mu.Unlock()
 	wasOpen := b.open[repo]
 	b.failed[repo]++
-	if !wasOpen && b.failed[repo] >= 5 {
+	if b.halfOpen[repo] || (!wasOpen && b.failed[repo] >= 5) {
 		b.open[repo] = true
+		b.halfOpen[repo] = false
 		return true, b.failed[repo]
 	}
 	return false, b.failed[repo]
@@ -293,9 +457,10 @@ type fakeBackend struct {
 	mu sync.Mutex
 
 	// Spawn controls.
-	spawnErr     error // if non-nil, Spawn returns this error
-	spawnCalls   []backend.SpawnInput
-	spawnHandles []backend.Handle // handles returned by Spawn (one per call)
+	spawnErr           error // if non-nil, Spawn returns this error
+	spawnPartialHandle bool  // return an owned handle alongside spawnErr
+	spawnCalls         []backend.SpawnInput
+	spawnHandles       []backend.Handle // handles returned by Spawn (one per call)
 
 	// WaitForExit controls.
 	waitCalls    []backend.Handle
@@ -303,13 +468,17 @@ type fakeBackend struct {
 	waitTimedOut bool
 
 	// Teardown controls.
+	teardownErr   error
+	teardownErrs  []error
 	teardownCalls []struct {
 		handle backend.Handle
 		force  bool
+		ctxErr error
 	}
 	// inspectExitDelay simulates a runner that never exits (WaitForExit blocks
 	// until timeout fires). When non-zero WaitForExit returns (-1, true).
 	inspectExitDelay time.Duration
+	waitDelay        time.Duration
 }
 
 func newFakeBackend() *fakeBackend { return &fakeBackend{} }
@@ -320,9 +489,6 @@ func (f *fakeBackend) Spawn(_ context.Context, in backend.SpawnInput) (backend.H
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.spawnCalls = append(f.spawnCalls, in)
-	if f.spawnErr != nil {
-		return backend.Handle{}, f.spawnErr
-	}
 	h := backend.Handle{
 		SpawnID: in.SpawnID,
 		Backend: "fake",
@@ -332,6 +498,12 @@ func (f *fakeBackend) Spawn(_ context.Context, in backend.SpawnInput) (backend.H
 			"network": "net-fake",
 		},
 	}
+	if f.spawnErr != nil {
+		if f.spawnPartialHandle {
+			return h, f.spawnErr
+		}
+		return backend.Handle{}, f.spawnErr
+	}
 	f.spawnHandles = append(f.spawnHandles, h)
 	return h, nil
 }
@@ -340,6 +512,10 @@ func (f *fakeBackend) WaitForExit(_ context.Context, h backend.Handle, _ time.Du
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.waitCalls = append(f.waitCalls, h)
+	if f.waitDelay > 0 {
+		time.Sleep(f.waitDelay)
+		return f.waitExitCode, f.waitTimedOut
+	}
 	if f.inspectExitDelay > 0 {
 		// Simulate never-exiting runner: block briefly then return timedOut.
 		// Use a small real sleep so callers that advance a fake clock can drive
@@ -350,14 +526,20 @@ func (f *fakeBackend) WaitForExit(_ context.Context, h backend.Handle, _ time.Du
 	return f.waitExitCode, f.waitTimedOut
 }
 
-func (f *fakeBackend) Teardown(_ context.Context, h backend.Handle, force bool) error {
+func (f *fakeBackend) Teardown(ctx context.Context, h backend.Handle, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.teardownCalls = append(f.teardownCalls, struct {
 		handle backend.Handle
 		force  bool
-	}{h, force})
-	return nil
+		ctxErr error
+	}{h, force, ctx.Err()})
+	if len(f.teardownErrs) > 0 {
+		err := f.teardownErrs[0]
+		f.teardownErrs = f.teardownErrs[1:]
+		return err
+	}
+	return f.teardownErr
 }
 
 func (f *fakeBackend) Reconcile(_ context.Context, _ string) ([]backend.Handle, error) {
@@ -406,6 +588,12 @@ type spawnDeps struct {
 	proxyDigest    string
 	breakers       *fakeBreakers
 	bucket         TokenBucket
+	lifecycle      LifecycleTiming
+	version        string
+	buildSHA       string
+	rlMu           sync.Mutex
+	rateLimit      github.RateLimit
+	ratePaused     atomic.Bool
 }
 
 func (d *spawnDeps) GitHub() *github.Client     { return d.gh }
@@ -414,7 +602,7 @@ func (d *spawnDeps) Backend() backend.Backend   { return d.be }
 func (d *spawnDeps) Emit() *cornerstone.Emitter { return d.em }
 func (d *spawnDeps) Clock() ClockLike           { return d.clk }
 func (d *spawnDeps) Egress() EgressGenerator    { return d.eg }
-func (d *spawnDeps) RunnerYML(_ string) (*RunnerYMLSnapshot, error) {
+func (d *spawnDeps) RunnerYMLContext(_ context.Context, _ string) (*RunnerYMLSnapshot, error) {
 	if d.runnerYMLErr != nil {
 		return nil, d.runnerYMLErr
 	}
@@ -433,7 +621,27 @@ func (d *spawnDeps) RunnerImageDigestFor(_ string) string {
 }
 func (d *spawnDeps) SeccompProfileHostPath(_ string) string { return "/seccomp/p.json" }
 func (d *spawnDeps) RateLimiter() TokenBucket               { return d.bucket }
-func (d *spawnDeps) Breakers() BreakerMap                   { return d.breakers }
+func (d *spawnDeps) RateLimitContextFor(_ string) (int, int, string) {
+	d.rlMu.Lock()
+	defer d.rlMu.Unlock()
+	reset := ""
+	if d.rateLimit.ResetUnix != 0 {
+		reset = time.Unix(d.rateLimit.ResetUnix, 0).Format(time.RFC3339)
+	}
+	return d.rateLimit.Remaining, d.rateLimit.Limit, reset
+}
+func (d *spawnDeps) RecordRateLimit(_ string, lim github.RateLimit) {
+	d.rlMu.Lock()
+	d.rateLimit = lim
+	d.rlMu.Unlock()
+}
+func (d *spawnDeps) MarkRateLimited(_ string) bool {
+	d.st.SetRateLimited(true)
+	return !d.ratePaused.Swap(true)
+}
+func (d *spawnDeps) LifecycleTiming() LifecycleTiming { return d.lifecycle }
+func (d *spawnDeps) Version() string                  { return d.version }
+func (d *spawnDeps) BuildSHA() string                 { return d.buildSHA }
 
 func newSpawnDeps(t *testing.T) *spawnDeps {
 	t.Helper()
@@ -454,9 +662,15 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 				"runner":             map[string]any{"id": 42, "labels": labels},
 				"encoded_jit_config": "b64",
 			})
-		case strings.Contains(r.URL.Path, "/actions/runs"):
+		case strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs"):
 			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"total_count":0}`))
+			_, _ = w.Write([]byte(`{"jobs":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+		case strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"id":42,"name":"runner","status":"online","busy":true}`))
 		case strings.Contains(r.URL.Path, "/actions/runners/"):
 			w.WriteHeader(204)
 		default:
@@ -497,6 +711,12 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 		proxyDigest: "ghcr.io/test/proxy@sha256:pp",
 		breakers:    newFakeBreakers(),
 		bucket:      &fakeBucket{},
+		lifecycle: LifecycleTiming{
+			OnlineTimeout: 100 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
+			PollInterval: time.Millisecond, CleanupRetryInterval: time.Millisecond,
+		},
+		version:  "v-test",
+		buildSHA: "sha-test",
 	}
 }
 

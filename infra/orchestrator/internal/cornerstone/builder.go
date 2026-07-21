@@ -202,6 +202,89 @@ func (e *Emitter) EmitRunnerLeakCleaned(f RunnerLeakCleanedFields) error {
 	})
 }
 
+type RunnerOnlineFields struct {
+	Scope, Repo, SpawnID string
+	ContainerName        string
+	GitHubRunnerID       int64
+}
+
+func (e *Emitter) EmitRunnerOnline(f RunnerOnlineFields) error {
+	return e.Emit(runnerLifecycleEvent(
+		EventRunnerOnline, f.Scope, f.Repo, f.SpawnID, f.ContainerName,
+		f.GitHubRunnerID, "JIT runner registered online", StatusInProgress,
+	))
+}
+
+type JobAssignedFields struct {
+	Scope, Repo, SpawnID string
+	ContainerName        string
+	GitHubRunnerID       int64
+}
+
+func (e *Emitter) EmitJobAssigned(f JobAssignedFields) error {
+	return e.Emit(runnerLifecycleEvent(
+		EventJobAssigned, f.Scope, f.Repo, f.SpawnID, f.ContainerName,
+		f.GitHubRunnerID, "GitHub assigned a job to the JIT runner", StatusInProgress,
+	))
+}
+
+type RunnerCompletedFields struct {
+	Scope, Repo, SpawnID string
+	ContainerName        string
+	GitHubRunnerID       int64
+	ExitCode             int
+	DurationMillis       int64
+}
+
+func (e *Emitter) EmitRunnerCompleted(f RunnerCompletedFields) error {
+	event := runnerLifecycleEvent(
+		EventRunnerCompleted, f.Scope, f.Repo, f.SpawnID, f.ContainerName,
+		f.GitHubRunnerID, "assigned JIT runner completed", StatusCompleted,
+	)
+	event.EventDetails.Duration = f.DurationMillis
+	event.EventDetails.ErrorData["exit_code"] = f.ExitCode
+	event.ContainerContext.ExitCode = &f.ExitCode
+	return e.Emit(event)
+}
+
+type RunnerExitedUnassignedFields struct {
+	Scope, Repo, SpawnID string
+	ContainerName        string
+	GitHubRunnerID       int64
+	ExitCode             int
+}
+
+func (e *Emitter) EmitRunnerExitedUnassigned(f RunnerExitedUnassignedFields) error {
+	event := runnerLifecycleEvent(
+		EventRunnerExitedUnassigned, f.Scope, f.Repo, f.SpawnID, f.ContainerName,
+		f.GitHubRunnerID, "JIT runner exited without receiving a job", StatusFailed,
+	)
+	event.EventDetails.Severity = 3
+	event.EventDetails.Result = ResultFailure
+	event.EventDetails.FailureReason = "runner_exited_unassigned"
+	event.EventDetails.ErrorData["exit_code"] = f.ExitCode
+	event.ContainerContext.ExitCode = &f.ExitCode
+	return e.Emit(event)
+}
+
+func runnerLifecycleEvent(name, scope, repo, spawnID, containerName string, runnerID int64, summary string, status Status) Event {
+	return Event{
+		EventSubType: name,
+		EventType:    EventTypeChange,
+		TraceID:      "spawn-" + spawnID,
+		EventDetails: EventDetails{
+			Summary: summary, Severity: 6, Result: ResultSuccess, Status: status,
+			ErrorData: map[string]any{"github_runner_id": runnerID},
+			Tags:      scopeRepoTags(scope, repo),
+		},
+		ContainerContext: &ContainerContext{Name: containerName, Runtime: "docker"},
+		AuditContext: &AuditContext{
+			Action: "github_runner_observe", ResourceType: "github_runner",
+			ResourceID: fmt.Sprintf("%d", runnerID),
+		},
+	}
+}
+
 type BreakerFields struct {
 	Scope, Repo         string
 	ConsecutiveFailures int

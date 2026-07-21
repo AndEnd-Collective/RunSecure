@@ -35,9 +35,13 @@ const RunnerEntrypoint = "/home/runner/entrypoint.sh"
 
 // SpawnInput is everything a backend needs to create one per-spawn stack.
 type SpawnInput struct {
-	Scope, Repo, SpawnID                              string
-	RunnerImage, ProxyImage                           string // digest-pinned
-	SeccompProfilePath                                string
+	Scope, Repo, SpawnID    string
+	Version, BuildSHA       string
+	RunnerImage, ProxyImage string // digest-pinned
+	SeccompProfilePath      string
+	// Kubernetes maps memory and nano-CPUs to per-Pod requests/limits. The core
+	// Pod API has no per-Pod PID-limit field, so ResourcesPIDs is enforced only
+	// by Compose; Kubernetes operators must configure kubelet podPidsLimit.
 	ResourcesMemory, ResourcesNanoCPUs, ResourcesPIDs int64
 	JITConfigB64                                      string
 	EgressConfigDir                                   string // rendered squid/haproxy/dnsmasq dir
@@ -51,6 +55,14 @@ type SpawnInput struct {
 	// because Docker networking handles port routing dynamically and the HAProxy
 	// config (rendered by internal/egress) already lists the ports explicitly.
 	TCPEgressPorts []int
+
+	// KubeDNSServiceCIDRs identify the exact cluster DNS Service /32 peers seen
+	// before DNAT. KubeDNSNamespace and KubeDNSPodLabel identify the exact DNS
+	// Pods seen after DNAT. Kubernetes NetworkPolicy ordering varies by CNI, so
+	// both forms are required. Compose ignores all four fields.
+	KubeDNSServiceCIDRs                      []string
+	KubeDNSNamespace                         string
+	KubeDNSPodLabelKey, KubeDNSPodLabelValue string
 
 	// AllowedPrivateCIDRs is the set of operator-approved private CIDRs from
 	// the resolved security Policy (allow_private_cidrs scope override).

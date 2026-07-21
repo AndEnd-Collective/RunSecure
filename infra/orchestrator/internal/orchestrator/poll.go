@@ -25,8 +25,9 @@ type RepoRef struct {
 
 // Poll is one per-scope poll loop.
 type Poll struct {
-	scope ScopeRef
-	deps  PollDeps
+	scope    ScopeRef
+	deps     PollDeps
+	nextRepo int
 }
 
 // NewPoll constructs a per-scope poll loop.
@@ -64,6 +65,12 @@ func (p *Poll) Run(ctx context.Context) {
 func (p *Poll) tick(ctx context.Context) {
 	// Bug #2 fix: record this tick to update the /healthz freshness signal.
 	p.deps.RecordPollTick()
+	// Shutdown drain and unresolved teardown debt are scope-wide admission
+	// barriers. TryReserve repeats this check atomically with capacity changes,
+	// closing the race with a teardown failure that lands during this tick.
+	if p.deps.SchedulingBlocked() {
+		return
+	}
 
 	// If we're in a rate-limit pause for this scope, check if it's cleared.
 	if p.deps.IsRateLimited(p.scope.Name) {
@@ -85,18 +92,33 @@ func (p *Poll) tick(ctx context.Context) {
 		RateLimitResetISO:  reset,
 	})
 
-	for _, repo := range p.scope.Repos {
+	for offset := range p.scope.Repos {
+		repo := p.scope.Repos[(p.nextRepo+offset)%len(p.scope.Repos)]
 		// Half-open transition? (B4)
 		p.deps.BreakerMaybeHalfOpen(repo.Repo)
 		if p.deps.BreakerIsOpen(repo.Repo) {
 			continue
 		}
 
-		queued, err := p.deps.GitHub().QueuedJobs(ctx, repo.Repo)
+		p.deps.RecordPollAttempt(repo.Repo)
+		labels, err := p.deps.LabelsForRepo(ctx, repo.Repo)
 		if err != nil {
+			p.deps.RecordRateLimit(p.scope.Name, github.ErrorRateLimit(err))
+			p.recordPollFailure(repo.Repo, classifyRunnerConfigError(err), err.Error())
 			p.handlePollError(repo.Repo, err)
 			continue
 		}
+		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels)
+		if err != nil {
+			lim := github.ErrorRateLimit(err)
+			p.deps.RecordRateLimit(p.scope.Name, lim)
+			p.recordPollFailure(repo.Repo, classifyPollError(err), err.Error())
+			p.handlePollError(repo.Repo, err)
+			continue
+		}
+		p.deps.RecordRateLimit(p.scope.Name, demand.RateLimit)
+		queued := demand.Count()
+		p.recordPollSuccess(repo.Repo, queued)
 		if queued > 0 {
 			_ = p.deps.Emit().EmitPollQueuedJobsObserved(cornerstone.PollQueuedJobsObservedFields{
 				Scope: p.scope.Name, Repo: repo.Repo, Count: queued,
@@ -108,34 +130,87 @@ func (p *Poll) tick(ctx context.Context) {
 		repoAvail := repo.MaxConcurrent - p.deps.InFlight(repo.Repo)
 		globalAvail := p.scope.GlobalMaxRunners - p.deps.GlobalInFlight()
 		avail := max(min(repoAvail, globalAvail), 0)
-		toSpawn := min(queued, avail)
+		// GitHub continues to report a job as queued while a reserved JIT
+		// runner is registering or online but not yet assigned. Subtract that
+		// repo-specific delivered capacity before reserving again; otherwise a
+		// slow registration can create one runner per poll for one job.
+		uncoveredDemand := max(queued-p.deps.DemandCoverage(repo.Repo), 0)
+		toSpawn := min(uncoveredDemand, avail)
 
 		for i := 0; i < toSpawn; i++ {
 			intent := SpawnIntent{
-				Scope:   p.scope.Name,
-				Repo:    repo.Repo,
-				SpawnID: p.deps.NewSpawnID(),
+				Scope:         p.scope.Name,
+				Repo:          repo.Repo,
+				SpawnID:       p.deps.NewSpawnID(),
+				CandidateJobs: append([]github.WorkflowJob(nil), demand.Jobs...),
+			}
+			if !p.deps.TryReserve(intent.SpawnID, intent.Repo, repo.MaxConcurrent, p.scope.GlobalMaxRunners) {
+				break
 			}
 			select {
 			case p.deps.IntentChannel() <- intent:
 			case <-ctx.Done():
+				p.deps.ReleaseReservation(intent.SpawnID)
 				return
 			}
 		}
+	}
+	if len(p.scope.Repos) > 0 {
+		p.nextRepo = (p.nextRepo + 1) % len(p.scope.Repos)
+	}
+}
+
+func (p *Poll) recordPollFailure(repo, class, detail string) {
+	opened, consecutive := p.deps.RecordPollFailure(repo, class, detail)
+	if opened {
+		_ = p.deps.Emit().EmitBreakerOpened(cornerstone.BreakerFields{
+			Scope: p.scope.Name, Repo: repo, ConsecutiveFailures: consecutive,
+		})
+	}
+}
+
+func (p *Poll) recordPollSuccess(repo string, queued int) {
+	if p.deps.RecordPollSuccess(repo, queued) {
+		_ = p.deps.Emit().EmitBreakerClosed(cornerstone.BreakerFields{
+			Scope: p.scope.Name, Repo: repo,
+		})
+	}
+}
+
+func classifyPollError(err error) string {
+	switch {
+	case errors.Is(err, github.ErrRateLimited):
+		return "github_rate_limited"
+	case errors.Is(err, github.ErrAuthFailed):
+		return "github_auth_failed"
+	default:
+		return "github_demand_failed"
+	}
+}
+
+func classifyRunnerConfigError(err error) string {
+	switch {
+	case errors.Is(err, github.ErrRateLimited):
+		return "github_rate_limited"
+	case errors.Is(err, github.ErrAuthFailed):
+		return "github_auth_failed"
+	default:
+		return "runner_config"
 	}
 }
 
 func (p *Poll) handlePollError(repo string, err error) {
 	switch {
 	case errors.Is(err, github.ErrRateLimited):
-		p.deps.MarkRateLimited(p.scope.Name)
-		rem, lim, reset := p.deps.RateLimitContextFor(p.scope.Name)
-		_ = p.deps.Emit().EmitRatelimitPaused(cornerstone.RateLimitFields{
-			Scope: p.scope.Name, Remaining: rem, Limit: lim, ResetISO: reset,
-		})
+		if p.deps.MarkRateLimited(p.scope.Name) {
+			rem, lim, reset := p.deps.RateLimitContextFor(p.scope.Name)
+			_ = p.deps.Emit().EmitRatelimitPaused(cornerstone.RateLimitFields{
+				Scope: p.scope.Name, Remaining: rem, Limit: lim, ResetISO: reset,
+			})
+		}
 	case errors.Is(err, github.ErrAuthFailed):
 		_ = p.deps.Emit().EmitAuthDegraded(cornerstone.AuthDegradedFields{
-			Scope: p.scope.Name, Repo: repo, Status: 401,
+			Scope: p.scope.Name, Repo: repo, Status: github.ErrorStatus(err),
 		})
 	default:
 		// Other errors: do not retry-storm or crash; next poll tries again.

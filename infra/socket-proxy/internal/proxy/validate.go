@@ -217,7 +217,8 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 	return nil
 }
 
-// ValidateNetworkCreate enforces driver=bridge, Internal=true, Attachable=false.
+// ValidateNetworkCreate enforces driver=bridge, Internal=true,
+// Attachable=false, and the ownership labels cold-start cleanup requires.
 func ValidateNetworkCreate(body []byte) error {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -231,6 +232,12 @@ func ValidateNetworkCreate(body []byte) error {
 	}
 	if attachable, ok := req["Attachable"].(bool); ok && attachable {
 		return errors.New("Network must have Attachable: false")
+	}
+	labels, _ := req["Labels"].(map[string]any)
+	for _, key := range []string{"runsecure.scope", "runsecure.repo", "runsecure.spawn_id"} {
+		if value, _ := labels[key].(string); value == "" {
+			return fmt.Errorf("Network Labels[%q] is required", key)
+		}
 	}
 	return nil
 }

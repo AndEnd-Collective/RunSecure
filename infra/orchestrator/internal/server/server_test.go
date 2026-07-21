@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,19 +16,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type failingListener struct{ err error }
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (l failingListener) Close() error              { return nil }
+func (l failingListener) Addr() net.Addr            { return testAddr("failing-listener") }
+
+type testAddr string
+
+func (a testAddr) Network() string { return "test" }
+func (a testAddr) String() string  { return string(a) }
+
 // fakeDeps implements all the server dep interfaces for testing.
 type fakeDeps struct {
-	lastPoll  time.Time
-	now       time.Time
-	intervalS int
-	snap      state.Snapshot
-	api       map[APICallKey]int64
-	spawns    map[SpawnKey]int64
-	durations map[string][]float64
-	breakers  map[string]bool
+	lastPoll    time.Time
+	pollStarted bool
+	now         time.Time
+	intervalS   int
+	snap        state.Snapshot
+	api         map[APICallKey]int64
+	spawns      map[SpawnKey]int64
+	durations   map[string][]float64
+	breakers    map[string]bool
+	backendErr  error
 }
 
 func (f *fakeDeps) LastPollAt() time.Time                { return f.lastPoll }
+func (f *fakeDeps) PollStarted() bool                    { return f.pollStarted }
 func (f *fakeDeps) Now() time.Time                       { return f.now }
 func (f *fakeDeps) PollIntervalSeconds() int             { return f.intervalS }
 func (f *fakeDeps) StateSnapshot() state.Snapshot        { return f.snap }
@@ -35,19 +50,33 @@ func (f *fakeDeps) APICalls() map[APICallKey]int64       { return f.api }
 func (f *fakeDeps) SpawnsTotal() map[SpawnKey]int64      { return f.spawns }
 func (f *fakeDeps) SpawnDurations() map[string][]float64 { return f.durations }
 func (f *fakeDeps) BreakerOpen() map[string]bool         { return f.breakers }
+func (f *fakeDeps) BackendReady(context.Context) error   { return f.backendErr }
 
 func newDeps(t *testing.T) *fakeDeps {
 	t.Helper()
 	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
 	return &fakeDeps{
-		lastPoll:  now.Add(-5 * time.Second),
-		now:       now,
-		intervalS: 15,
+		lastPoll:    now.Add(-5 * time.Second),
+		pollStarted: true,
+		now:         now,
+		intervalS:   15,
 		snap: state.Snapshot{
-			PerRepo:            map[string]state.RepoState{"o/r": {InFlight: 2}},
-			GlobalInFlight:     2,
-			RateLimitRemaining: 4321,
-			RateLimitLimit:     5000,
+			PerRepo: map[string]state.RepoState{"o/r": {
+				InFlight: 2, QueuedJobs: 4, Pending: 1, Online: 1, Assigned: 0,
+				LastPollAt: now.Add(-time.Second), LastPollSuccess: now.Add(-2 * time.Second),
+				LastPollError: "github_auth_failed",
+			}},
+			GlobalInFlight:       2,
+			RateLimitRemaining:   4321,
+			RateLimitLimit:       5000,
+			ConfiguredCapacity:   3,
+			WorkerCapacity:       3,
+			Version:              "v2.1.8",
+			BuildSHA:             "abc123",
+			AssignmentsTotal:     7,
+			CompletedTotal:       6,
+			UnassignedExitsTotal: 1,
+			DeregistrationsTotal: 6,
 		},
 		api:      map[APICallKey]int64{{Endpoint: "queued", Status: "200"}: 100},
 		spawns:   map[SpawnKey]int64{{Scope: "s", Repo: "o/r", Outcome: "success"}: 5},
@@ -64,6 +93,18 @@ func TestHealthz_OkWhenFresh(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), "ok")
 	require.Equal(t, int64(1), h.Hits())
+}
+
+func TestHealthz_StartingBeforePollLoopIgnoresPollAge(t *testing.T) {
+	d := newDeps(t)
+	d.pollStarted = false
+	d.lastPoll = d.now.Add(-24 * time.Hour)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	h := NewHealthz(d, em)
+	rr := httpRec()
+	h.ServeHTTP(rr, httpReq("GET", "/healthz"))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `{"status":"starting"}`, rr.Body.String())
 }
 
 // Mutation kill: healthz.go:44 — `if staleness >= limit`. Boundary case
@@ -102,6 +143,12 @@ func TestHealthz_StaleWhenLastPollTooOld(t *testing.T) {
 
 func TestMetrics_RendersTextFormat(t *testing.T) {
 	d := newDeps(t)
+	repoState := d.snap.PerRepo["o/r"]
+	repoState.TeardownBlocked = 1
+	d.snap.PerRepo["o/r"] = repoState
+	d.snap.TeardownBlocked = true
+	d.snap.TeardownFailuresTotal = 2
+	d.snap.TeardownReconciledTotal = 1
 	m := NewMetrics(d)
 	rr := httpRec()
 	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
@@ -109,8 +156,23 @@ func TestMetrics_RendersTextFormat(t *testing.T) {
 	body := rr.Body.String()
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_in_flight_runners{repo="o/r"} 2`))
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_api_rate_limit_remaining 4321`))
+	require.True(t, strings.Contains(body, `runsecure_orchestrator_rate_limited 0`))
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_spawns_total{scope="s",repo="o/r",outcome="success"} 5`))
 	require.True(t, strings.Contains(body, `runsecure_orchestrator_breaker_open{repo="o/r"} 0`))
+	require.Contains(t, body, `runsecure_orchestrator_queued_jobs{repo="o/r"} 4`)
+	require.Contains(t, body, `runsecure_orchestrator_pending_runners{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_online_runners{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_poll_error_info{repo="o/r",class="github_auth_failed"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_configured_capacity 3`)
+	require.Contains(t, body, `runsecure_orchestrator_worker_capacity 3`)
+	require.Contains(t, body, `runsecure_orchestrator_assignments_total 7`)
+	require.Contains(t, body, `runsecure_orchestrator_completed_runners_total 6`)
+	require.Contains(t, body, `runsecure_orchestrator_unassigned_exits_total 1`)
+	require.Contains(t, body, `runsecure_orchestrator_deregistrations_total 6`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_blocked_reservations{repo="o/r"} 1`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_failures_total 2`)
+	require.Contains(t, body, `runsecure_orchestrator_teardown_reconciled_total 1`)
+	require.Contains(t, body, `runsecure_orchestrator_build_info{version="v2.1.8",build_sha="abc123"} 1`)
 }
 
 func TestSnapshot_RoundTrip(t *testing.T) {
@@ -156,6 +218,16 @@ func TestMetrics_EmptySnapshot(t *testing.T) {
 	m.ServeHTTP(rr, httpReq("GET", "/metrics"))
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.True(t, strings.Contains(rr.Body.String(), "runsecure_orchestrator_api_rate_limit_remaining"))
+}
+
+func TestMetrics_ReportsRateLimitedScheduler(t *testing.T) {
+	d := newDeps(t)
+	d.snap.RateLimited = true
+	rr := httpRec()
+
+	NewMetrics(d).ServeHTTP(rr, httpReq("GET", "/metrics"))
+
+	require.Contains(t, rr.Body.String(), "runsecure_orchestrator_rate_limited 1")
 }
 
 func TestServer_RunAndShutdownOnCtxCancel(t *testing.T) {
@@ -225,10 +297,8 @@ func TestMetrics_BreakerOpen_True(t *testing.T) {
 		"open breaker must emit gauge value 1")
 }
 
-// TestServer_Run_ListenerError covers the `case err := <-errCh` branch in
-// server.Run (server.go:380). Binding both listeners to the same non-zero
-// port causes one ListenAndServe to fail immediately, which triggers the
-// error return path.
+// TestServer_Run_ListenerError covers the synchronous health-listener bind
+// failure returned by Run.
 func TestServer_Run_ListenerError(t *testing.T) {
 	d := newDeps(t)
 	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
@@ -256,6 +326,38 @@ func TestServer_Run_ListenerError(t *testing.T) {
 		t.Fatal("Run did not return within 5s on listener conflict")
 	}
 	_ = srv // used above to quiet the linter
+}
+
+func TestServer_StartDebugBindFailureReleasesHealthListener(t *testing.T) {
+	d := newDeps(t)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := probe.Addr().String()
+	require.NoError(t, probe.Close())
+
+	// The health listener binds first; using the same address for debug forces
+	// the second bind to fail. Start must close the already-bound health socket.
+	done, err := New(address, address, d, em).Start(context.Background())
+	require.ErrorContains(t, err, "debug listener")
+	require.Nil(t, done)
+
+	rebound, err := net.Listen("tcp", address)
+	require.NoError(t, err, "health listener must be released after debug bind failure")
+	require.NoError(t, rebound.Close())
+}
+
+func TestServerServePropagatesUnexpectedListenerFailure(t *testing.T) {
+	d := newDeps(t)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	debugListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	sentinel := errors.New("accept failed")
+
+	err = New("127.0.0.1:0", "127.0.0.1:0", d, em).serve(
+		context.Background(), failingListener{err: sentinel}, debugListener,
+	)
+	require.ErrorIs(t, err, sentinel)
 }
 
 // Mutation kill: metrics.go:125 + :136 — sort.Slice less-than functions.

@@ -174,6 +174,63 @@ else
 fi
 
 # ============================================================================
+# Test 6: scanner inventory survives double run as inert read-only data
+# ============================================================================
+echo -e "\n${BOLD}--- 6. Scanner inventory after double run ---${NC}"
+
+INVENTORY_STATE=$(docker run --rm --user 0 \
+    -v "${RUNSECURE_ROOT}/infra/scripts/finalize-hardening.sh:/tmp/finalize.sh:ro" \
+    --entrypoint "" \
+    runner-base:latest bash -c '
+        set -euo pipefail
+        bash /tmp/finalize.sh &>/dev/null
+        bash /tmp/finalize.sh &>/dev/null
+
+        if [[ -f /var/lib/dpkg/status \
+            && ! -L /var/lib/dpkg/status \
+            && "$(stat -c "%a" /var/lib/dpkg/status)" == "444" ]]; then
+            echo "STATUS_SAFE=yes"
+        else
+            echo "STATUS_SAFE=no"
+        fi
+
+        if [[ "$(stat -c "%a" /var/lib/dpkg 2>/dev/null)" == "555" ]]; then
+            echo "DIRECTORY_SAFE=yes"
+        else
+            echo "DIRECTORY_SAFE=no"
+        fi
+
+        unexpected=$(find /var/lib/dpkg -mindepth 1 \
+            ! -path /var/lib/dpkg/status \
+            ! -path /var/lib/dpkg/status.d \
+            ! -path "/var/lib/dpkg/status.d/*" -print -quit)
+        writable=$(find /var/lib/dpkg -perm /222 -print -quit)
+        if [[ -z "$unexpected" && -z "$writable" ]]; then
+            echo "TREE_SAFE=yes"
+        else
+            echo "TREE_SAFE=no"
+        fi
+    ' 2>&1)
+
+if grep -q '^STATUS_SAFE=yes$' <<<"$INVENTORY_STATE"; then
+    pass "dpkg status inventory remains a regular mode-444 file"
+else
+    fail "dpkg status inventory is missing, linked, or writable after double run"
+fi
+
+if grep -q '^DIRECTORY_SAFE=yes$' <<<"$INVENTORY_STATE"; then
+    pass "dpkg inventory directory remains mode 555"
+else
+    fail "dpkg inventory directory is not read-only after double run"
+fi
+
+if grep -q '^TREE_SAFE=yes$' <<<"$INVENTORY_STATE"; then
+    pass "only non-writable scanner inventory survives under /var/lib/dpkg"
+else
+    fail "mutable or unexpected dpkg state survives after double run"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo -e "\n${BOLD}=== Hardening Idempotency Results ===${NC}"

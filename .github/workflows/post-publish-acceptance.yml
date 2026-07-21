@@ -1,25 +1,10 @@
 # ============================================================================
 # RunSecure — Post-Publish Acceptance Tests
 # ============================================================================
-# Runs AFTER publish-images.yml succeeds. Pulls each just-published image
-# from GHCR and runs the full acceptance suite against it:
-#
-#   In-container checks (run inside the published image with documented
-#   hardening flags applied): identity, root-locked, package manager
-#   removed, no setuid, /etc immutable, cap_drop, no-new-privileges,
-#   /tmp noexec, seccomp blocks.
-#
-#   Stack-level checks (run with the published proxy + runner stack via
-#   docker-compose): direct-internet blocked, HTTP allowlist enforced,
-#   cloud-metadata blocked, TCP egress allowlist enforced, HTTPS-only
-#   enforced.
-#
-# Each check is mapped to a numbered claim in SECURITY.md. A failure here
-# means the published artifact does not deliver on a documented promise.
-#
-# Triggered:
-#   - workflow_run on Publish Images success (every release tag)
-#   - manual workflow_dispatch (provide an image_version input)
+# Runs automatically after Publish Images. It downloads the release manifest
+# from that exact workflow run, verifies the run/version/build provenance, and
+# tests immutable image@sha256 references. Concurrent releases cannot cause
+# this workflow to test a newer mutable tag by accident.
 # ============================================================================
 
 name: post-publish-acceptance
@@ -31,81 +16,164 @@ on:
   workflow_dispatch:
     inputs:
       image_version:
-        description: 'GHCR image tag to test (e.g. 1.1.2)'
+        description: 'Expected release version from the Publish Images manifest'
+        required: true
+        type: string
+      publish_run_id:
+        description: 'Successful Publish Images workflow run ID to test'
         required: true
         type: string
 
-permissions:
-  contents: read
-  packages: read
+permissions: {}
 
 jobs:
-  resolve-version:
+  resolve-manifest:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      actions: read
+      contents: read
     outputs:
-      version: ${{ steps.v.outputs.version }}
+      version: ${{ steps.verify.outputs.version }}
+      build_sha: ${{ steps.verify.outputs.build_sha }}
+      publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
-      - name: Resolve image version to test
-        id: v
+      - name: Download manifest from the triggering Publish Images run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-image-manifest-*
+          path: .publish-manifest
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id || inputs.publish_run_id }}
+
+      - name: Verify workflow-run and immutable manifest provenance
+        id: verify
         env:
-          DISPATCH_VERSION: ${{ github.event.inputs.image_version }}
+          EXPECTED_VERSION: ${{ inputs.image_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_RUN_ID: ${{ github.event.workflow_run.id || inputs.publish_run_id }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -n "$DISPATCH_VERSION" ]; then
-            VERSION="$DISPATCH_VERSION"
-          else
-            # Triggered by Publish Images success — find latest tag pushed.
-            VERSION=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
-          fi
-          if [ -z "$VERSION" ]; then
-            echo "::error::could not resolve image version to test"
+          if [[ ! "$PUBLISH_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::publish_run_id must be a positive integer"
             exit 1
           fi
-          echo "Acceptance target: v${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [ ! -f .publish-manifest/release-images.json ]; then
+            echo "::error::exact Publish Images run did not produce one release manifest"
+            exit 1
+          fi
+
+          gh api "/repos/${REPOSITORY}/actions/runs/${PUBLISH_RUN_ID}" \
+            > .publish-manifest/workflow-run.json
+          BUILD_SHA=$(python3 - .publish-manifest/workflow-run.json <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          run = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if run.get("name") != "Publish Images":
+              raise SystemExit("not a Publish Images workflow run")
+          if run.get("path") != ".github/workflows/publish-images.yml":
+              raise SystemExit("workflow path does not match publish-images.yml")
+          if run.get("event") not in {"push", "workflow_dispatch"}:
+              raise SystemExit("unsupported Publish Images event")
+          if run.get("conclusion") != "success":
+              raise SystemExit("Publish Images run did not succeed")
+          build_sha = run.get("head_sha", "")
+          if re.fullmatch(r"[0-9a-f]{40,64}", build_sha) is None:
+              raise SystemExit("Publish Images run has an invalid head SHA")
+          print(build_sha)
+          PY
+          )
+
+          verify_args=(
+            .publish-manifest/release-images.json
+            --expected-build-sha "$BUILD_SHA"
+            --expected-publish-run-id "$PUBLISH_RUN_ID"
+          )
+          if [ -n "$EXPECTED_VERSION" ]; then
+            verify_args+=(--expected-release "$EXPECTED_VERSION")
+          fi
+          python3 infra/scripts/verify-release-manifest.py "${verify_args[@]}"
+
+          python3 - .publish-manifest/release-images.json "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+              output.write(f"version={manifest['release']}\n")
+              output.write(f"build_sha={manifest['build_sha']}\n")
+              output.write(f"publish_run_id={manifest['publish_run_id']}\n")
+          PY
+
+      - name: Preserve the verified acceptance input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-publish-manifest-${{ steps.verify.outputs.publish_run_id }}
+          path: .publish-manifest/release-images.json
+          if-no-files-found: error
+          retention-days: 90
 
   acceptance:
-    needs: resolve-version
+    needs: resolve-manifest
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read
+      contents: read
       packages: read
-      # Required to upload SARIF results to Code Scanning. The workflow
-      # emits one SARIF per language matrix leg in the "acceptance-*"
-      # category; failures appear in the repo's Security tab.
       security-events: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Every language image that promote-to-stable.yml retags MUST be
-          # acceptance-tested here. If you add a new lang/version to the
-          # publish matrix, add it here too — otherwise a regression would
-          # ship to `:latest` without any check rejecting it.
           - lang: node
             lang_version: "24"
+            manifest_key: node-24
           - lang: node
             lang_version: "22"
+            manifest_key: node-22
           - lang: python
             lang_version: "3.12"
+            manifest_key: python-3.12
           - lang: rust
             lang_version: "stable"
+            manifest_key: rust-stable
     env:
-      # Acceptance runs against -canary tags (the just-published, not-yet-validated
-      # release). On all-green, promote-to-stable.yml retags the same digest as
-      # `<ver>` + `latest`.
-      IMAGE_VERSION: ${{ needs.resolve-version.outputs.version }}
-      IMAGE_TAG_SUFFIX: -canary
       LANG: ${{ matrix.lang }}
       LANG_VERSION: ${{ matrix.lang_version }}
+      MANIFEST_KEY: ${{ matrix.manifest_key }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.resolve-manifest.outputs.build_sha }}
+
+      - name: Download verified immutable manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-publish-manifest-${{ needs.resolve-manifest.outputs.publish_run_id }}
+          path: .verified-manifest
+
+      - name: Resolve exact immutable acceptance images
+        run: |
+          python3 - .verified-manifest/release-images.json "$MANIFEST_KEY" "$GITHUB_ENV" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          with pathlib.Path(sys.argv[3]).open("a", encoding="utf-8") as output:
+              output.write(f"PROXY_IMAGE_REF={manifest['images']['proxy']}\n")
+              output.write(f"RUNNER_IMAGE_REF={manifest['images'][sys.argv[2]]}\n")
+          PY
 
       - name: Login to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -114,19 +182,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull published canary images
+      - name: Pull published immutable images
         run: |
           set -euo pipefail
-          docker pull "ghcr.io/andend-collective/runsecure/proxy:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}"
-          docker pull "ghcr.io/andend-collective/runsecure/${LANG}:${IMAGE_VERSION}${IMAGE_TAG_SUFFIX}-${LANG_VERSION}"
+          docker pull "$PROXY_IMAGE_REF"
+          docker pull "$RUNNER_IMAGE_REF"
+
+      - name: Execute the published language runtime by exact digest
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUNNER_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::runner acceptance ref is not immutable: $RUNNER_IMAGE_REF"
+            exit 1
+          fi
+          case "$LANG" in
+            node)
+              runtime_version=$(docker run --rm --entrypoint node \
+                "$RUNNER_IMAGE_REF" --version)
+              [[ "$runtime_version" == "v${LANG_VERSION}."* ]]
+              docker run --rm --entrypoint node "$RUNNER_IMAGE_REF" \
+                -e 'if (2 + 2 !== 4) process.exit(1); console.log("runsecure-node-ok")'
+              ;;
+            python)
+              runtime_version=$(docker run --rm --entrypoint python3 \
+                "$RUNNER_IMAGE_REF" --version 2>&1)
+              [[ "$runtime_version" == "Python ${LANG_VERSION}."* ]]
+              docker run --rm --entrypoint python3 "$RUNNER_IMAGE_REF" \
+                -c 'assert 2 + 2 == 4; print("runsecure-python-ok")'
+              ;;
+            rust)
+              docker run --rm --entrypoint bash "$RUNNER_IMAGE_REF" -lc '
+                set -euo pipefail
+                rustc --version
+                cargo --version
+                work=$(mktemp -d)
+                trap '\''rm -rf "$work"'\'' EXIT
+                printf '\''fn main() { println!("runsecure-rust-ok"); }\n'\'' > "$work/main.rs"
+                rustc "$work/main.rs" -o "$work/smoke"
+                [[ $("$work/smoke") == runsecure-rust-ok ]]
+              '
+              ;;
+            *)
+              echo "::error::unsupported acceptance language: $LANG"
+              exit 1
+              ;;
+          esac
 
       - name: Run acceptance suite (capture output for SARIF)
         id: acceptance
         working-directory: tests/acceptance
-        # Capture all output so the SARIF emitter can parse PASS:/FAIL:/SKIP:
-        # lines after the run completes. The compose `up` exits non-zero on
-        # any failure; we capture the exit code into a step output so the
-        # later "fail-build" step can re-raise it AFTER SARIF upload.
         run: |
           set -uo pipefail
           mkdir -p _sarif
@@ -142,15 +246,13 @@ jobs:
         if: always() && hashFiles('tests/acceptance/_sarif/raw-output.log') != ''
         working-directory: tests/acceptance
         env:
-          IMAGE_REF: "ghcr.io/andend-collective/runsecure/${{ env.LANG }}:${{ env.IMAGE_VERSION }}${{ env.IMAGE_TAG_SUFFIX }}-${{ env.LANG_VERSION }}"
-          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_SHA: ${{ needs.resolve-manifest.outputs.build_sha }}
         run: |
           set -euo pipefail
-          # PyYAML is the only emitter dep; install via pip --user.
           python3 -m pip install --quiet --user pyyaml
           python3 sarif-emitter.py \
             --claims claims.yml \
-            --image-ref "$IMAGE_REF" \
+            --image-ref "$RUNNER_IMAGE_REF" \
             --commit-sha "$COMMIT_SHA" \
             --output "_sarif/acceptance-${LANG}-${LANG_VERSION}.sarif" \
             < _sarif/raw-output.log
@@ -164,14 +266,10 @@ jobs:
           category: "acceptance-${{ matrix.lang }}-${{ matrix.lang_version }}"
 
       - name: Re-raise acceptance failure (after SARIF upload)
-        # SARIF upload happens unconditionally so failures land in the
-        # Security tab even when the workflow itself fails. NOW we let
-        # the original exit code propagate so the workflow status is
-        # accurate.
         if: always() && steps.acceptance.outputs.acceptance_exit != '0'
         run: |
           echo "::error::Acceptance suite reported failures (exit ${{ steps.acceptance.outputs.acceptance_exit }}). See Code Scanning Security tab for per-claim findings."
-          exit "${{ steps.acceptance.outputs.acceptance_exit }}"
+          exit 1
 
       - name: Teardown
         if: always()

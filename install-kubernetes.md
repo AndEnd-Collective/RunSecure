@@ -26,6 +26,11 @@ For the Compose backend (Linux/macOS host with Docker), see
 - **Pod Security Standards (PSS) Restricted admission** on the
   `runsecure-<scope>` namespace. The chart applies the required labels; the
   cluster must have PSS admission enabled (standard since k8s 1.25).
+- **A bounded kubelet `podPidsLimit` on every eligible runner node.** The core
+  Kubernetes Pod API has no per-Pod PID-limit field, so the `pids` value in
+  `runner.yml` is enforced by the Compose backend only. The Kubernetes backend
+  enforces that file's CPU and memory values per Pod, but relies on this
+  node-level kubelet setting for process-count containment.
 - **Helm ≥ 3.12**.
 
 ### Optional
@@ -128,6 +133,23 @@ Create `my-scope-values.yaml` (do not commit auth secrets inline; use
 `existingSecretName` / `privateKeySecretName` as shown above):
 
 ```yaml
+kubernetesNetwork:
+  # Configure exact API CIDR/port pairs for both Service and endpoint traffic.
+  # Separate pairs prevent the Service address from inheriting an endpoint port.
+  apiServerPeers:
+    - cidr: "10.96.0.1/32"
+      port: 443
+    - cidr: "172.18.0.2/32"
+      port: 6443
+  # DNS policy may see the Service /32 before DNAT or the selected Pod after
+  # DNAT, depending on the CNI, so both exact forms are required.
+  dnsServiceCIDRs:
+    - "10.96.0.10/32"
+  dnsNamespace: "kube-system"
+  dnsPodLabel:
+    key: "k8s-app"
+    value: "kube-dns"
+
 scope:
   name: "production"          # Becomes the namespace: runsecure-production
   backend: kube               # Must be 'kube' for this chart.
@@ -170,6 +192,12 @@ image:
 
 | Key | Default | Description |
 |---|---|---|
+| `kubernetesNetwork.apiServerPeers` | `[{cidr: "10.96.0.1/32", port: 443}]` | Unique exact CIDR/port pairs for the Kubernetes Service and API endpoints. |
+| `kubernetesNetwork.dnsServiceCIDRs` | `["10.96.0.10/32"]` | Unique exact `/32s` for cluster DNS Services visible before DNAT. |
+| `kubernetesNetwork.dnsNamespace` | `"kube-system"` | Exact namespace containing the cluster DNS Pods. |
+| `kubernetesNetwork.dnsPodLabel` | `{key: k8s-app, value: kube-dns}` | Exact identifying label shared by the cluster DNS Pods. |
+| `replicaCount` | `1` | Fixed at one because the orchestrator has no distributed leader election. |
+| `terminationGracePeriodSeconds` | `90` | Minimum drain window; lower values are rejected. |
 | `scope.name` | `"default"` | Short lowercase name; becomes the k8s namespace `runsecure-<name>`. |
 | `scope.backend` | `kube` | Must be `kube` for this chart. |
 | `scope.globalMaxRunners` | `5` | Ceiling on concurrent runner Pods across all repos in the scope. |
@@ -208,11 +236,21 @@ The chart creates:
   Pod in the namespace; two allow policies carve out only what the
   orchestrator needs (kube-apiserver, kube-dns, external HTTPS for GitHub).
 - **ConfigMap** with the rendered scope config.
-- **Orchestrator Deployment** (single replica; distroless, non-root UID 1001,
-  `cap_drop: ALL`, read-only root filesystem, `seccompProfile: RuntimeDefault`).
-- **Service** exposing `/healthz` and `/metrics` on port 8080 (ClusterIP only;
-  not externally accessible).
+- **Orchestrator Deployment** (single replica, `Recreate` strategy, at least
+  90 seconds termination grace; distroless, non-root UID 1001, `cap_drop: ALL`,
+  read-only root filesystem, `seccompProfile: RuntimeDefault`). Multiple
+  replicas are rejected because RunSecure does not use distributed leader election.
+- **Service** exposing `/healthz` and `/readyz` on port 8080 plus `/metrics`
+  and `/state/snapshot` on port 8081 (ClusterIP only; not externally
+  accessible).
 - (Conditional) **Certificate + Issuer** when `tls.enabled: true`.
+
+The management listeners bind before cold-start runner reconciliation begins.
+During that phase `/healthz` reports process liveness, while `/readyz` remains
+`503` until the backend is initialized and every configured repository has a
+fresh successful demand poll. After polling begins, `/healthz` also fails when
+the poll loop becomes stale. This keeps slow, legitimate cleanup alive without
+advertising the orchestrator as ready to receive work.
 
 ### Per-spawn objects (created at runtime, not by Helm)
 
@@ -223,10 +261,11 @@ For each CI job the orchestrator spawns:
   other spawn resources.
 - **ClusterIP Service** — proxy's stable DNS name inside the namespace.
 - **NetworkPolicies** (3 per spawn):
-  - `RunnerEgressNetworkPolicy` — runner → proxy on port 3128 only; all other
-    egress blocked.
-  - `ProxyEgressNetworkPolicy` — proxy → kube-dns (53/UDP+TCP) + internet
-    (via Squid allow-list at L7).
+  - `RunnerEgressNetworkPolicy` — runner → exact cluster DNS Service `/32s`
+    plus exact selected DNS Pods on port 53, and its own proxy on port 3128;
+    all other egress blocked.
+  - `ProxyEgressNetworkPolicy` — proxy → the same dual exact pre/post-DNAT
+    DNS peers (53/UDP+TCP) + internet (via Squid allow-list at L7).
   - `ProxyIngressNetworkPolicy` — only this spawn's runner Pod may connect to
     this spawn's proxy. Cross-spawn connections are blocked by pinning both the
     target (`runsecure.io/role=proxy`) and source (`runsecure.io/role=runner`)
@@ -236,7 +275,10 @@ For each CI job the orchestrator spawns:
 - **Proxy Pod** — runs Squid + HAProxy + optional dnsmasq. Receives egress
   configs from the Secret mount.
 - **Runner Pod** — the hardened GitHub Actions runner. `HTTP_PROXY` is set to
-  the proxy Service DNS name; the runner has no other network path.
+  the proxy Service DNS name; apart from exact cluster DNS Service `/32s` and
+  selected DNS Pods, the runner has no path other than its own proxy. CPU and
+  memory requests equal the limits from `runner.yml`, and the memory-backed
+  `/tmp` volume is capped at 512 MiB.
 
 All per-spawn Pods run under PSS Restricted with `runAsUser: 1001`,
 `cap_drop: ALL`, `seccompProfile: RuntimeDefault`, no host namespaces, and
@@ -335,11 +377,12 @@ kubectl -n runsecure-production get pods
 # runsecure-production-orch-xxxx-yyyy     1/1     Running   0
 
 kubectl -n runsecure-production port-forward \
-  svc/runsecure-production-runsecure-orchestrator 8080:8080 &
+  svc/runsecure-production-runsecure-orchestrator 8080:8080 8081:8081 &
 curl -sf http://127.0.0.1:8080/healthz
 # {"status":"ok"}
 
-curl -sf http://127.0.0.1:8080/metrics | grep in_flight
+curl -sf http://127.0.0.1:8080/readyz
+curl -sf http://127.0.0.1:8081/metrics | grep in_flight
 # runsecure_orchestrator_in_flight_runners{...} 0
 ```
 
@@ -385,11 +428,13 @@ The harness:
    - Runner → internet (1.1.1.1:80): blocked.
    - Runner → kube-apiserver: blocked.
    - Runner (spawn01) → spawn02 proxy: blocked (cross-spawn isolation).
-4. Applies the chart RBAC via `helm template` and asserts the orchestrator SA
-   cannot create ClusterRoles and cannot act in `kube-system`.
-5. Runs `helm template` + `helm install --dry-run` against the chart.
+4. Applies the chart RBAC, performs a real namespace-scoped NetworkPolicy
+   create/delete as the orchestrator SA, and proves that SA cannot create
+   Namespaces or ClusterRoles and cannot act in `kube-system`.
+5. Runs the generated runner-object contract (including CPU/memory and `/tmp`
+   bounds), then `helm template` + `helm install --dry-run` against the chart.
 
-Prerequisites: `kind`, `kubectl`, `helm` in PATH. If any are absent the
+Prerequisites: `kind`, `kubectl`, `helm`, and `go` in PATH. If any are absent the
 harness exits 0 (SKIP) rather than failing.
 
 ---
@@ -416,9 +461,11 @@ backend plus k8s-specific controls. Each claim is verified by
 
 | Claim | Mechanism | Verified by |
 |---|---|---|
-| Runner can only reach its own proxy | `RunnerEgressNetworkPolicy` (runner → proxy 3128/TCP only) + `ProxyIngressNetworkPolicy` (proxy accepts only from same-spawn runner) | `run-k8s-tests.sh` step 5 (NetworkPolicy assertions) |
+| Runner can only resolve cluster DNS and reach its own proxy | `RunnerEgressNetworkPolicy` (runner → exact DNS Service `/32s` plus exact namespace/Pod-label-selected DNS Pods on 53, and same-spawn proxy on 3128/TCP) + `ProxyIngressNetworkPolicy` | `run-k8s-tests.sh` step 5a (both DNS peer forms plus DNS-named proxy connection) |
 | Cross-spawn isolation | `ProxyIngressNetworkPolicy` pins `runsecure.io/spawn-id` in the From selector — spawn A's runner cannot reach spawn B's proxy | `run-k8s-tests.sh` step 5d |
 | Orchestrator SA is namespace-scoped least-privilege | `Role` (not `ClusterRole`); verbs limited to `pods/services/secrets/networkpolicies` in the scope namespace | `run-k8s-tests.sh` step 6 (RBAC assertions) |
+| Runner CPU, memory, and temporary storage are bounded | Equal CPU/memory Pod requests and limits from `runner.yml`; 512 MiB memory-backed `/tmp` | `run-k8s-tests.sh` step 7c (generated runner-object contract) |
+| Process-count containment is an explicit cluster prerequisite | Kubernetes has no per-Pod PID-limit field; eligible nodes require bounded kubelet `podPidsLimit` | Deployment prerequisite review; Compose-only per-runner PID test |
 | PSS Restricted admission | Namespace labeled `pod-security.kubernetes.io/enforce: restricted`; privileged Pods are rejected | `run-k8s-tests.sh` step 3 |
 | ProxyIngressNetworkPolicy is load-bearing | Without it, the namespace default-deny blocks runner→proxy 3128/TCP even when the runner's egress rule matches; this was a real bug during development | Code comment in `kube/objects.go:ProxyIngressNetworkPolicy` |
 | NetworkPolicy enforcement requires an enforcing CNI | kindnet/flannel ignore NetworkPolicy; Calico/Cilium enforce it | `kind-calico.yaml` (disableDefaultCNI=true; Calico installed) |

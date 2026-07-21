@@ -19,11 +19,52 @@ image:
     tag: "2.1.2"
     digest: "sha256:653a28372741957135874c517b7a743a95ff27f7a7c3ffa293fd5cf2cf7dc3b0"
     pullPolicy: Always
+  # Terminal runner images admitted by the Kubernetes backend. Each value is
+  # rendered into the orchestrator environment as repository@digest; mutable
+  # tags are metadata only and are never passed to a spawned Pod.
+  runners:
+    default:
+      repository: ghcr.io/andend-collective/runsecure/node
+      tag: "2.1.2-24"
+      digest: "sha256:84461b287a4dfd5862da4683f1860a774a4436cb5c1782b7dece5e9d33d130db"
+      pullPolicy: Always
+    node:
+      repository: ghcr.io/andend-collective/runsecure/node
+      tag: "2.1.2-24"
+      digest: "sha256:84461b287a4dfd5862da4683f1860a774a4436cb5c1782b7dece5e9d33d130db"
+      pullPolicy: Always
+    python:
+      repository: ghcr.io/andend-collective/runsecure/python
+      tag: "2.1.2-3.12"
+      digest: "sha256:eb4cc90f909ac420aff7d368ce4269e9cb540d21774fdd3d1eb2d86ddb2c02e2"
+      pullPolicy: Always
+    rust:
+      repository: ghcr.io/andend-collective/runsecure/rust
+      tag: "2.1.2-stable"
+      digest: "sha256:c861102a49db8e1703787e93d84a8b383056ae5cc83b4e78d3f0c208589834b7"
+      pullPolicy: Always
   socketProxy:
     repository: ghcr.io/andend-collective/runsecure/socket-proxy
     tag: "2.1.2"
     digest: "sha256:4a7af59d856a98a1f4515d67c6eb881f604bf01bd834ccd5bb8f2d91cfdc5778"
     pullPolicy: Always
+
+# ---------------------------------------------------------------------------
+# Kubernetes network dependencies. API traffic can be evaluated before or
+# after Service DNAT. Each API destination is an exact CIDR/port pair so a
+# Service address cannot inherit an endpoint port (or vice versa). DNS requires
+# both exact Service /32s and an exact namespace + Pod label selector.
+# ---------------------------------------------------------------------------
+kubernetesNetwork:
+  apiServerPeers:
+    - cidr: "10.96.0.1/32"
+      port: 443
+  dnsServiceCIDRs:
+    - "10.96.0.10/32"
+  dnsNamespace: "kube-system"
+  dnsPodLabel:
+    key: "k8s-app"
+    value: "kube-dns"
 
 # ---------------------------------------------------------------------------
 # Scope configuration — mirrors infra/orchestrator/scopes/example.yml.
@@ -109,6 +150,10 @@ tls:
 # ---------------------------------------------------------------------------
 replicaCount: 1
 
+# Must cover the orchestrator's 60-second drain, 20-second forced-cleanup
+# window, and final server shutdown. Values below 90 are rejected.
+terminationGracePeriodSeconds: 90
+
 # Orchestrator service account
 serviceAccount:
   # Name of the ServiceAccount to create/use. Defaults to release name.
@@ -159,7 +204,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /healthz
+    path: /readyz
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
@@ -171,6 +216,7 @@ readinessProbe:
 service:
   type: ClusterIP
   port: 8080
+  statePort: 8081
 
 # ---------------------------------------------------------------------------
 # Additional environment variables for the orchestrator container.

@@ -21,6 +21,10 @@ const (
 	EventSpawnFailed                = "runsecure.orchestrator.spawn.failed"
 	EventSpawnTimeoutForcedTeardown = "runsecure.orchestrator.spawn.timeout_forced_teardown"
 	EventRunnerLeakCleaned          = "runsecure.orchestrator.runner.leak_cleaned"
+	EventRunnerOnline               = "runsecure.orchestrator.runner.online"
+	EventJobAssigned                = "runsecure.orchestrator.job.assigned"
+	EventRunnerCompleted            = "runsecure.orchestrator.runner.completed"
+	EventRunnerExitedUnassigned     = "runsecure.orchestrator.runner.exited_unassigned"
 	EventBreakerOpened              = "runsecure.orchestrator.breaker.opened"
 	EventBreakerClosed              = "runsecure.orchestrator.breaker.closed"
 	EventRatelimitPaused            = "runsecure.orchestrator.ratelimit.paused"
@@ -45,6 +49,10 @@ func AllEventNames() []string {
 		EventSpawnFailed,
 		EventSpawnTimeoutForcedTeardown,
 		EventRunnerLeakCleaned,
+		EventRunnerOnline,
+		EventJobAssigned,
+		EventRunnerCompleted,
+		EventRunnerExitedUnassigned,
 		EventBreakerOpened,
 		EventBreakerClosed,
 		EventRatelimitPaused,

@@ -23,6 +23,7 @@ import (
 // SpawnIntent is what the poll loop enqueues; spawn workers consume.
 type SpawnIntent struct {
 	Scope, Repo, SpawnID string
+	CandidateJobs        []github.WorkflowJob
 }
 
 // ClockLike is the minimal time abstraction the orchestrator uses; the
@@ -36,28 +37,27 @@ type ClockLike interface {
 // abstracted for testability.
 type StateLike interface {
 	InFlight(repo string) int
+	DemandCoverage(repo string) int
 	GlobalInFlight() int
 	IncrementInFlight(repo string)
 	DecrementInFlight(repo string)
 	AcquireSemaphores(repo string, repoCap, globalCap int) bool
 	ReleaseSemaphores(repo string)
-}
-
-// BreakerMap is per-repo breaker storage. Implementations are concrete in
-// production; tests inject a map.
-//
-// RecordSuccess returns true if the breaker just transitioned to Closed
-// from a non-Closed state — callers emit breaker.closed only on transition,
-// not on every success.
-//
-// RecordFailure returns whether the breaker just transitioned to Open and
-// the current consecutive-failure count. Callers emit breaker.opened only
-// when `opened` is true.
-type BreakerMap interface {
-	IsOpen(repo string) bool
-	MaybeHalfOpen(repo string) bool
-	RecordSuccess(repo string) (closed bool)
-	RecordFailure(repo string) (opened bool, consecutiveFailures int)
+	TryReserve(spawnID, repo string, repoCap, globalCap int, now time.Time) bool
+	HasReservation(spawnID, repo string) bool
+	RecordJIT(spawnID string, runnerID int64, runnerName string)
+	MarkOnline(spawnID string, now time.Time) bool
+	MarkAssigned(spawnID string, now time.Time) bool
+	MarkTeardownBlocked(spawnID, repo, detail string, at time.Time) bool
+	UpdateTeardownFailure(spawnID, detail string)
+	ResolveTeardown(spawnID string) bool
+	SchedulingBlocked() bool
+	ReleaseReservation(spawnID string)
+	RecordCompleted()
+	RecordUnassignedExit()
+	RecordDeregistered()
+	RecordRunnerOperationFailure(repo, operation, class, detail string)
+	RecordRunnerOperationSuccess(repo, operation string)
 }
 
 // TokenBucket is the B1 rate limiter.
@@ -88,6 +88,7 @@ type PollDeps interface {
 	Clock() ClockLike
 
 	InFlight(repo string) int
+	DemandCoverage(repo string) int
 	GlobalInFlight() int
 	BreakerIsOpen(repo string) bool
 	BreakerMaybeHalfOpen(repo string) bool
@@ -96,11 +97,18 @@ type PollDeps interface {
 
 	RateLimitContextFor(scope string) (remaining int, limit int, reset string)
 	RecordRateLimit(scope string, lim github.RateLimit)
-	MarkRateLimited(scope string)
+	MarkRateLimited(scope string) (newlyPaused bool)
 	IsRateLimited(scope string) bool
 	MaybeClearRateLimit(scope string) bool
 
 	NewSpawnID() string
+	LabelsForRepo(ctx context.Context, repo string) ([]string, error)
+	TryReserve(spawnID, repo string, repoCap, globalCap int) bool
+	ReleaseReservation(spawnID string)
+	RecordPollAttempt(repo string)
+	RecordPollSuccess(repo string, queued int) (breakerClosed bool)
+	RecordPollFailure(repo, class, detail string) (breakerOpened bool, consecutiveFailures int)
+	SchedulingBlocked() bool
 
 	// RecordPollTick records that a poll cycle just ticked. Production
 	// implementations update the /healthz freshness signal here. Fix for
@@ -113,9 +121,8 @@ type PollDeps interface {
 type SpawnDeps interface {
 	GitHub() *github.Client
 	// Docker returns the raw docker client. Still required by tests and
-	// production code that inspects containers outside of the spawn lifecycle
-	// (e.g. cold-start reconciliation in run.go). Execute no longer calls
-	// Docker() for the spawn lifecycle — that is delegated to Backend().
+	// production diagnostics that inspect containers outside of the spawn
+	// lifecycle. Execute delegates the lifecycle to Backend().
 	Docker() docker.Client
 	// Backend returns the pluggable spawn mechanism. Execute calls
 	// Backend().Spawn / WaitForExit / Teardown instead of calling Docker()
@@ -124,7 +131,7 @@ type SpawnDeps interface {
 	Emit() *cornerstone.Emitter
 	Clock() ClockLike
 	Egress() EgressGenerator
-	RunnerYML(repo string) (*RunnerYMLSnapshot, error)
+	RunnerYMLContext(ctx context.Context, repo string) (*RunnerYMLSnapshot, error)
 	State() StateLike
 
 	GlobalMaxRunners() int
@@ -135,7 +142,21 @@ type SpawnDeps interface {
 	SeccompProfileHostPath(name string) string
 
 	RateLimiter() TokenBucket
-	Breakers() BreakerMap
+	RateLimitContextFor(scope string) (remaining int, limit int, reset string)
+	RecordRateLimit(scope string, lim github.RateLimit)
+	MarkRateLimited(scope string) (newlyPaused bool)
+	LifecycleTiming() LifecycleTiming
+	Version() string
+	BuildSHA() string
+}
+
+// LifecycleTiming controls GitHub runner registration/assignment observation.
+// Production uses conservative deadlines; tests inject millisecond values.
+type LifecycleTiming struct {
+	OnlineTimeout        time.Duration
+	AssignmentTimeout    time.Duration
+	PollInterval         time.Duration
+	CleanupRetryInterval time.Duration
 }
 
 // Errors surfaced through SpawnWorker.Execute for callers that want to
@@ -143,6 +164,7 @@ type SpawnDeps interface {
 var (
 	ErrSemaphoreUnavailable = errors.New("orchestrator: failed to acquire semaphore (concurrency)")
 	ErrRateLimitBackoff     = errors.New("orchestrator: spawn rate-limit hit (B1)")
+	ErrSchedulingBlocked    = errors.New("orchestrator: scheduling blocked by drain or teardown debt")
 )
 
 // shutdown sentinel; callers use ctx cancellation rather than this.

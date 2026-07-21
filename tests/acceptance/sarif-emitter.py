@@ -3,10 +3,11 @@
 RunSecure — SARIF v2.1.0 emitter for acceptance test results.
 
 Reads PASS:/FAIL:/SKIP: lines from stdin (the format produced by
-tests/acceptance/in-container/lib.sh) and emits a SARIF v2.1.0 JSON
-document on stdout. Each acceptance check is a SARIF rule defined in
-tests/acceptance/claims.yml; each FAIL becomes a SARIF result that
-GitHub Code Scanning surfaces in the Security tab.
+tests/acceptance/in-container/lib.sh), with or without Docker Compose's
+``container-name | `` prefix, and emits a SARIF v2.1.0 JSON document on
+stdout. Each acceptance check is a SARIF rule defined in
+tests/acceptance/claims.yml; each FAIL becomes a SARIF result that GitHub
+Code Scanning surfaces in the Security tab.
 
 Usage:
     python3 sarif-emitter.py \\
@@ -18,8 +19,9 @@ Usage:
 Exit code: always 0 (the SARIF is the report — gating is the workflow's job).
 
 Output contract:
-    Each PASS/FAIL/SKIP line:    PASS: <claim_id> <description>
+    Each PASS/FAIL/SKIP line:    [compose-prefix | ] PASS: <claim_id> <description>
     SKIP includes a reason:      SKIP: <claim_id> <description> — <reason>
+    Exact duplicate lines are ignored (run-all.sh replays failures in its summary).
     Anything else is ignored (group markers, separators, etc).
 """
 
@@ -40,8 +42,14 @@ TOOL_NAME = "RunSecure Acceptance Suite"
 TOOL_INFO_URI = "https://github.com/AndEnd-Collective/RunSecure"
 SECURITY_MD_BASE_URI = "https://github.com/AndEnd-Collective/RunSecure/blob/main/SECURITY.md"
 
-# Match: PASS: H01 description...   /   FAIL: R02 description...   /   SKIP: N03 desc — reason
-LINE_RE = re.compile(r"^(PASS|FAIL|SKIP):\s+([HRN]\d{2})\s+(.*?)(?:\s+—\s+(.*))?$")
+# Match plain result lines and the output emitted by `docker compose up`, e.g.:
+#   rs-acceptance-runner  | FAIL: H03 apt still present
+# ANSI control sequences are removed first because Compose may color its
+# service prefix when attached to an interactive terminal.
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+LINE_RE = re.compile(
+    r"(?:^|\|\s*)(PASS|FAIL|SKIP):\s+([HRN]\d{2})\s+(.*?)(?:\s+—\s+(.*))?$"
+)
 
 
 def load_claims(path: Path) -> dict:
@@ -57,18 +65,24 @@ def severity_to_sarif_level(severity: str) -> str:
 def parse_results(stream) -> list:
     """Parse PASS/FAIL/SKIP lines into structured results."""
     results = []
+    seen = set()
     for raw in stream:
-        line = raw.rstrip("\n").rstrip("\r")
-        m = LINE_RE.match(line)
+        line = ANSI_RE.sub("", raw.rstrip("\n").rstrip("\r"))
+        m = LINE_RE.search(line)
         if not m:
             continue
         kind, claim_id, desc, skip_reason = m.groups()
-        results.append({
+        parsed = {
             "kind": kind,
             "claim": claim_id,
             "description": desc.strip(),
             "skip_reason": skip_reason.strip() if skip_reason else None,
-        })
+        }
+        identity = tuple(parsed.values())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        results.append(parsed)
     return results
 
 

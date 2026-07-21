@@ -9,13 +9,15 @@
 #   ghcr.io/andend-collective/runsecure/base:nightly
 #   ghcr.io/andend-collective/runsecure/<lang>:<version>-canary-<lang_version>
 #   ghcr.io/andend-collective/runsecure/<lang>:nightly-<lang_version>
+#   ghcr.io/andend-collective/runsecure/<lang>-build:<version>-canary-<lang_version>
+#   ghcr.io/andend-collective/runsecure/<lang>-build:nightly-<lang_version>
 #   ghcr.io/andend-collective/runsecure/proxy:<version>-canary
 #   ghcr.io/andend-collective/runsecure/proxy:nightly
 #
 # Production tags (`<version>` and `latest`) are NOT created here.
-# They are added by promote-to-stable.yml after post-publish-acceptance.yml
-# validates the canary build against documented security claims. Same
-# digest, server-side retag — no rebuild.
+# They are added manually by promote-to-stable.yml after automatic
+# post-publish acceptance and live multi-runner acceptance. Same digest,
+# server-side retag — no rebuild.
 # ============================================================================
 
 name: Publish Images
@@ -39,6 +41,13 @@ env:
 # Default to no permissions — each job declares its own
 permissions: {}
 
+# Canary tags are mutable staging pointers. Serialize every publication and
+# bind downstream builds to emitted digests so no run can observe another
+# run's tag movement between stages.
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
+
 jobs:
   # --- Single approval gate + version resolver ------------------------------
   # Every push job (base, proxy, languages) depends on this. The
@@ -49,6 +58,8 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     environment: ghcr-publish
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_date: ${{ steps.meta.outputs.build_date }}
@@ -68,6 +79,23 @@ jobs:
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check out the tagged source for stable-release provenance
+        if: github.event_name == 'push'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Prove the release tag is already merged to main
+        if: github.event_name == 'push'
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "$RELEASE_TAG" "$BUILD_SHA"
+
       - name: Compute build metadata (single source of truth for all jobs)
         id: meta
         run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
@@ -84,6 +112,8 @@ jobs:
   base:
     needs: gate
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -98,15 +128,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: images/base.Dockerfile
-          # Push to GHCR on real semver tag pushes only. Manual dispatch
-          # builds locally for the post-build Grype scan (no-cache so
-          # Debian package updates are picked up).
-          push: ${{ github.event_name == 'push' }}
-          no-cache: ${{ github.event_name != 'push' }}
+          # Every approved invocation publishes a coherent canary set. Manual
+          # dispatch uses the explicit `manual-build` tag; without publishing
+          # base first, the runtime matrix cannot resolve its FROM image.
+          push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           # Canary-first publish. Acceptance suite (post-publish-acceptance.yml)
           # validates these tags; on success, promote-to-stable.yml retags
@@ -119,6 +150,26 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable base manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/base
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-base.txt
+
+      - name: Upload immutable base manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-base
+          path: release-digest-base.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # --- Build language images (depend on base for FROM, gate for version) -----
   languages:
@@ -157,16 +208,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build-stage
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ${{ matrix.file }}
+          target: ${{ matrix.name }}-build
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BASE_IMAGE=${{ env.IMAGE_PREFIX }}/base
-            BASE_TAG=${{ needs.gate.outputs.version }}-canary
+            BASE_REF=${{ env.IMAGE_PREFIX }}/base@${{ needs.base.outputs.digest }}
             ${{ matrix.build_arg }}
+          # Build stages are immutable composition inputs and are deliberately
+          # separate packages that never enter the runtime socket allowlist.
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build:nightly-${{ matrix.lang_version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: images/finalize-language.Dockerfile
+          push: true
+          no-cache: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_IMAGE=${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+            BUILD_DIGEST=${{ steps.build-stage.outputs.digest }}
+            COMPOSITION_BASE=${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build@${{ steps.build-stage.outputs.digest }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:nightly-${{ matrix.lang_version }}
@@ -175,6 +250,48 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable runtime manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" \
+            > "release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt"
+
+      - name: Record immutable composition-stage manifest digest
+        env:
+          DIGEST: ${{ steps.build-stage.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable composition-stage digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" \
+            > "release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt"
+
+      - name: Upload immutable runtime manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}
+          path: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload immutable composition-stage manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}
+          path: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # --- Build proxy image (independent of base — runs in parallel) ------------
   proxy:
@@ -194,11 +311,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/squid
           file: infra/squid/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary
@@ -208,6 +327,26 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record immutable proxy manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/proxy
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-proxy.txt
+
+      - name: Upload immutable proxy manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-proxy
+          path: release-digest-proxy.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # --- Build orchestrator image (long-running orchestrator) -----------------
   # SECURITY: this job uses only `needs.gate.outputs.*` (job-internal),
@@ -227,12 +366,17 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/orchestrator
           file: infra/orchestrator/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            RUNSECURE_VERSION=${{ needs.gate.outputs.version }}
+            RUNSECURE_BUILD_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary
             ${{ env.IMAGE_PREFIX }}/orchestrator:nightly
@@ -241,26 +385,108 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  # --- Build socket-proxy image (Compose backend) --------------------------
+      - name: Record immutable orchestrator manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/orchestrator
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-orchestrator.txt
+
+      - name: Upload immutable orchestrator manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-orchestrator
+          path: release-digest-orchestrator.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Generate same-release digest allowlist ------------------------------
+  release-allowlist:
+    runs-on: ubuntu-latest
+    needs: [gate, proxy, languages]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable proxy digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-proxy
+          path: .release-digests
+
+      - name: Download immutable Node 24 digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-node-24
+          path: .release-digests
+
+      - name: Download immutable Node 22 digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-node-22
+          path: .release-digests
+
+      - name: Download immutable Python digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-python-3.12
+          path: .release-digests
+
+      - name: Download immutable Rust digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-rust-stable
+          path: .release-digests
+
+      - name: Generate fail-closed release allowlist
+        run: |
+          infra/socket-proxy/generate-release-allowlist.sh \
+            .release-allowlist/allowed-images.txt \
+            .release-digests/release-digest-*.txt
+
+      - name: Upload same-release allowlist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-allowlist-${{ needs.gate.outputs.version }}
+          path: .release-allowlist/allowed-images.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Build socket-proxy after the release allowlist exists ---------------
   socket-proxy:
     runs-on: ubuntu-latest
-    needs: gate
+    needs: [gate, release-allowlist]
     permissions:
+      actions: read
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install same-release image allowlist into build context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-allowlist-${{ needs.gate.outputs.version }}
+          path: infra/socket-proxy
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: infra/socket-proxy
           file: infra/socket-proxy/Dockerfile
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary
@@ -270,12 +496,67 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Record immutable socket-proxy manifest digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.IMAGE_PREFIX }}/socket-proxy
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing immutable digest for $IMAGE"
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-digest-socket-proxy.txt
+
+      - name: Upload immutable socket-proxy manifest digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-digest-socket-proxy
+          path: release-digest-socket-proxy.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # --- Publish an auditable manifest for downstream operator locks ----------
+  release-manifest:
+    runs-on: ubuntu-latest
+    needs: [gate, base, orchestrator, socket-proxy]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download every immutable release digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-digest-*
+          path: .release-digests
+          merge-multiple: true
+
+      - name: Generate fail-closed release image manifest
+        run: |
+          python3 infra/scripts/generate-release-manifest.py \
+            --release '${{ needs.gate.outputs.version }}' \
+            --build-sha '${{ github.sha }}' \
+            --publish-run-id '${{ github.run_id }}' \
+            --output .release-manifest/release-images.json \
+            .release-digests/release-digest-*.txt
+
+      - name: Upload release image manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-image-manifest-${{ needs.gate.outputs.version }}
+          path: .release-manifest/release-images.json
+          if-no-files-found: error
+          retention-days: 90
+
   # --- Post-publish Grype scan: detects known CVEs in the base image ---------
   # Runs after base is published. Fails the workflow if HIGH/CRITICAL CVEs
   # are found WITH a fix available (unfixed CVEs upload to the Security tab
   # but don't block — chasing unfixable issues creates noise).
   #
-  # Grype is installed directly (not via anchore/scan-action) because the
+  # Syft and Grype are installed through a commit/version/checksum-pinned wrapper
+  # (not via anchore/scan-action) because the
   # action wrapper bundles a pinned grype binary that periodically fails
   # with "vulnerability database was built N weeks ago" when the upstream
   # CDN drifts past the pinned grype's tolerance.
@@ -283,10 +564,25 @@ jobs:
     needs: [gate, base]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable base digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-base
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -294,46 +590,368 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
-        # IMAGE_REF is computed in step `env:` rather than job `env:` because
-        # job-level env evaluates BEFORE workflow-level env is in scope, so
-        # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
-        # evaluated when the step runs and resolves correctly.
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-base.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/base
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-base-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-base.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
             exit 1
           fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" ca-certificates
 
       - name: Upload Grype scan results (base) to GitHub Security
-        if: always() && hashFiles('grype-base.sarif') != ''
+        if: always() && hashFiles(format('grype-base-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-base.sarif
-          category: grype-base
+          sarif_file: grype-base-${{ matrix.platform_slug }}.sarif
+          category: grype-base-${{ matrix.platform_slug }}
+
+  # Scan every pushed terminal language image. The finalizer preserves the
+  # read-only dpkg inventory specifically so Syft/Grype can still enumerate
+  # Debian packages after apt/dpkg executables and mutable state are removed.
+  grype-scan-languages:
+    needs: [gate, languages]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: node
+            lang_version: "24"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: python-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: rust-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            # rustup ships rustc outside a package database. Prove the exact
+            # Rust binary separately; this heuristic SBOM is never fed to Grype.
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+          - name: node
+            lang_version: "24"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: python-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: rust-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable terminal-image digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}
+          path: .scan-digest
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install checksum-pinned Syft + Grype
+        run: |
+          set -euo pipefail
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
+
+      - name: Grype scan (terminal language image) — fail on HIGH/CRITICAL with fix
+        env:
+          DIGEST_FILE: .scan-digest/release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: "grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif"
+          EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
+          EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
+          EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
+          EXPECTED_PRESENCE_CATALOGER: ${{ matrix.expected_presence_cataloger }}
+          EXPECTED_PRESENCE_PACKAGE: ${{ matrix.expected_presence_package }}
+        run: |
+          set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
+            "$EXPECTED_CATALOGER_PACKAGE" \
+            "$EXPECTED_PRESENCE_CATALOGER" "$EXPECTED_PRESENCE_PACKAGE"
+
+      - name: Upload Grype scan results (terminal language image)
+        if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
+          category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
+
+  # Build-only composition inputs are promoted alongside terminal images and
+  # can add packages before final hardening. Scan their exact manifest digests
+  # on both release architectures before a Publish Images run can be accepted.
+  grype-scan-build-stages:
+    needs: [gate, languages]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: node
+            lang_version: "24"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-build-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-build-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: python-build-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: rust-build-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+          - name: node
+            lang_version: "24"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-build-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-build-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: python-build-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: rust-build-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable composition-stage digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}
+          path: .scan-digest
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install checksum-pinned Syft + Grype
+        run: |
+          set -euo pipefail
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
+
+      - name: Grype scan (composition-stage image) — fail on HIGH/CRITICAL with fix
+        env:
+          DIGEST_FILE: .scan-digest/release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: "grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif"
+          EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
+          EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
+          EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
+          EXPECTED_PRESENCE_CATALOGER: ${{ matrix.expected_presence_cataloger }}
+          EXPECTED_PRESENCE_PACKAGE: ${{ matrix.expected_presence_package }}
+        run: |
+          set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
+            "$EXPECTED_CATALOGER_PACKAGE" \
+            "$EXPECTED_PRESENCE_CATALOGER" "$EXPECTED_PRESENCE_PACKAGE"
+
+      - name: Upload Grype scan results (composition-stage image)
+        if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
+          category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
   grype-scan-proxy:
     needs: [gate, proxy]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable proxy digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-proxy
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -341,32 +959,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-proxy.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/proxy
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-proxy-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-proxy.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
             exit 1
           fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" squid
 
       - name: Upload Grype scan results (proxy) to GitHub Security
-        if: always() && hashFiles('grype-proxy.sarif') != ''
+        if: always() && hashFiles(format('grype-proxy-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-proxy.sarif
-          category: grype-proxy
+          sarif_file: grype-proxy-${{ matrix.platform_slug }}.sarif
+          category: grype-proxy-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: orchestrator image (distroless Go binary) -----
   # The orchestrator is a long-running control-plane binary; CVEs in its Go
@@ -375,10 +1000,25 @@ jobs:
     needs: [gate, orchestrator]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable orchestrator digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-orchestrator
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -386,32 +1026,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (orchestrator image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-orchestrator.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/orchestrator
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-orchestrator-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-orchestrator.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
             exit 1
           fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (orchestrator) to GitHub Security
-        if: always() && hashFiles('grype-orchestrator.sarif') != ''
+        if: always() && hashFiles(format('grype-orchestrator-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-orchestrator.sarif
-          category: grype-orchestrator
+          sarif_file: grype-orchestrator-${{ matrix.platform_slug }}.sarif
+          category: grype-orchestrator-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: socket-proxy image (distroless Go binary) -----
   # socket-proxy is the only component mounting docker.sock; its binary must be
@@ -420,10 +1068,25 @@ jobs:
     needs: [gate, socket-proxy]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable socket-proxy digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-socket-proxy
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -431,29 +1094,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Grype (latest, fresh CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (socket-proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-socket-proxy.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/socket-proxy
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-socket-proxy-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
-          grype "$IMAGE_REF" --output table --fail-on high --only-fixed \
-            || GRYPE_FAILED=1
-          grype "$IMAGE_REF" --output sarif --file grype-socket-proxy.sarif --only-fixed
-          if [ "${GRYPE_FAILED:-0}" = "1" ]; then
-            echo "::error::Grype found HIGH/CRITICAL vulnerabilities with available fixes in $IMAGE_REF"
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
             exit 1
           fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (socket-proxy) to GitHub Security
-        if: always() && hashFiles('grype-socket-proxy.sarif') != ''
+        if: always() && hashFiles(format('grype-socket-proxy-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-socket-proxy.sarif
-          category: grype-socket-proxy
+          sarif_file: grype-socket-proxy-${{ matrix.platform_slug }}.sarif
+          category: grype-socket-proxy-${{ matrix.platform_slug }}

@@ -5,8 +5,8 @@ Denies ALL ingress and egress to/from every pod in the namespace, then two
 additional allow policies carve out only what the orchestrator actually needs:
 
 1. default-deny-all    — catch-all deny (this file)
-2. orchestrator-egress — allows orchestrator → kube-apiserver (6443/TCP),
-                         kube-dns (53/UDP+TCP), and orch_egress domains (any
+2. orchestrator-egress — allows orchestrator → kube-apiserver (configured TCP ports),
+                         cluster DNS (53/UDP+TCP), and orch_egress domains (any
                          port, gated by the proxy at L7 via Squid).
 
 Mirrors the pattern from infra/orchestrator/internal/kube/objects.go
@@ -30,8 +30,8 @@ spec:
   # No ingress or egress rules — all traffic denied.
 ---
 # Allow the orchestrator pod egress to:
-#   - kube-apiserver (TCP 6443 — standard port; adjust if your cluster differs)
-#   - kube-dns (UDP+TCP 53 on the well-known 10.96.0.10/32 cluster IP)
+#   - kube-apiserver on exact operator-configured pre/post-DNAT CIDR/port pairs
+#   - exact cluster DNS Service /32s and DNS Pods (UDP+TCP 53)
 #   - External orchestrator egress domains (any port via 0.0.0.0/0 minus
 #     RFC1918; the Squid L7 allow-list is the authoritative control).
 apiVersion: networking.k8s.io/v1
@@ -48,26 +48,34 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # kube-apiserver (TCP 6443).
+    # kube-apiserver Service and endpoints. Each peer is a separate rule so
+    # configured CIDRs and ports cannot form an unintended Cartesian product.
+    {{- range .Values.kubernetesNetwork.apiServerPeers }}
     - ports:
         - protocol: TCP
-          port: 6443
+          port: {{ .port }}
       to:
         - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-    # kube-dns (well-known cluster IP 10.96.0.10/32).
+            cidr: {{ .cidr | quote }}
+    {{- end }}
+    # Cluster DNS. Exact Service /32s cover pre-DNAT evaluation; the exact
+    # namespace + Pod selector covers post-DNAT evaluation.
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
       to:
+        {{- range .Values.kubernetesNetwork.dnsServiceCIDRs }}
         - ipBlock:
-            cidr: 10.96.0.10/32
+            cidr: {{ . | quote }}
+        {{- end }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.kubernetesNetwork.dnsNamespace | quote }}
+          podSelector:
+            matchLabels:
+              {{ .Values.kubernetesNetwork.dnsPodLabel.key | quote }}: {{ .Values.kubernetesNetwork.dnsPodLabel.value | quote }}
     # Orchestrator egress — reaches GitHub API and other allow-listed domains
     # via the configured Squid proxy. The L7 allow-list is the primary control;
     # this rule provides network-layer reachability for HTTPS (443/TCP).

@@ -54,6 +54,17 @@ func TestBuildAuthProvider_PAT(t *testing.T) {
 	require.NotNil(t, p)
 }
 
+func TestBuildAuthProvider_KubernetesPATProjection(t *testing.T) {
+	patFile := writePATFile(t, "ghp_test")
+	require.NoError(t, os.Chmod(patFile, 0o440))
+	s := &config.Scope{Backend: "kube", Auth: config.AuthBlock{
+		Type: "pat", PATFile: patFile,
+	}}
+	p, err := buildAuthProvider(s, "https://api.github.com")
+	require.NoError(t, err)
+	require.NotNil(t, p)
+}
+
 // TestBuildAuthProvider_PAT_MissingFile verifies that a missing PAT file
 // propagates an error from NewPATProvider.
 func TestBuildAuthProvider_PAT_MissingFile(t *testing.T) {
@@ -79,6 +90,17 @@ func TestBuildAuthProvider_GitHubApp(t *testing.T) {
 			PrivateKeyFile: keyFile,
 		},
 	}
+	p, err := buildAuthProvider(s, "https://api.github.com")
+	require.NoError(t, err)
+	require.NotNil(t, p)
+}
+
+func TestBuildAuthProvider_KubernetesGitHubAppProjection(t *testing.T) {
+	keyFile := writeRSAKeyFile(t)
+	require.NoError(t, os.Chmod(keyFile, 0o440))
+	s := &config.Scope{Backend: "kube", Auth: config.AuthBlock{
+		Type: "github_app", AppID: 42, InstallationID: 99, PrivateKeyFile: keyFile,
+	}}
 	p, err := buildAuthProvider(s, "https://api.github.com")
 	require.NoError(t, err)
 	require.NotNil(t, p)

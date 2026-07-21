@@ -4,7 +4,7 @@
 # emits drift.reconciled.
 #
 # The Compose backend doesn't run a periodic drift reconciler by default
-# (cold-start reconciles only). This test documents the expected behavior;
+# (cold-start performs fail-closed cleanup only). This test documents the expected behavior;
 # the automated reconciler can be enabled via RUNSECURE_DRIFT_INTERVAL env
 # var in a future enhancement. For now: just check the orchestrator
 # doesn't crash when a managed container disappears unexpectedly.

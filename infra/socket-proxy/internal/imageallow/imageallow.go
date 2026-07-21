@@ -32,11 +32,9 @@ func Load(path string) (*Allowlist, error) {
 }
 
 // LoadWithExtra loads the primary allowlist from path, then merges entries from
-// extraPath if it is non-empty and the file exists. This allows operators to
-// supply release-specific digests at runtime without rebuilding the
-// socket-proxy image — addressing the bootstrap problem where a newly-released
-// proxy/runner image digest cannot be baked into the allowlist at release time
-// because the image is not yet published when the release tag is cut (#54 fix 3).
+// extraPath if it is non-empty and the file exists. Released socket-proxy images
+// already bake their same-release proxy and runner digests; the extra file lets
+// operators authorize custom digest-pinned images without rebuilding the proxy.
 //
 // extraPath must follow the same format as path. Errors loading extraPath
 // are returned; a missing file (os.IsNotExist) is silently ignored so the

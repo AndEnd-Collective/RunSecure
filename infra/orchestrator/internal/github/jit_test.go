@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -111,11 +112,13 @@ func TestGenerateJITConfig_LabelMismatch_Rejected(t *testing.T) {
 		})
 	})
 
-	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
+	response, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
 		Name:   "rs-r-spawn1",
 		Labels: []string{"requested-label"},
 	})
 	require.ErrorIs(t, err, ErrJITLabelMismatch)
+	require.Equal(t, int64(1), response.RunnerID,
+		"validation failure must preserve the registration identity for cleanup")
 }
 
 func TestGenerateJITConfig_AuthFailed(t *testing.T) {
@@ -126,12 +129,36 @@ func TestGenerateJITConfig_AuthFailed(t *testing.T) {
 	require.ErrorIs(t, err, ErrAuthFailed)
 }
 
+func TestGenerateJITConfig_ClassifiesRateLimitsWithHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{name: "too many requests", status: http.StatusTooManyRequests},
+		{name: "forbidden exhausted", status: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-RateLimit-Limit", "5000")
+				w.Header().Set("X-RateLimit-Remaining", "0")
+				w.Header().Set("X-RateLimit-Reset", "1800000000")
+				w.WriteHeader(tc.status)
+			})
+			_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
+			require.ErrorIs(t, err, ErrRateLimited)
+			require.Equal(t, tc.status, ErrorStatus(err))
+			require.Equal(t, RateLimit{Limit: 5000, Remaining: 0, ResetUnix: 1800000000}, ErrorRateLimit(err))
+		})
+	}
+}
+
 func TestGenerateJITConfig_422NoSlot(t *testing.T) {
 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 	})
 	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
 	require.ErrorContains(t, err, "422")
+	require.Equal(t, http.StatusUnprocessableEntity, ErrorStatus(err))
 }
 
 func TestGenerateJITConfig_UnexpectedStatus(t *testing.T) {
@@ -149,6 +176,18 @@ func TestGenerateJITConfig_MalformedJSON(t *testing.T) {
 	})
 	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
 	require.Error(t, err)
+}
+
+func TestGenerateJITConfig_MalformedTailPreservesDecodedRunnerID(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"runner":{"id":73},"encoded_jit_config":123}`))
+	})
+
+	response, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n"})
+
+	require.ErrorContains(t, err, "decode jit response")
+	require.Equal(t, int64(73), response.RunnerID)
 }
 
 func TestDeleteRunner_HappyPath(t *testing.T) {
@@ -184,6 +223,59 @@ func TestDeleteRunner_UnexpectedStatus(t *testing.T) {
 	require.Error(t, c.DeleteRunner(context.Background(), "o/r", 42))
 }
 
+func TestDeleteRunner_RateLimited(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+	})
+	require.ErrorIs(t, c.DeleteRunner(context.Background(), "o/r", 42), ErrRateLimited)
+}
+
+func TestListRunners_PaginatesAndReturnsLatestRateLimit(t *testing.T) {
+	pageOne := make([]map[string]any, githubPageSize)
+	for i := range pageOne {
+		pageOne[i] = map[string]any{"id": i + 1, "name": fmt.Sprintf("runner-%d", i+1)}
+	}
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/o/r/actions/runners", r.URL.Path)
+		switch r.URL.Query().Get("page") {
+		case "1":
+			w.Header().Set("X-RateLimit-Limit", "5000")
+			w.Header().Set("X-RateLimit-Remaining", "4999")
+			_ = json.NewEncoder(w).Encode(map[string]any{"runners": pageOne})
+		case "2":
+			w.Header().Set("X-RateLimit-Limit", "5000")
+			w.Header().Set("X-RateLimit-Remaining", "4998")
+			_ = json.NewEncoder(w).Encode(map[string]any{"runners": []map[string]any{{"id": 101, "name": "target"}}})
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	})
+	runners, lim, err := c.ListRunners(context.Background(), "o/r")
+	require.NoError(t, err)
+	require.Len(t, runners, 101)
+	require.Equal(t, "target", runners[100].Name)
+	require.Equal(t, 4998, lim.Remaining)
+}
+
+func TestListRunners_ClassifiesErrorsAndMalformedJSON(t *testing.T) {
+	t.Run("rate limited", func(t *testing.T) {
+		c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.WriteHeader(http.StatusForbidden)
+		})
+		_, _, err := c.ListRunners(context.Background(), "o/r")
+		require.ErrorIs(t, err, ErrRateLimited)
+	})
+	t.Run("malformed", func(t *testing.T) {
+		c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("not json"))
+		})
+		_, _, err := c.ListRunners(context.Background(), "o/r")
+		require.ErrorContains(t, err, "decode runners")
+	})
+}
+
 func TestJIT_NetworkError(t *testing.T) {
 	dir := t.TempDir()
 	patFile := filepath.Join(dir, "pat")
@@ -201,4 +293,58 @@ func TestDeleteRunner_NetworkError(t *testing.T) {
 	c, err := NewClient("http://127.0.0.1:1", patFile)
 	require.NoError(t, err)
 	require.Error(t, c.DeleteRunner(context.Background(), "o/r", 42))
+}
+
+func TestGetRunner_ReturnsLifecycleAndRateLimit(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/repos/o/r/actions/runners/42", r.URL.Path)
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4999")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 42, "name": "rs-runner", "status": "online", "busy": true,
+		})
+	})
+	runner, limit, err := c.GetRunner(context.Background(), "o/r", 42)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), runner.ID)
+	require.Equal(t, "rs-runner", runner.Name)
+	require.Equal(t, "online", runner.Status)
+	require.True(t, runner.Busy)
+	require.Equal(t, 4999, limit.Remaining)
+}
+
+func TestGetRunner_ClassifiesNotFoundAndAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{name: "not found", status: http.StatusNotFound, want: ErrRunnerNotFound},
+		{name: "auth", status: http.StatusForbidden, want: ErrAuthFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) })
+			_, _, err := c.GetRunner(context.Background(), "o/r", 42)
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+func TestGetRunner_MalformedAndNetworkErrors(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("not json")) })
+	_, _, err := c.GetRunner(context.Background(), "o/r", 42)
+	require.ErrorContains(t, err, "decode runner")
+
+	c, err = NewClient("http://127.0.0.1:1", makePATForClient(t))
+	require.NoError(t, err)
+	_, _, err = c.GetRunner(context.Background(), "o/r", 42)
+	require.Error(t, err)
+}
+
+func makePATForClient(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pat")
+	require.NoError(t, os.WriteFile(path, []byte("p"), 0o400))
+	return path
 }

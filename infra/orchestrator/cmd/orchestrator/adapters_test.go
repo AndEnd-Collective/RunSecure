@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"testing"
@@ -293,10 +297,49 @@ func TestNewServerDeps_InitializesFields(t *testing.T) {
 
 	require.NotNil(t, sd)
 	require.Equal(t, 30, sd.PollIntervalSeconds())
+	require.False(t, sd.PollStarted())
 
 	lp := sd.LastPollAt()
 	require.False(t, lp.Before(before), "lastPoll must be >= before")
 	require.False(t, lp.After(after), "lastPoll must be <= after")
+}
+
+func TestManagementServerIsLiveButNotReadyBeforeBackendInit(t *testing.T) {
+	healthAddr := unusedLoopbackAddress(t)
+	st := state.New()
+	st.Configure([]string{"owner/repo"}, 1, 1, "test", "sha")
+	fixed := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	sd := newServerDeps(st, clock.NewFake(fixed), 5)
+	stale := fixed.Add(-24 * time.Hour)
+	sd.lastPoll.Store(&stale)
+	em := cornerstone.NewEmitter(io.Discard, cornerstone.FixedClock("t"), cornerstone.FixedUUID("u"))
+	srv := server.New(healthAddr, "127.0.0.1:0", sd, em)
+	ctx, cancel := context.WithCancel(context.Background())
+	done, err := srv.Start(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
+
+	healthResp, err := http.Get("http://" + healthAddr + "/healthz")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, healthResp.StatusCode)
+	require.NoError(t, healthResp.Body.Close())
+
+	readyResp, err := http.Get("http://" + healthAddr + "/readyz")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, readyResp.StatusCode)
+	require.NoError(t, readyResp.Body.Close())
+}
+
+func unusedLoopbackAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	return address
 }
 
 func TestServerDeps_Now_MatchesClock(t *testing.T) {
@@ -399,6 +442,39 @@ func TestServerDeps_APICalls_ConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
+func TestServerDeps_RecordAPICallCountsNormalizedEndpoint(t *testing.T) {
+	sd := newServerDeps(state.New(), clock.System(), 10)
+	for range 3 {
+		sd.recordAPICall("GET", "/repos/o/r/actions/runs/123/jobs", "200")
+	}
+
+	require.Equal(t, int64(3), sd.APICalls()[server.APICallKey{
+		Endpoint: "workflow_jobs", Status: "200",
+	}])
+}
+
+func TestGitHubAPIEndpointAvoidsDynamicMetricLabels(t *testing.T) {
+	tests := map[string]struct {
+		method string
+		path   string
+		want   string
+	}{
+		"runner config": {method: "GET", path: "/repos/o/r/contents/.github/runner.yml", want: "runner_yml"},
+		"jit":           {method: "POST", path: "/repos/o/r/actions/runners/generate-jitconfig", want: "generate_jit_config"},
+		"run jobs":      {method: "GET", path: "/repos/o/r/actions/runs/99/jobs?filter=latest&page=1", want: "workflow_jobs"},
+		"runs":          {method: "GET", path: "/repos/o/r/actions/runs?status=queued&page=1", want: "workflow_runs"},
+		"job":           {method: "GET", path: "/repos/o/r/actions/jobs/88", want: "workflow_job"},
+		"delete runner": {method: "DELETE", path: "/repos/o/r/actions/runners/77", want: "delete_runner"},
+		"get runner":    {method: "GET", path: "/repos/o/r/actions/runners/77", want: "get_runner"},
+		"list runners":  {method: "GET", path: "/repos/o/r/actions/runners?per_page=100", want: "list_runners"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, githubAPIEndpoint(tc.method, tc.path))
+		})
+	}
+}
+
 func TestServerDeps_SpawnsTotal_EmptyWhenNoEntries(t *testing.T) {
 	sd := newServerDeps(state.New(), clock.System(), 10)
 	spawns := sd.SpawnsTotal()
@@ -426,6 +502,22 @@ func TestServerDeps_SpawnsTotal_MultipleEntries(t *testing.T) {
 	spawns := sd.SpawnsTotal()
 	require.Equal(t, int64(2), spawns[k1])
 	require.Equal(t, int64(8), spawns[k2])
+}
+
+func TestServerDeps_RecordSpawnConcurrentSafe(t *testing.T) {
+	sd := newServerDeps(state.New(), clock.System(), 10)
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sd.recordSpawn("scope", "o/r", "success")
+		}()
+	}
+	wg.Wait()
+	require.Equal(t, int64(50), sd.SpawnsTotal()[server.SpawnKey{
+		Scope: "scope", Repo: "o/r", Outcome: "success",
+	}])
 }
 
 func TestServerDeps_SpawnDurations_ReturnsNil(t *testing.T) {
@@ -593,6 +685,27 @@ func TestProductionDeps_BreakerMaybeHalfOpen_Delegates(t *testing.T) {
 	require.False(t, pd.BreakerMaybeHalfOpen("owner/repo"))
 }
 
+func TestProductionDeps_DemandRefreshesDriveBreakerButRateLimitsDoNot(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	pd := &productionDeps{st: state.New(), brks: newBreakerMap(), clk: clock.NewFake(now)}
+
+	opened, count := pd.RecordPollFailure("owner/repo", "github_rate_limited", "quota")
+	require.False(t, opened)
+	require.Zero(t, count)
+	require.False(t, pd.BreakerIsOpen("owner/repo"))
+
+	for i := 1; i <= 5; i++ {
+		opened, count = pd.RecordPollFailure("owner/repo", "github_demand_failed", "boom")
+		require.Equal(t, i, count)
+	}
+	require.True(t, opened)
+	require.True(t, pd.BreakerIsOpen("owner/repo"))
+
+	require.True(t, pd.RecordPollSuccess("owner/repo", 3))
+	require.False(t, pd.BreakerIsOpen("owner/repo"))
+	require.Equal(t, 3, pd.st.Snapshot().PerRepo["owner/repo"].QueuedJobs)
+}
+
 func TestProductionDeps_NewSpawnID_Unique(t *testing.T) {
 	pd := &productionDeps{}
 	ids := make(map[string]struct{})
@@ -645,6 +758,7 @@ func TestProductionDeps_RecordPollTick_UpdatesServerDeps(t *testing.T) {
 	pd := &productionDeps{serverDeps: sd}
 	before := time.Now()
 	pd.RecordPollTick()
+	require.True(t, sd.PollStarted())
 	after := time.Now()
 
 	lp := sd.LastPollAt()
@@ -780,13 +894,6 @@ func TestProductionDeps_RateLimiter_TryTake(t *testing.T) {
 	require.True(t, rl.TryTake(), "token bucket with tokens available must return true")
 }
 
-func TestProductionDeps_Breakers_ReturnsBreakers(t *testing.T) {
-	bm := newBreakerMap()
-	pd := &productionDeps{brks: bm}
-	got := pd.Breakers()
-	require.NotNil(t, got)
-}
-
 func TestProductionDeps_Egress_ReturnsNonNil(t *testing.T) {
 	pd := &productionDeps{eg: nil, allowKeys: nil}
 	e := pd.Egress()
@@ -858,7 +965,7 @@ func TestProductionDeps_RecordRateLimit_ZeroValues(t *testing.T) {
 	rem, lim, reset := st.RateLimit()
 	require.Equal(t, 0, rem)
 	require.Equal(t, 0, lim)
-	require.Equal(t, time.Unix(0, 0), reset)
+	require.True(t, reset.IsZero())
 }
 
 func TestProductionDeps_MarkRateLimited_SetsFlag(t *testing.T) {
@@ -866,8 +973,10 @@ func TestProductionDeps_MarkRateLimited_SetsFlag(t *testing.T) {
 	pd := &productionDeps{st: st}
 
 	require.False(t, pd.IsRateLimited("owner/repo"))
-	pd.MarkRateLimited("owner/repo")
+	require.True(t, pd.MarkRateLimited("owner/repo"))
+	require.False(t, pd.MarkRateLimited("owner/repo"), "an existing pause must not re-emit transition events")
 	require.True(t, pd.IsRateLimited("owner/repo"))
+	require.True(t, st.Snapshot().RateLimited)
 }
 
 func TestProductionDeps_MarkRateLimited_UsesStateResetWhenSet(t *testing.T) {
@@ -920,22 +1029,27 @@ func TestProductionDeps_MaybeClearRateLimit_ClearsAfterExpiry(t *testing.T) {
 	pd.rlPaused = true
 	pd.rlReset = time.Now().Add(-time.Millisecond)
 	pd.rlMu.Unlock()
+	st.SetRateLimited(true)
 
 	cleared := pd.MaybeClearRateLimit("owner/repo")
 	require.True(t, cleared, "MaybeClearRateLimit must return true when reset has elapsed")
 	require.False(t, pd.IsRateLimited("owner/repo"))
+	require.False(t, st.Snapshot().RateLimited)
 }
 
 func TestProductionDeps_MaybeClearRateLimit_RetainedBeforeExpiry(t *testing.T) {
-	pd := &productionDeps{st: state.New()}
+	st := state.New()
+	pd := &productionDeps{st: st}
 	pd.rlMu.Lock()
 	pd.rlPaused = true
 	pd.rlReset = time.Now().Add(10 * time.Minute)
 	pd.rlMu.Unlock()
+	st.SetRateLimited(true)
 
 	cleared := pd.MaybeClearRateLimit("owner/repo")
 	require.False(t, cleared, "MaybeClearRateLimit must return false before reset")
 	require.True(t, pd.IsRateLimited("owner/repo"))
+	require.True(t, st.Snapshot().RateLimited)
 }
 
 func TestProductionDeps_MaybeClearRateLimit_NotPaused_ReturnsFalse(t *testing.T) {

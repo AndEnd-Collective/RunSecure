@@ -119,6 +119,34 @@ func TestBuilder_RunnerLeakCleaned_AuditContext(t *testing.T) {
 	require.Contains(t, buf.String(), `"audit.resource.id":"42"`)
 }
 
+func TestBuilder_RunnerLifecycleEventsCarryRunnerIdentity(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, FixedClock("t"), FixedUUID("u"))
+	require.NoError(t, em.EmitRunnerOnline(RunnerOnlineFields{
+		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
+	}))
+	require.NoError(t, em.EmitJobAssigned(JobAssignedFields{
+		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
+	}))
+	require.NoError(t, em.EmitRunnerCompleted(RunnerCompletedFields{
+		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
+		ExitCode: 0, DurationMillis: 123,
+	}))
+	require.NoError(t, em.EmitRunnerExitedUnassigned(RunnerExitedUnassignedFields{
+		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
+		ExitCode: 0,
+	}))
+	out := buf.String()
+	for _, eventName := range []string{
+		EventRunnerOnline, EventJobAssigned, EventRunnerCompleted, EventRunnerExitedUnassigned,
+	} {
+		require.Contains(t, out, eventName)
+	}
+	require.Contains(t, out, `"audit.resource.id":"42"`)
+	require.Contains(t, out, `"github_runner_id":42`)
+	require.Contains(t, out, `"failure.reason":"runner_exited_unassigned"`)
+}
+
 func TestBuilder_BreakerEvents(t *testing.T) {
 	var buf bytes.Buffer
 	em := NewEmitter(&buf, FixedClock("t"), FixedUUID("u"))

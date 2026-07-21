@@ -25,17 +25,31 @@ import (
 )
 
 // testInput returns a SpawnInput with stable, deterministic field values.
-func testInput(spawnID string) backend.SpawnInput {
+func testInput(t *testing.T, spawnID string) backend.SpawnInput {
+	t.Helper()
+	egressDir := t.TempDir()
+	for name, content := range map[string]string{
+		"squid.conf": "# squid fixture", "haproxy.cfg": "# haproxy fixture",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(egressDir, name), []byte(content), 0o600))
+	}
 	return backend.SpawnInput{
-		Scope:           "testscope",
-		Repo:            "owner/repo",
-		SpawnID:         spawnID,
-		RunnerImage:     "ghcr.io/runsecure/runner-base:latest",
-		ProxyImage:      "ghcr.io/runsecure/proxy:latest",
-		JITConfigB64:    "dGVzdC1qaXQtY29uZmlnLWI2NA==",
-		EgressConfigDir: "/tmp/egress",
-		EnableDNSMasq:   false,
-		TCPEgressPorts:  []int{443},
+		Scope:                "testscope",
+		Repo:                 "owner/repo",
+		SpawnID:              spawnID,
+		RunnerImage:          "ghcr.io/runsecure/runner-base:latest",
+		ProxyImage:           "ghcr.io/runsecure/proxy:latest",
+		ResourcesMemory:      2 << 30,
+		ResourcesNanoCPUs:    2_000_000_000,
+		ResourcesPIDs:        512,
+		JITConfigB64:         "dGVzdC1qaXQtY29uZmlnLWI2NA==",
+		EgressConfigDir:      egressDir,
+		EnableDNSMasq:        false,
+		TCPEgressPorts:       []int{443},
+		KubeDNSServiceCIDRs:  []string{"10.96.0.10/32"},
+		KubeDNSNamespace:     "kube-system",
+		KubeDNSPodLabelKey:   "k8s-app",
+		KubeDNSPodLabelValue: "kube-dns",
 	}
 }
 
@@ -63,20 +77,23 @@ func TestName(t *testing.T) {
 func TestSpawn_CreatesAllObjects(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-abc")
+	in := testInput(t, "spawn-abc")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
 	ns := kube.Namespace(in.Scope) // "runsecure-testscope"
 
-	// ── Namespace ──────────────────────────────────────────────────────────
-	_, err = cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	require.NoError(t, err, "namespace must be created by Spawn")
+	// Helm owns Namespace creation. Runtime reconciliation must use only the
+	// namespace-scoped API surface granted by the chart Role.
+	for _, action := range cs.Actions() {
+		assert.NotEqual(t, "namespaces", action.GetResource().Resource,
+			"Spawn must not access the cluster-scoped Namespace API")
+	}
 
-	// ── Default-deny NetworkPolicy (created by EnsureNamespace) ──────────
+	// ── Default-deny NetworkPolicy ─────────────────────────────────────────
 	_, err = cs.NetworkingV1().NetworkPolicies(ns).Get(ctx, "default-deny-all", metav1.GetOptions{})
-	require.NoError(t, err, "default-deny-all policy must be created by EnsureNamespace via Spawn")
+	require.NoError(t, err, "default-deny-all policy must be reconciled by Spawn")
 
 	// ── Secret ────────────────────────────────────────────────────────────
 	secretName := h.Refs["secret"]
@@ -125,17 +142,31 @@ func TestSpawn_CreatesAllObjects(t *testing.T) {
 	expectedProxyURL := fmt.Sprintf("http://%s:3128", expectedProxyDNS)
 
 	require.Len(t, runnerPod.Spec.Containers, 1, "runner pod must have exactly 1 container")
-	runnerEnv := envMap(runnerPod.Spec.Containers[0].Env)
+	runner := runnerPod.Spec.Containers[0]
+	runnerEnv := envMap(runner.Env)
 	assert.Equal(t, expectedProxyURL, runnerEnv["HTTP_PROXY"],
 		"HTTP_PROXY must point at the proxy Service DNS")
 	assert.Equal(t, expectedProxyURL, runnerEnv["HTTPS_PROXY"],
 		"HTTPS_PROXY must point at the proxy Service DNS")
+	assert.Equal(t, int64(2_000), runner.Resources.Requests.Cpu().MilliValue())
+	assert.Equal(t, int64(2_000), runner.Resources.Limits.Cpu().MilliValue())
+	assert.Equal(t, int64(2<<30), runner.Resources.Requests.Memory().Value())
+	assert.Equal(t, int64(2<<30), runner.Resources.Limits.Memory().Value())
+	for _, volume := range runnerPod.Spec.Volumes {
+		if volume.Name == "tmp" {
+			require.NotNil(t, volume.EmptyDir)
+			require.NotNil(t, volume.EmptyDir.SizeLimit)
+			assert.Equal(t, int64(512<<20), volume.EmptyDir.SizeLimit.Value())
+			return
+		}
+	}
+	t.Fatal("runner Pod must have a bounded tmp volume")
 }
 
 func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-refs")
+	in := testInput(t, "spawn-refs")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -153,7 +184,7 @@ func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
 func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-proxy-ingress")
+	in := testInput(t, "spawn-proxy-ingress")
 
 	_, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -188,17 +219,17 @@ func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 		"proxy-ingress From must pin the same spawn-id (cross-spawn isolation)")
 }
 
-// TestSpawn_Idempotent_Namespace verifies that calling Spawn on the same scope
-// twice does not fail on the namespace already existing.
-func TestSpawn_Idempotent_Namespace(t *testing.T) {
+// TestSpawn_Idempotent_DefaultDeny verifies that repeated reconciles tolerate
+// the chart-owned default-deny policy already existing.
+func TestSpawn_Idempotent_DefaultDeny(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	_, err := b.Spawn(ctx, testInput("spawn-idem-1"))
+	_, err := b.Spawn(ctx, testInput(t, "spawn-idem-1"))
 	require.NoError(t, err, "first Spawn must succeed")
 
-	_, err = b.Spawn(ctx, testInput("spawn-idem-2"))
-	require.NoError(t, err, "second Spawn in the same scope must succeed (namespace already exists)")
+	_, err = b.Spawn(ctx, testInput(t, "spawn-idem-2"))
+	require.NoError(t, err, "second Spawn in the same scope must tolerate the existing default-deny policy")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -211,7 +242,7 @@ func TestWaitForExit_Succeeded(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-ok")
+	in := testInput(t, "spawn-wait-ok")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -241,7 +272,7 @@ func TestWaitForExit_Failed(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-fail")
+	in := testInput(t, "spawn-wait-fail")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -269,7 +300,7 @@ func TestWaitForExit_Timeout(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-timeout")
+	in := testInput(t, "spawn-wait-timeout")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -287,7 +318,7 @@ func TestTeardown_DeletesOwningSecret(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-tear")
+	in := testInput(t, "spawn-tear")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -306,7 +337,7 @@ func TestTeardown_DeletesOwningSecret(t *testing.T) {
 	assert.True(t, isNotFound(err), "Secret must be deleted after Teardown; got err: %v", err)
 }
 
-func TestTeardown_MissingSecret_ReturnsError(t *testing.T) {
+func TestTeardown_MissingSecret_IsIdempotentSuccess(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
@@ -316,23 +347,81 @@ func TestTeardown_MissingSecret_ReturnsError(t *testing.T) {
 		Backend: "kube",
 		Refs: map[string]string{
 			"namespace":  "runsecure-ghost",
-			"secret":     "rs-secret-ghost",
-			"runner_pod": "rs-runner-ghost",
-			"proxy_pod":  "rs-proxy-ghost",
+			"secret":     "rs-secret-ghost-spawn",
+			"runner_pod": "rs-runner-ghost-spawn",
+			"proxy_pod":  "rs-proxy-ghost-spawn",
+			"repo_label": "owner_repo",
 		},
 	}
-	err := b.Teardown(ctx, h, true)
-	require.Error(t, err, "Teardown on non-existent secret must return an error")
+	require.NoError(t, b.Teardown(ctx, h, true),
+		"Teardown on an already-absent owning Secret must succeed")
+}
+
+func TestTeardown_RemovesExactEgressConfigDir(t *testing.T) {
+	b, _ := newBackend(t)
+	egressDir := filepath.Join(t.TempDir(), "custom-egress", "spawn")
+	require.NoError(t, os.MkdirAll(egressDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "squid.conf"), []byte("fixture"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "haproxy.cfg"), []byte("fixture"), 0o600))
+	in := testInput(t, "spawn-egress-cleanup")
+	in.EgressConfigDir = egressDir
+	h, err := b.Spawn(context.Background(), in)
+	require.NoError(t, err)
+	require.Equal(t, egressDir, h.Refs["egress_config_dir"])
+
+	require.NoError(t, b.Teardown(context.Background(), h, true))
+	_, statErr := os.Stat(egressDir)
+	require.True(t, os.IsNotExist(statErr))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Reconcile
+// Teardown error aggregation
 // ──────────────────────────────────────────────────────────────────────────────
+
+func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-secret-spawn-cleanup-errors", Namespace: "runsecure-cleanup-errors",
+		Labels: map[string]string{
+			"runsecure.io/scope": "cleanup-errors", "runsecure.io/repo": "owner_repo",
+			"runsecure.io/spawn-id": "spawn-cleanup-errors", "runsecure.io/role": "proxy",
+		},
+	}}
+	cs := fake.NewSimpleClientset(secret)
+	deleteErr := errors.New("injected secret deletion failure")
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, deleteErr
+	})
+	b := backendkube.New(kube.NewClient(cs))
+
+	// A child below a regular file makes RemoveAll fail with ENOTDIR without
+	// relying on process permissions. Teardown must still attempt this cleanup
+	// after the Kubernetes deletion fails, then preserve both causes.
+	blockingParent := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blockingParent, []byte("fixture"), 0o600))
+	h := backend.Handle{
+		SpawnID: "spawn-cleanup-errors",
+		Backend: "kube",
+		Refs: map[string]string{
+			"namespace":         "runsecure-cleanup-errors",
+			"secret":            "rs-secret-spawn-cleanup-errors",
+			"repo_label":        "owner_repo",
+			"egress_config_dir": filepath.Join(blockingParent, "spawn"),
+		},
+	}
+
+	err := b.Teardown(context.Background(), h, true)
+	require.Error(t, err)
+	require.ErrorIs(t, err, deleteErr)
+	require.ErrorContains(t, err, "teardown spawn \"spawn-cleanup-errors\"")
+	require.ErrorContains(t, err, "remove egress config")
+}
+
+// Reconcile
 
 func TestReconcile_FindsSpawnAfterSpawn(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-recon")
+	in := testInput(t, "spawn-recon")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -365,7 +454,7 @@ func TestReconcile_MultipleSpawns(t *testing.T) {
 
 	spawnIDs := []string{"recon-s1", "recon-s2", "recon-s3"}
 	for _, id := range spawnIDs {
-		in := testInput(id)
+		in := testInput(t, id)
 		in.Scope = scope
 		_, err := b.Spawn(ctx, in)
 		require.NoError(t, err, "Spawn %s must succeed", id)
@@ -410,18 +499,47 @@ func TestSpawn_ApplySpawnError(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-applyerr")
+	in := testInput(t, "spawn-applyerr")
 	_, err := b.Spawn(ctx, in)
 	require.Error(t, err, "Spawn must return an error when ApplySpawn fails")
 	assert.Contains(t, err.Error(), "apply spawn")
 }
 
-// TestSpawn_EnsureNamespaceError verifies that an EnsureNamespace failure
-// is propagated immediately (before any object creation).
-func TestSpawn_EnsureNamespaceError(t *testing.T) {
+func TestSpawn_ApplyAndRollbackFailureReturnsExactTeardownHandle(t *testing.T) {
 	cs := fake.NewSimpleClientset()
-	injected := errors.New("injected namespace create error")
-	cs.PrependReactor("create", "namespaces", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+	cs.PrependReactor("create", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("injected pod create error")
+	})
+	failDelete := true
+	cs.PrependReactor("delete", "secrets", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		if failDelete {
+			return true, nil, errors.New("injected secret delete error")
+		}
+		return false, nil, nil
+	})
+	b := backendkube.New(kube.NewClient(cs))
+	in := testInput(t, "spawn-rollback-debt")
+
+	h, err := b.Spawn(context.Background(), in)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "apply spawn")
+	require.Contains(t, err.Error(), "rollback spawn")
+	require.Equal(t, "kube", h.Backend)
+	require.Equal(t, kube.Namespace(in.Scope), h.Refs["namespace"])
+	require.NotEmpty(t, h.Refs["secret"])
+
+	failDelete = false
+	require.NoError(t, b.Teardown(context.Background(), h, true),
+		"returned handle must support exact cleanup after the dependency recovers")
+}
+
+// TestSpawn_EnsureDefaultDenyError verifies that policy reconciliation failure
+// is propagated immediately (before any object creation).
+func TestSpawn_EnsureDefaultDenyError(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	injected := errors.New("injected network policy create error")
+	cs.PrependReactor("create", "networkpolicies", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, injected
 	})
 
@@ -429,9 +547,104 @@ func TestSpawn_EnsureNamespaceError(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	_, err := b.Spawn(ctx, testInput("spawn-nserr"))
+	_, err := b.Spawn(ctx, testInput(t, "spawn-nserr"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ensure namespace")
+	assert.Contains(t, err.Error(), "ensure default-deny policy")
+}
+
+func TestSpawn_RejectsUnboundedRunnerResourcesBeforeClusterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*backend.SpawnInput)
+		want   string
+	}{
+		{
+			name:   "missing memory limit",
+			mutate: func(in *backend.SpawnInput) { in.ResourcesMemory = 0 },
+			want:   "runner memory limit must be positive",
+		},
+		{
+			name:   "missing CPU limit",
+			mutate: func(in *backend.SpawnInput) { in.ResourcesNanoCPUs = 0 },
+			want:   "runner CPU limit must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, cs := newBackend(t)
+			in := testInput(t, "spawn-unbounded")
+			tt.mutate(&in)
+
+			_, err := b.Spawn(context.Background(), in)
+			require.ErrorContains(t, err, tt.want)
+			require.Empty(t, cs.Actions(), "invalid limits must fail before Kubernetes API access")
+		})
+	}
+}
+
+func TestSpawn_RejectsInvalidDNSSelectorBeforeClusterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*backend.SpawnInput)
+		want   string
+	}{
+		{
+			name:   "empty service CIDRs",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSServiceCIDRs = nil },
+			want:   "KubeDNSServiceCIDRs must not be empty",
+		},
+		{
+			name:   "broad service CIDR",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSServiceCIDRs = []string{"10.96.0.0/24"} },
+			want:   "KubeDNSServiceCIDRs must contain exact IPv4 /32 values",
+		},
+		{
+			name: "duplicate service CIDR",
+			mutate: func(in *backend.SpawnInput) {
+				in.KubeDNSServiceCIDRs = []string{"10.96.0.10/32", "10.96.0.10/32"}
+			},
+			want: "KubeDNSServiceCIDRs must contain unique CIDRs",
+		},
+		{
+			name:   "invalid namespace",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSNamespace = "INVALID_NAMESPACE" },
+			want:   "KubeDNSNamespace must be a DNS-1123 label",
+		},
+		{
+			name:   "invalid label key",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelKey = "invalid key" },
+			want:   "KubeDNSPodLabelKey must be a Kubernetes label key",
+		},
+		{
+			name:   "empty label value",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelValue = "" },
+			want:   "KubeDNSPodLabelValue must not be empty",
+		},
+		{
+			name:   "invalid label value",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelValue = "invalid value" },
+			want:   "KubeDNSPodLabelValue must be a Kubernetes label value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, cs := newBackend(t)
+			in := testInput(t, "spawn-invalid-dns")
+			tt.mutate(&in)
+
+			h, err := b.Spawn(context.Background(), in)
+
+			require.ErrorContains(t, err, tt.want)
+			require.Empty(t, h.SpawnID)
+			namespaces, listErr := cs.CoreV1().Namespaces().List(
+				context.Background(), metav1.ListOptions{},
+			)
+			require.NoError(t, listErr)
+			require.Empty(t, namespaces.Items,
+				"invalid DNS policy must fail before creating the scoped namespace")
+		})
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -510,8 +723,9 @@ func TestSpawn_SecretContainsSquidCfg(t *testing.T) {
 	dir := t.TempDir()
 	squidContent := "# squid config test"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "squid.conf"), []byte(squidContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "haproxy.cfg"), []byte("# haproxy"), 0o644))
 
-	in := testInput("spawn-squid-cfg")
+	in := testInput(t, "spawn-squid-cfg")
 	in.EgressConfigDir = dir
 
 	h, err := b.Spawn(ctx, in)
@@ -533,8 +747,9 @@ func TestSpawn_SecretContainsHAProxyCfg(t *testing.T) {
 	dir := t.TempDir()
 	haproxyContent := "# haproxy config test"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "haproxy.cfg"), []byte(haproxyContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "squid.conf"), []byte("# squid"), 0o644))
 
-	in := testInput("spawn-haproxy-cfg")
+	in := testInput(t, "spawn-haproxy-cfg")
 	in.EgressConfigDir = dir
 
 	h, err := b.Spawn(ctx, in)
@@ -549,22 +764,76 @@ func TestSpawn_SecretContainsHAProxyCfg(t *testing.T) {
 		"Secret must contain haproxy.cfg content from EgressConfigDir")
 }
 
-func TestSpawn_SecretMissingFiles_NoError(t *testing.T) {
+func TestSpawn_RequiredEgressConfigsFailClosed(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-missing-files")
-	in.EgressConfigDir = "" // empty = no files
+	for _, tc := range []struct {
+		name   string
+		setup  func(*testing.T, *backend.SpawnInput)
+		wanted string
+	}{
+		{
+			name: "missing directory",
+			setup: func(_ *testing.T, in *backend.SpawnInput) {
+				in.EgressConfigDir = ""
+			},
+			wanted: "directory is required",
+		},
+		{
+			name: "empty squid",
+			setup: func(t *testing.T, in *backend.SpawnInput) {
+				require.NoError(t, os.WriteFile(filepath.Join(in.EgressConfigDir, "squid.conf"), nil, 0o600))
+			},
+			wanted: "squid.conf: config is empty",
+		},
+		{
+			name: "missing haproxy",
+			setup: func(t *testing.T, in *backend.SpawnInput) {
+				require.NoError(t, os.Remove(filepath.Join(in.EgressConfigDir, "haproxy.cfg")))
+			},
+			wanted: "haproxy.cfg",
+		},
+		{
+			name: "missing dnsmasq when enabled",
+			setup: func(_ *testing.T, in *backend.SpawnInput) {
+				in.EnableDNSMasq = true
+			},
+			wanted: "dnsmasq.conf",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := testInput(t, "spawn-missing-files")
+			tc.setup(t, &in)
+			_, err := b.Spawn(ctx, in)
+			require.ErrorContains(t, err, tc.wanted)
+		})
+	}
+}
 
-	_, err := b.Spawn(ctx, in)
-	require.NoError(t, err, "Spawn must succeed when EgressConfigDir is empty")
+func TestSpawn_SecretContainsDNSMasqCfgWhenEnabled(t *testing.T) {
+	b, cs := newBackend(t)
+	in := testInput(t, "spawn-dnsmasq-cfg")
+	in.EnableDNSMasq = true
+	content := "# dnsmasq fixture"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(in.EgressConfigDir, "dnsmasq.conf"), []byte(content), 0o600,
+	))
+
+	h, err := b.Spawn(context.Background(), in)
+	require.NoError(t, err)
+	secret, err := cs.CoreV1().Secrets(kube.Namespace(in.Scope)).Get(
+		context.Background(), h.Refs["secret"], metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, content, secret.StringData["dnsmasq.conf"])
 }
 
 func TestSpawn_RunnerPodHasJITConfigFileEnv(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-jit-env")
+	in := testInput(t, "spawn-jit-env")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -583,7 +852,7 @@ func TestSpawn_RunnerPodMountsJITSecret(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-jit-mount")
+	in := testInput(t, "spawn-jit-mount")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 

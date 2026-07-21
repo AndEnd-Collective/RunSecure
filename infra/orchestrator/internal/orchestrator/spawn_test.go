@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +33,10 @@ func makePATFile(t *testing.T) string {
 }
 
 func TestSpawn_HappyPath(t *testing.T) {
+	t.Setenv("RUNSECURE_KUBE_DNS_SERVICE_CIDRS", "10.96.0.10/32,10.100.0.10/32")
+	t.Setenv("RUNSECURE_KUBE_DNS_NAMESPACE", "kube-system")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_KEY", "k8s-app")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_VALUE", "kube-dns")
 	d := newSpawnDeps(t)
 	w := NewSpawnWorker(d)
 
@@ -48,8 +55,377 @@ func TestSpawn_HappyPath(t *testing.T) {
 		cornerstone.EventSpawnStarted,
 		cornerstone.EventSpawnJITAcquired,
 		cornerstone.EventSpawnRunnerCreated,
+		cornerstone.EventRunnerOnline,
+		cornerstone.EventJobAssigned,
+		cornerstone.EventRunnerCompleted,
 		cornerstone.EventSpawnCompleted,
 	)
+	snap := d.st.Snapshot()
+	require.Equal(t, int64(1), snap.AssignmentsTotal)
+	require.Equal(t, int64(1), snap.CompletedTotal)
+	require.Equal(t, int64(1), snap.DeregistrationsTotal)
+	d.be.mu.Lock()
+	spawnInput := d.be.spawnCalls[0]
+	d.be.mu.Unlock()
+	require.Equal(t, "v-test", spawnInput.Version)
+	require.Equal(t, "sha-test", spawnInput.BuildSHA)
+	require.Equal(t, []string{"10.96.0.10/32", "10.100.0.10/32"}, spawnInput.KubeDNSServiceCIDRs)
+	require.Equal(t, "kube-system", spawnInput.KubeDNSNamespace)
+	require.Equal(t, "k8s-app", spawnInput.KubeDNSPodLabelKey)
+	require.Equal(t, "kube-dns", spawnInput.KubeDNSPodLabelValue)
+}
+
+func TestSpawn_JITRegistrationCarriesRestartDiscoveryLabels(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+
+	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "vladislav", Repo: "o/r", SpawnID: "owned-labels",
+	}))
+
+	fake.mu.Lock()
+	labels := append([]string(nil), fake.jitRequestedLabels...)
+	fake.mu.Unlock()
+	require.ElementsMatch(t, []string{
+		"self-hosted", "Linux", JITOwnerLabel, JITScopeLabelPrefix + "vladislav",
+	}, labels)
+}
+
+func TestJITRunnerLabelsRejectEmptyAndDuplicateOwnershipLabels(t *testing.T) {
+	labels := jitRunnerLabels("vladislav", []string{
+		"", "self-hosted", JITOwnerLabel, "self-hosted",
+		JITScopeLabelPrefix + "vladislav",
+	})
+
+	require.Equal(t, []string{
+		"self-hosted", JITOwnerLabel, JITScopeLabelPrefix + "vladislav",
+	}, labels)
+}
+
+func TestSpawn_ZeroExitWithoutAssignmentIsRuntimeFailure(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "unassigned",
+	})
+	require.ErrorContains(t, err, "before GitHub reported a job assignment")
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventRunnerExitedUnassigned, cornerstone.EventSpawnFailed)
+	require.Equal(t, int64(1), d.st.Snapshot().UnassignedExitsTotal)
+	require.NotContains(t, d.emBuf.String(), `"event.sub.type":"`+cornerstone.EventSpawnCompleted+`"`)
+}
+
+func TestSpawn_NeverOnlineFailsAtRegistrationDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusNotFound
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 20 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.inspectExitDelay = 30 * time.Millisecond
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "never-online",
+	})
+	require.ErrorContains(t, err, "did not become online")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_online_timeout"`)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerCompleted)
+}
+
+func TestSpawn_OnlineButNeverAssignedFailsAtAssignmentDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.runnerErrCode = http.StatusNotFound
+	fake.runnerErrAfter = 2
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 20 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.inspectExitDelay = 30 * time.Millisecond
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "never-assigned",
+	})
+	require.ErrorContains(t, err, "did not receive a job")
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventSpawnFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_assignment_timeout"`)
+}
+
+func TestSpawn_RunnerBecomesBusyOnLifecyclePoll(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.runnerChangeAfter = 2
+	fake.runnerStatusAfter = "online"
+	fake.runnerBusyAfter = true
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 20 * time.Millisecond, AssignmentTimeout: 20 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+	d.be.waitDelay = 5 * time.Millisecond
+	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "poll-transition",
+	}))
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestSpawn_RunnerObservationRateLimitFailsDelivery(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusTooManyRequests
+	fake.mu.Unlock()
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "rate-limited-observation",
+	})
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_rate_limited"`)
+	require.True(t, d.ratePaused.Load())
+	require.Equal(t, "github_rate_limited",
+		d.st.Snapshot().PerRepo["o/r"].RunnerOperationError[runnerOperationGetRunner].Class)
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused)
+}
+
+func TestSpawn_JITRateLimitPausesScopeScheduler(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jitErrCode = http.StatusForbidden
+	fake.rlAfterResponse = true
+	fake.rlLimit = 5000
+	fake.rlRemaining = 12
+	fake.rlReset = "1800000000"
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "jit-rate-limited",
+	})
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.True(t, d.ratePaused.Load())
+	remaining, limit, reset := d.RateLimitContextFor("s")
+	require.Equal(t, 0, remaining)
+	require.Equal(t, 5000, limit)
+	require.Equal(t, time.Unix(1800000000, 0).Format(time.RFC3339), reset)
+	require.Equal(t, "github_rate_limited",
+		d.st.Snapshot().PerRepo["o/r"].RunnerOperationError[runnerOperationGenerateJIT].Class)
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused)
+}
+
+func TestSpawn_JITAuthFailureBlocksReadinessIndependentlyOfDemand(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jitErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "jit-auth-failure",
+	})
+
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	d.st.RecordPollSuccess("o/r", 1, d.clk.Now())
+	repoState := d.st.Snapshot().PerRepo["o/r"]
+	require.Empty(t, repoState.LastPollError)
+	require.Equal(t, "github_auth_failed",
+		repoState.RunnerOperationError[runnerOperationGenerateJIT].Class)
+}
+
+func TestSpawn_ContextCancellationWhileObservingRunner(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+	d.be.inspectExitDelay = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(time.Millisecond)
+		cancel()
+	}()
+	err := NewSpawnWorker(d).Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "cancelled"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_observation_cancelled"`)
+}
+
+func TestSpawn_RunnerObservationAuthFailureFailsDelivery(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "auth-failure",
+	})
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_runner_observation_failed"`)
+	require.Equal(t, "github_auth_failed",
+		d.st.Snapshot().PerRepo["o/r"].RunnerOperationError[runnerOperationGetRunner].Class)
+}
+
+func TestSpawn_DeregistrationFailureFailsRuntimeCleanup(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-failure",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		snap := d.st.Snapshot()
+		return snap.TeardownBlocked && snap.PerRepo["o/r"].TeardownBlocked == 1
+	}, time.Second, time.Millisecond)
+	cancel()
+	err := <-done
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_deregistration_failed"`)
+	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
+	snap := d.st.Snapshot()
+	require.Equal(t, int64(1), snap.CompletedTotal)
+	require.Zero(t, snap.DeregistrationsTotal)
+	require.Equal(t, 1, snap.GlobalInFlight,
+		"unresolved GitHub registration cleanup must retain capacity")
+	require.Equal(t, "github_auth_failed",
+		snap.PerRepo["o/r"].RunnerOperationError[runnerOperationDelete].Class)
+	require.False(t, d.st.TryReserve("replacement", "o/r", 5, 10, d.clk.Now()))
+}
+
+func TestSpawn_DeregistrationAuthFailureUsesSlowRetryBackoff(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-auth-backoff",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked
+	}, time.Second, time.Millisecond)
+	fake.mu.Lock()
+	initialCalls := fake.deleteCalled
+	fake.mu.Unlock()
+	require.Equal(t, 1, initialCalls)
+	d.clk.Advance(d.lifecycle.CleanupRetryInterval)
+	time.Sleep(10 * time.Millisecond)
+	fake.mu.Lock()
+	require.Equal(t, initialCalls, fake.deleteCalled,
+		"authentication failures must not retry at the generic cleanup cadence")
+	fake.mu.Unlock()
+	cancel()
+	require.ErrorIs(t, <-done, github.ErrAuthFailed)
+}
+
+func TestSpawn_DeregistrationRateLimitWaitsUntilReset(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	resetAt := d.clk.Now().Add(10 * time.Second)
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusTooManyRequests
+	fake.deleteErrUntil = 1
+	fake.rlRemaining = 0
+	fake.rlReset = fmt.Sprint(resetAt.Unix())
+	fake.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-rate-reset",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked && d.ratePaused.Load()
+	}, time.Second, time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // let the fake-clock reset timer register
+	d.clk.Advance(9 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+	fake.mu.Lock()
+	require.Equal(t, 1, fake.deleteCalled)
+	fake.mu.Unlock()
+	d.clk.Advance(time.Second)
+	err := <-done
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	fake.mu.Lock()
+	require.Equal(t, 2, fake.deleteCalled)
+	fake.mu.Unlock()
+}
+
+func TestRunnerDeletionRateLimitWithoutResetUsesSafeFallback(t *testing.T) {
+	d := newSpawnDeps(t)
+	err := &github.APIError{
+		Status: http.StatusTooManyRequests, Operation: "delete runner", Err: github.ErrRateLimited,
+	}
+
+	delay := NewSpawnWorker(d).runnerDeletionRetryDelay("s", err, time.Second)
+
+	require.Equal(t, time.Minute, delay)
+}
+
+func TestSpawn_DeregistrationRetryResolvesDebtOnlyAfterExactSuccess(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusInternalServerError
+	fake.deleteErrUntil = 2
+	fake.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-recovers",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return fake.deleteCalled >= 2 && d.st.Snapshot().TeardownBlocked
+	}, time.Second, time.Millisecond)
+	d.clk.Advance(d.lifecycle.CleanupRetryInterval)
+	err := <-done
+
+	require.ErrorContains(t, err, "runner deregistration failed")
+	snap := d.st.Snapshot()
+	require.False(t, snap.TeardownBlocked)
+	require.Zero(t, snap.GlobalInFlight)
+	require.Equal(t, int64(1), snap.DeregistrationsTotal)
+	require.Equal(t, int64(1), snap.TeardownReconciledTotal)
+	require.Empty(t, snap.PerRepo["o/r"].RunnerOperationError)
 }
 
 func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
@@ -65,6 +441,111 @@ func TestSpawn_SocketProxyDeny_EmitsFailed(t *testing.T) {
 	require.Equal(t, 0, d.be.waitCount(), "WaitForExit must not be called after Spawn error")
 }
 
+func TestSpawn_PartialBackendRollbackRetainsDebtUntilExactTeardown(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.spawnErr = errors.New("runner start failed; rollback incomplete")
+	d.be.spawnPartialHandle = true
+	d.be.teardownErr = errors.New("network still has endpoint")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "partial-backend",
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked && d.be.teardownCount() >= 2
+	}, time.Second, time.Millisecond)
+	snap := d.st.Snapshot()
+	require.Equal(t, 1, snap.GlobalInFlight)
+	require.Equal(t, state.PhaseTeardownBlocked, snap.Reservations["partial-backend"].Phase)
+	require.False(t, d.st.TryReserve("replacement", "o/r", 5, 10, d.clk.Now()))
+	cancel()
+	err := <-done
+
+	require.ErrorContains(t, err, "rollback incomplete")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnCompleted)
+}
+
+func TestSpawn_PartialBackendHandleIsRetriedEvenWhenCleanupRecoversImmediately(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.spawnErr = errors.New("runner start failed; rollback incomplete")
+	d.be.spawnPartialHandle = true
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "partial-backend-recovers",
+	})
+
+	require.ErrorContains(t, err, "rollback incomplete")
+	require.Equal(t, 1, d.be.teardownCount(),
+		"non-empty failure handle must always receive exact teardown")
+	require.Zero(t, d.st.GlobalInFlight())
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+func TestSpawn_PartialBackendAndRegistrationCleanupRecoverTogether(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	d.be.spawnErr = errors.New("runner start failed; rollback incomplete")
+	d.be.spawnPartialHandle = true
+	d.be.teardownErrs = []error{errors.New("network still has endpoint"), nil}
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusInternalServerError
+	fake.deleteErrUntil = 1
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "partial-backend-and-runner-recover",
+	})
+
+	require.ErrorContains(t, err, "runner start failed; rollback incomplete")
+	require.ErrorContains(t, err, "backend teardown failed: network still has endpoint")
+	require.ErrorContains(t, err, "runner deregistration failed")
+	require.Equal(t, 2, d.be.teardownCount())
+	fake.mu.Lock()
+	deleteCalls := fake.deleteCalled
+	fake.mu.Unlock()
+	require.Equal(t, 2, deleteCalls)
+	require.Zero(t, d.st.GlobalInFlight())
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)
+}
+
+func TestSettlePartialSpawnRetainsDebtWhenRunnerCleanupIsInterrupted(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusInternalServerError
+	fake.mu.Unlock()
+	intent := SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "partial-runner-interrupted"}
+	require.True(t, d.st.TryReserve(intent.SpawnID, intent.Repo, d.repoCap, d.globalCap, d.clk.Now()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewSpawnWorker(d).settlePartialSpawn(
+		ctx,
+		intent,
+		"rs-partial-runner-interrupted",
+		backend.Handle{SpawnID: intent.SpawnID, Backend: "fake"},
+		errors.New("runner start failed; rollback incomplete"),
+		100,
+	)
+
+	require.ErrorContains(t, err, "runner deregistration failed")
+	require.ErrorContains(t, err, "runner deregistration reconciliation interrupted")
+	require.ErrorIs(t, err, context.Canceled)
+	snapshot := d.st.Snapshot()
+	require.True(t, snapshot.TeardownBlocked)
+	require.Equal(t, 1, snapshot.GlobalInFlight)
+	require.Equal(t, state.PhaseTeardownBlocked, snapshot.Reservations[intent.SpawnID].Phase)
+}
+
 func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Inject a backend Spawn failure to trigger A1 leak path.
@@ -73,6 +554,58 @@ func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
 
 	_ = w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+func TestSpawn_JITValidationFailureCleansPreservedRunnerID(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jitMismatch = true
+	runnerID := fake.jitOnRunnerID
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "jit-validation-failure",
+	})
+
+	require.ErrorIs(t, err, github.ErrJITLabelMismatch)
+	fake.mu.Lock()
+	deleted := fake.deletedRunners[runnerID]
+	fake.mu.Unlock()
+	require.True(t, deleted, "response validation must not orphan the created runner")
+	require.Zero(t, d.be.spawnCount())
+	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+func TestSpawn_JITValidationCleanupFailureRetainsDebt(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jitMismatch = true
+	fake.deleteErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "jit-validation-cleanup-failure",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked
+	}, time.Second, time.Millisecond)
+	cancel()
+	err := <-done
+
+	require.ErrorIs(t, err, github.ErrJITLabelMismatch)
+	snap := d.st.Snapshot()
+	require.Equal(t, state.PhaseTeardownBlocked,
+		snap.Reservations["jit-validation-cleanup-failure"].Phase)
+	require.Equal(t, "github_auth_failed",
+		snap.PerRepo["o/r"].RunnerOperationError[runnerOperationDelete].Class)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerLeakCleaned)
 }
 
 func TestSpawn_WallClockTimeout(t *testing.T) {
@@ -94,6 +627,132 @@ func TestSpawn_WallClockTimeout(t *testing.T) {
 	require.True(t, forceVal, "Teardown must be called with force=true on timeout")
 }
 
+func TestTeardownSpawn_CancelledRunUsesFreshContextAndForce(t *testing.T) {
+	be := newFakeBackend()
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, teardownSpawn(runCtx, be, backend.Handle{SpawnID: "s1"}, false))
+
+	require.Len(t, be.teardownCalls, 1)
+	require.True(t, be.teardownCalls[0].force)
+	require.NoError(t, be.teardownCalls[0].ctxErr,
+		"cleanup must not inherit the cancelled runner context")
+}
+
+func TestSpawn_TeardownFailureCannotReportSuccess(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.teardownErrs = []error{errors.New("proxy delete returned conflict"), nil}
+	w := NewSpawnWorker(d)
+
+	err := w.Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "proxy delete returned conflict")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnCompleted)
+	require.Contains(t, d.emBuf.String(), cornerstone.EventRunnerCompleted)
+	require.Equal(t, int64(1), d.st.Snapshot().CompletedTotal)
+	require.Equal(t, int64(1), d.st.Snapshot().DeregistrationsTotal)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownFailuresTotal)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+}
+
+func TestSpawn_TeardownRetryWaitsAndThenResolvesExactDebt(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.teardownErrs = []error{
+		errors.New("initial network cleanup failure"),
+		errors.New("retry network cleanup failure"),
+		nil,
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "cleanup-retry-waits",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.be.teardownCount() >= 2 && d.st.Snapshot().TeardownBlocked
+	}, time.Second, time.Millisecond)
+	d.clk.Advance(d.lifecycle.CleanupRetryInterval)
+	err := <-done
+
+	require.ErrorContains(t, err, "initial network cleanup failure")
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)
+}
+
+func TestSpawn_LifecycleAndTeardownFailuresAreJoined(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.mu.Unlock()
+	d.be.teardownErrs = []error{errors.New("proxy cleanup failed"), nil}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "lifecycle-cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "before GitHub reported a job assignment")
+	require.ErrorContains(t, err, "backend teardown failed: proxy cleanup failed")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+	require.Contains(t, d.emBuf.String(), `"prior_failure_reason":"runner_exited_unassigned"`)
+}
+
+func TestSpawn_TimeoutAndTeardownFailuresAreJoined(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.waitExitCode = -1
+	d.be.waitTimedOut = true
+	d.be.teardownErrs = []error{errors.New("network cleanup failed"), nil}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "timeout-cleanup-failed",
+	})
+
+	require.ErrorContains(t, err, "spawn timed out")
+	require.ErrorContains(t, err, "network cleanup failed")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
+}
+
+func TestSpawn_PersistentTeardownFailureRetainsCapacityAndBlocksAdmission(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.be.teardownErr = errors.New("persistent proxy cleanup failure")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "cleanup-blocked",
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked && d.be.teardownCount() >= 2
+	}, time.Second, time.Millisecond)
+	snap := d.st.Snapshot()
+	require.Equal(t, 1, snap.GlobalInFlight)
+	require.Equal(t, 1, snap.PerRepo["o/r"].TeardownBlocked)
+	require.Equal(t, state.PhaseTeardownBlocked, snap.Reservations["cleanup-blocked"].Phase)
+	require.Equal(t, int64(1), snap.TeardownFailuresTotal)
+	require.False(t, d.st.TryReserve("replacement", "o/r", 5, 10, d.clk.Now()))
+	require.Contains(t, d.emBuf.String(), `"capacity_retained":true`)
+	require.Contains(t, d.emBuf.String(), `"scheduling_blocked":true`)
+
+	cancel()
+	err := <-done
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, d.st.GlobalInFlight(),
+		"cancellation must not release unresolved teardown debt")
+}
+
+func TestTeardownGracePeriod(t *testing.T) {
+	require.Equal(t, 15*time.Second, teardownGracePeriod())
+}
+
 func TestSpawn_RateLimitBackoff(t *testing.T) {
 	d := newSpawnDeps(t)
 	// Replace the bucket with one that always denies.
@@ -104,6 +763,17 @@ func TestSpawn_RateLimitBackoff(t *testing.T) {
 	require.ErrorIs(t, err, ErrRateLimitBackoff)
 }
 
+func TestPauseForRateLimitEmitsOnlyOnPauseTransition(t *testing.T) {
+	d := newSpawnDeps(t)
+	w := NewSpawnWorker(d)
+
+	w.pauseForRateLimit("s", github.ErrRateLimited)
+	w.pauseForRateLimit("s", github.ErrRateLimited)
+
+	require.True(t, d.ratePaused.Load())
+	require.Equal(t, 1, strings.Count(d.emBuf.String(), cornerstone.EventRatelimitPaused))
+}
+
 func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	d := newSpawnDeps(t)
 	d.be.waitExitCode = 7
@@ -112,11 +782,10 @@ func TestSpawn_NonZeroExit_RecordedAsFailed(t *testing.T) {
 	err := w.Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "id1"})
 	require.Error(t, err)
 	d.requireEmitted(t, cornerstone.EventSpawnFailed)
+	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
 }
 
-// Bug #1 regression test: breaker.opened fires when the breaker transitions
-// to Open. Previously the return values from RecordFailure were dropped.
-func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
+func TestSpawn_RunnerOutcomesDoNotDriveDemandBreaker(t *testing.T) {
 	d := newSpawnDeps(t)
 	d.be.spawnErr = errors.New("force failure")
 	w := NewSpawnWorker(d)
@@ -125,23 +794,16 @@ func TestSpawn_FifthFailure_EmitsBreakerOpened(t *testing.T) {
 			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
 		})
 	}
-	d.requireEmitted(t, cornerstone.EventBreakerOpened)
-}
+	require.Zero(t, d.breakers.failed["o/r"])
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventBreakerOpened)
 
-func TestSpawn_SuccessAfterOpen_EmitsBreakerClosed(t *testing.T) {
-	d := newSpawnDeps(t)
-	d.be.spawnErr = errors.New("force failure")
-	w := NewSpawnWorker(d)
-	for i := 0; i < 5; i++ {
-		_ = w.Execute(context.Background(), SpawnIntent{
-			Scope: "s", Repo: "o/r", SpawnID: "f" + string(rune('0'+i)),
-		})
-	}
+	d.breakers.open["o/r"] = true
 	d.be.spawnErr = nil
 	require.NoError(t, w.Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "ok",
 	}))
-	d.requireEmitted(t, cornerstone.EventBreakerClosed)
+	require.True(t, d.breakers.open["o/r"], "runner success must not close the demand breaker")
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventBreakerClosed)
 }
 
 // --- Task 8: egressNetworkName env lookup + fallback -------------------------
@@ -187,6 +849,32 @@ func TestSpawn_AcquireSemaphoreFailure_StopsExecution(t *testing.T) {
 	require.ErrorIs(t, err, ErrSemaphoreUnavailable)
 	// No JIT call should have happened.
 	require.False(t, d.dc.created["runner"], "runner must not have been created")
+}
+
+func TestSpawn_ExistingReservationHonorsDrainBarrier(t *testing.T) {
+	d := newSpawnDeps(t)
+	require.True(t, d.st.TryReserve("draining", "o/r", 5, 10, d.clk.Now()))
+	d.st.SetDraining(true)
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "draining",
+	})
+
+	require.ErrorIs(t, err, ErrSchedulingBlocked)
+	require.Zero(t, d.be.spawnCount())
+}
+
+func TestBlockTeardownDoesNotDuplicateExistingDebtEvent(t *testing.T) {
+	d := newSpawnDeps(t)
+	intent := SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "already-blocked"}
+	require.True(t, d.st.TryReserve(intent.SpawnID, intent.Repo, 5, 10, d.clk.Now()))
+	require.True(t, d.st.MarkTeardownBlocked(
+		intent.SpawnID, intent.Repo, "first failure", d.clk.Now(),
+	))
+
+	NewSpawnWorker(d).blockTeardown(intent, "runner", errors.New("retry failed"), "")
+
+	require.NotContains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
 }
 
 // Mutation kill: spawn.go:127 — `if timeoutSecs <= 0 { default 6h }`.
@@ -455,6 +1143,46 @@ func TestDefaultTimeoutSeconds(t *testing.T) {
 	require.Equal(t, 21600, defaultTimeoutSeconds(-1))
 	require.Equal(t, 60, defaultTimeoutSeconds(60))
 	require.Equal(t, 1, defaultTimeoutSeconds(1))
+}
+
+func TestLifecycleTimingDefaultsAndTimerDrain(t *testing.T) {
+	defaults := DefaultLifecycleTiming()
+	require.Equal(t, 60*time.Second, defaults.OnlineTimeout)
+	require.Equal(t, 120*time.Second, defaults.AssignmentTimeout)
+	require.Equal(t, 2*time.Second, defaults.PollInterval)
+	require.Equal(t, time.Second, defaults.CleanupRetryInterval)
+	require.Equal(t, defaults, normalizedLifecycleTiming(LifecycleTiming{}))
+	expired := time.NewTimer(time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+	stopTimer(expired)
+	stopTimer(nil)
+}
+
+func TestDeregister_ZeroRunnerIDIsNoop(t *testing.T) {
+	d := newSpawnDeps(t)
+	require.NoError(t, NewSpawnWorker(d).deregister(context.Background(), "o/r", 0))
+	require.Zero(t, d.st.Snapshot().DeregistrationsTotal)
+}
+
+func TestDeregister_CancelledWorkerUsesFreshCleanupContext(t *testing.T) {
+	d := newSpawnDeps(t)
+	deleteCalls := atomic.Int64{}
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete {
+			deleteCalls.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(ghSrv.Close)
+	gh, err := github.NewClient(ghSrv.URL, makePATFile(t))
+	require.NoError(t, err)
+	d.gh = gh
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, NewSpawnWorker(d).deregister(workerCtx, "o/r", 99))
+	require.Equal(t, int64(1), deleteCalls.Load())
+	require.Equal(t, int64(1), d.st.Snapshot().DeregistrationsTotal)
 }
 
 // Mutation kill: spawn.go `if imageDigest == ""`. Mutation `!=` would

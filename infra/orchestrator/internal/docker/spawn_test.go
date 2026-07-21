@@ -171,6 +171,25 @@ func TestSpawn_RunnerProxyEnv_BothCasesAndLocalhostIP(t *testing.T) {
 	}
 }
 
+func TestSpawn_RunnerReceivesNonSecretProvenance(t *testing.T) {
+	fc := newFakeClient()
+	_, err := Spawn(context.Background(), fc, SpawnInputs{
+		Scope: "vladislav", Repo: "NaorPenso/vladislav", SpawnID: "spawn-123",
+		Version: "v2.1.8", BuildSHA: "abc123", NetworkID: "net-int",
+		EgressNetwork: "spawn-egress", RunnerImage: "r@sha256:x", ProxyImage: "p@sha256:y",
+	})
+	require.NoError(t, err)
+	runner := fc.created["runner"]
+	for _, kv := range []string{
+		"RUNSECURE_SCOPE=vladislav",
+		"RUNSECURE_VERSION=v2.1.8",
+		"RUNSECURE_BUILD_SHA=abc123",
+		"RUNSECURE_SPAWN_ID=spawn-123",
+	} {
+		require.True(t, hasEnv(runner.Env, kv), "runner env missing %q", kv)
+	}
+}
+
 // TestSpawn_RunnerEntrypoint_SetToConstant verifies fixes G2/G3: the runner
 // container's Entrypoint is explicitly set to RunnerEntrypoint
 // (/home/runner/entrypoint.sh) as belt-and-suspenders in case an image
@@ -459,4 +478,31 @@ func TestSpawn_StartFails_RollsBack(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.GreaterOrEqual(t, atomic.LoadInt64(&deleteCount), int64(2), "both containers must be torn down on start failure")
+}
+
+func TestSpawn_StartAndRollbackFailureReturnsOwnedContainerIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/containers/create"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "id-" + r.URL.Query().Get("name")})
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusConflict)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL)
+
+	ids, err := Spawn(context.Background(), c, SpawnInputs{
+		SpawnID: "rollback-debt", NetworkID: "n",
+		RunnerImage: "r@sha256:r", ProxyImage: "p@sha256:p",
+	})
+
+	require.Error(t, err)
+	require.True(t, HasIncompleteRollback(err))
+	require.Contains(t, err.Error(), "container rollback incomplete")
+	require.Contains(t, ids, "proxy")
+	require.Contains(t, ids, "runner")
 }

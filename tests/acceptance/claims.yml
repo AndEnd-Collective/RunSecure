@@ -43,8 +43,8 @@ H02:
   tags: [identity, hardening, layer-1]
 
 H03:
-  short: "Package manager removed (apt/dpkg/aptitude)"
-  full:  "Final RunSecure images strip the package manager so a compromised job cannot install attack tools at runtime. Both binaries (apt, dpkg, aptitude) and state directories (/var/lib/apt, /var/lib/dpkg, /etc/apt) must be absent."
+  short: "Package-manager functionality removed; scanner inventory retained read-only"
+  full:  "Final RunSecure images strip apt/dpkg/aptitude binaries and all mutable package-manager state so a compromised job cannot install attack tools at runtime. Only non-executable, read-only dpkg installed-package inventory (/var/lib/dpkg/status and optional regular status.d fragments) remains so Syft/Grype can identify Debian packages and scan them for vulnerabilities."
   severity: error
   section: layer-1-image-hardening-build-time
   tags: [supply-chain, hardening, layer-1]
@@ -73,7 +73,7 @@ H06:
 # Layer 2 — Runtime containment (launch-time)
 R01:
   short: "Linux capabilities dropped (cap_drop ALL)"
-  full:  "Container must run with cap_drop:ALL — no capabilities granted. Operations requiring CAP_NET_RAW (raw sockets), CAP_SYS_ADMIN (mount), or CAP_NET_BIND_SERVICE (privileged ports) must fail."
+  full:  "Container must run with cap_drop:ALL: inherited, permitted, effective, bounding, and ambient capability masks are all zero. Operations requiring capabilities, including CAP_NET_RAW raw sockets and CAP_SYS_ADMIN mounts, must fail. Low-port binding is not evidence of CAP_NET_BIND_SERVICE because container kernels commonly set net.ipv4.ip_unprivileged_port_start=0."
   severity: error
   section: layer-2-runtime-containment-launch-time
   tags: [capabilities, containment, layer-2]

@@ -37,13 +37,18 @@ Reduces the attack surface inside the container by removing tools and capabiliti
 | `su`/`sudo` binaries removed | Privilege escalation via user switching | `validate-runner.sh` |
 | All setuid/setgid bits stripped | Privilege escalation via setuid binaries | `validate-runner.sh` |
 | Root account locked, shell set to nologin | Login as root | `validate-runner.sh` |
-| Package manager removed (apt/dpkg) in final images | Installing attack tools at runtime | `validate-runner.sh` |
+| Package-manager executables and mutable state removed; inert dpkg inventory retained read-only | Installing attack tools at runtime while preserving Syft/Grype visibility | `validate-runner.sh`, H03 acceptance |
 | Network recon tools removed (ping, nc, ssh, wget) | Network reconnaissance, lateral movement | `validate-runner.sh` |
 | Persistence tools removed (crontab, at) | Surviving job completion | `validate-runner.sh` |
 | SHA256-verified binary downloads | Supply chain attacks on runner binary | `base.Dockerfile` |
 | Pinned package versions | Version-swap supply chain attacks | `base.Dockerfile` |
 | `--no-install-recommends` on all apt installs | Reducing unneeded packages | `base.Dockerfile` |
 | Multi-stage builds (compilers not in final image) | Building exploits on-host | `compose-image.sh` |
+
+Image CVE gates generate an ecosystem-aware Syft SBOM and feed that exact file
+to both Grype's blocking table and SARIF output. Only generic raw ELF/PE/version
+classifiers are disabled; OS and language package catalogers remain enabled and
+required so distro patch metadata is not replaced by upstream-version guesses.
 
 ### Layer 2: Runtime Containment (launch-time)
 
@@ -54,11 +59,18 @@ read-only — the actions-runner writes `run-helper.sh` and other files into
 its own install directory at job start, and a read-only rootfs breaks every
 job. This is the one hardening axis relaxed on the runner; the proxy
 container's rootfs remains read-only, and every other runner control below
-(non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, resource
+(non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, CPU/memory
 limits, internal-only network, no host binds) stays intact. This holds on
 **both** backends — Compose sets `HostConfig.ReadonlyRootfs=false` on the
 runner only, and Kubernetes sets `readOnlyRootFilesystem: false` on the
 runner container only (proxy Pod containers stay read-only).
+
+Kubernetes maps `runner.yml` CPU and memory values to equal Pod requests and
+limits and caps the runner's memory-backed `/tmp` at 512 MiB. Kubernetes' core
+Pod API does **not** expose a per-Pod PID-limit field: `runner.yml`'s `pids`
+value is enforced by the Compose backend only. Kubernetes deployments must set
+a bounded kubelet `podPidsLimit`; that is a node-level prerequisite and is not
+equivalent to RunSecure enforcing the exact per-runner value.
 
 | Flag | What it prevents | Verified by |
 |------|-----------------|-------------|
@@ -67,7 +79,7 @@ runner container only (proxy Pod containers stay read-only).
 | `--tmpfs /tmp:noexec` | Executing downloaded binaries from /tmp | `validate-runner.sh` |
 | `--cap-drop=ALL` | All Linux capability-based attacks | `test-attack-simulation.sh` |
 | `--security-opt=no-new-privileges` | Privilege escalation via setuid/setgid at runtime | `test-attack-simulation.sh` |
-| `--pids-limit` | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test) |
+| `--pids-limit` (Compose); kubelet `podPidsLimit` prerequisite (Kubernetes) | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test); cluster configuration |
 | `--memory` / `--memory-swap` | Memory exhaustion, OOM attacks | `validate-runner.sh` |
 | `--cpus` | CPU exhaustion (cryptomining) | `validate-runner.sh` |
 | Seccomp profile (`node-runner.json`) | Dangerous syscalls (ptrace, mount, bpf, keyctl) | Architecture |
@@ -154,7 +166,11 @@ the policies are created but silently ignored.**
 
 ### Accepted Risks
 
-- **apt binary exists in intermediate images** (language layers). It is removed in final composed images via `finalize-hardening.sh`. In intermediate images, the runner user (UID 1001) cannot install system packages without root/capabilities.
+- **apt exists in build-only inputs** (base and the published, digest-pinned
+  `*-build` packages). Those packages never enter the socket-proxy runtime
+  allowlist. `finalize-hardening.sh` removes package-manager functionality from
+  every runnable language/project image; UID 1001 cannot install system
+  packages in the intermediate images without root/capabilities.
 - **Container filesystem is writable by the runner user** in its home directory. The GH Actions runner requires this to write config, diagnostic logs, and download actions at runtime. System paths (`/usr`, `/etc`) are protected by root ownership and `chmod 555`. The container is ephemeral (`--rm`) so nothing persists.
 - **`/proc/self/environ` is readable.** This is standard in containers. The environment should contain only non-secret configuration. GitHub Actions injects secrets at runtime and they are redacted from logs (though this is not a security boundary).
 

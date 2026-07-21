@@ -5,8 +5,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+ARG RUNSECURE_VERSION=dev
+ARG RUNSECURE_BUILD_SHA=unknown
 RUN CGO_ENABLED=0 \
-    go build -trimpath -ldflags='-s -w' -o /out/orchestrator ./cmd/orchestrator
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${RUNSECURE_VERSION} -X main.buildSHA=${RUNSECURE_BUILD_SHA}" \
+      -o /out/orchestrator ./cmd/orchestrator
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 COPY --from=build /out/orchestrator /usr/local/bin/orchestrator

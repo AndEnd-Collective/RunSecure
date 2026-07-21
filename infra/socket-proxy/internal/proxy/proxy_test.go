@@ -131,6 +131,11 @@ func TestServer_NetworkCreate_HappyPath(t *testing.T) {
 		"Driver":     "bridge",
 		"Internal":   true,
 		"Attachable": false,
+		"Labels": map[string]string{
+			"runsecure.scope":    "test",
+			"runsecure.repo":     "owner/repo",
+			"runsecure.spawn_id": "spawn-1",
+		},
 	})
 	resp, err := http.Post(srv.URL+"/v1.43/networks/create", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)

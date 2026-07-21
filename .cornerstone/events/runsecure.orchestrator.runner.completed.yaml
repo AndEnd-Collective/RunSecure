@@ -1,0 +1,22 @@
+apiVersion: cornerstone.cerebras.net/v1
+kind: EventSignature
+
+metadata:
+  name: runsecure.orchestrator.runner.completed
+  uuid: 298c8cdc-02cb-4b40-ab6c-c4ad65857525
+  description: |
+    A JIT runner that was observed receiving a GitHub job exited. The container
+    exit code is recorded independently from the successful job assignment.
+  status: active
+  tags: [runsecure, orchestrator, runner]
+
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
+  required_contexts:
+    - container_context
+    - audit_context

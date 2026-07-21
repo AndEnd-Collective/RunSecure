@@ -23,27 +23,29 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
-// EnsureNamespace
+// EnsureDefaultDenyPolicy
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestEnsureNamespace(t *testing.T) {
+func TestEnsureDefaultDenyPolicy(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	c := NewClient(cs)
 	ctx := context.Background()
 	scope := "test-scope"
 	ns := Namespace(scope)
 
-	// First call — both objects must be created.
-	require.NoError(t, c.EnsureNamespace(ctx, scope))
+	// First call creates only the namespace-scoped policy. Helm owns Namespace
+	// creation; touching that cluster-scoped API would fail under the chart Role.
+	require.NoError(t, c.EnsureDefaultDenyPolicy(ctx, scope))
 
-	_, err := cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	require.NoError(t, err, "namespace must exist after EnsureNamespace")
-
-	_, err = cs.NetworkingV1().NetworkPolicies(ns).Get(ctx, "default-deny-all", metav1.GetOptions{})
-	require.NoError(t, err, "default-deny-all policy must exist after EnsureNamespace")
+	_, err := cs.NetworkingV1().NetworkPolicies(ns).Get(ctx, "default-deny-all", metav1.GetOptions{})
+	require.NoError(t, err, "default-deny-all policy must exist after reconciliation")
+	for _, action := range cs.Actions() {
+		assert.NotEqual(t, "namespaces", action.GetResource().Resource,
+			"runtime reconciliation must not access the cluster-scoped Namespace API")
+	}
 
 	// Second call — must be idempotent (no error on AlreadyExists).
-	require.NoError(t, c.EnsureNamespace(ctx, scope), "EnsureNamespace must be idempotent")
+	require.NoError(t, c.EnsureDefaultDenyPolicy(ctx, scope), "policy reconciliation must be idempotent")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -206,6 +208,103 @@ func TestWaitRunner_Timeout(t *testing.T) {
 	assert.Equal(t, corev1.PodPhase(""), phase)
 }
 
+func TestWaitRunner_PreexistingTerminalPodReturnsWithoutWatch(t *testing.T) {
+	ns := "runsecure-fast-runner"
+	podName := "rs-runner-fast"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns, ResourceVersion: "17"},
+		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+	}
+	cs := fake.NewSimpleClientset(pod)
+	watchCalled := false
+	cs.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		watchCalled = true
+		return true, nil, errors.New("watch must not be called")
+	})
+
+	phase, timedOut := NewClient(cs).WaitRunner(context.Background(), ns, podName, time.Second)
+	assert.Equal(t, corev1.PodSucceeded, phase)
+	assert.False(t, timedOut)
+	assert.False(t, watchCalled, "an already-terminal runner must be delivered from the initial Get")
+}
+
+func TestWaitRunner_WatchStartsAtObservedResourceVersion(t *testing.T) {
+	ns := "runsecure-resource-version"
+	podName := "rs-runner-resource-version"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns, ResourceVersion: "42"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cs := fake.NewSimpleClientset(pod)
+	fw := watch.NewRaceFreeFake()
+	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		watchAction, ok := action.(k8stesting.WatchAction)
+		require.True(t, ok)
+		assert.Equal(t, "42", watchAction.GetWatchRestrictions().ResourceVersion)
+		return true, fw, nil
+	})
+	go func() {
+		updated := pod.DeepCopy()
+		updated.Status.Phase = corev1.PodSucceeded
+		fw.Modify(updated)
+	}()
+
+	phase, timedOut := NewClient(cs).WaitRunner(context.Background(), ns, podName, time.Second)
+	assert.Equal(t, corev1.PodSucceeded, phase)
+	assert.False(t, timedOut)
+}
+
+func TestWaitRunner_InitialGetError(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("get unavailable")
+	})
+
+	phase, timedOut := NewClient(cs).WaitRunner(
+		context.Background(), "runsecure-get-error", "rs-runner-get-error", time.Second,
+	)
+	assert.Empty(t, phase)
+	assert.False(t, timedOut)
+}
+
+func TestWaitRunner_ParentCancellationIsNotTimeout(t *testing.T) {
+	ns := "runsecure-cancel"
+	podName := "rs-runner-cancel"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cs := fake.NewSimpleClientset(pod)
+	fw := watch.NewRaceFreeFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	cs.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		cancel()
+		return true, fw, nil
+	})
+
+	phase, timedOut := NewClient(cs).WaitRunner(ctx, ns, podName, time.Second)
+	assert.Empty(t, phase)
+	assert.False(t, timedOut, "parent cancellation must not be classified as a runner timeout")
+}
+
+func TestWaitDeadlineExpired_DistinguishesOwnDeadlineFromParentCancellation(t *testing.T) {
+	t.Run("bounded deadline", func(t *testing.T) {
+		bounded, cancel := context.WithTimeout(context.Background(), 0)
+		defer cancel()
+		<-bounded.Done()
+		assert.True(t, waitDeadlineExpired(context.Background(), bounded))
+	})
+
+	t.Run("parent cancellation", func(t *testing.T) {
+		parent, cancelParent := context.WithCancel(context.Background())
+		bounded, cancelBounded := context.WithTimeout(parent, time.Second)
+		cancelParent()
+		defer cancelBounded()
+		<-bounded.Done()
+		assert.False(t, waitDeadlineExpired(parent, bounded))
+	})
+}
+
 func TestWaitRunner_WatchChannelClosed(t *testing.T) {
 	// Exercise the relist path directly: when the watch channel closes, WaitRunner
 	// calls relist which does a single Get to return the current pod phase.
@@ -252,13 +351,21 @@ func TestWaitRunner_RelistMissingPod(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestDeleteSpawn(t *testing.T) {
-	ns := "runsecure-del-test"
+	scope := "del-test"
+	ns := Namespace(scope)
+	spawnID := "del1"
 	secretName := "rs-secret-del1"
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: ns,
+			Labels: map[string]string{
+				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
+				LabelSpawnID: spawnID,
+				LabelRole:    RoleProxy,
+			},
 		},
 	}
 
@@ -266,20 +373,201 @@ func TestDeleteSpawn(t *testing.T) {
 	c := NewClient(cs)
 	ctx := context.Background()
 
-	require.NoError(t, c.DeleteSpawn(ctx, ns, secretName))
+	require.NoError(t, c.DeleteSpawn(ctx, ns, secretName, spawnID, "owner_repo"))
 
 	_, err := cs.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
 	require.True(t, k8serrors.IsNotFound(err), "Secret must be deleted; got error: %v", err)
 }
 
+func TestDeleteSpawn_MissingSecretIsIdempotentSuccess(t *testing.T) {
+	c := NewClient(fake.NewSimpleClientset())
+	require.NoError(t, c.DeleteSpawn(
+		context.Background(), "runsecure-missing", "rs-secret-missing", "missing", "owner_repo",
+	))
+}
+
+func TestDeleteSpawn_RemovesOwnerlessPartialResources(t *testing.T) {
+	scope := "ownerless"
+	spawnID := "debt"
+	ns := Namespace(scope)
+	labelsFor := func(role string) map[string]string {
+		return map[string]string{
+			LabelScope: scope, LabelRepo: "owner_repo", LabelSpawnID: spawnID, LabelRole: role,
+		}
+	}
+	runner := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-runner-debt", Namespace: ns, Labels: labelsFor(RoleRunner),
+	}}
+	proxy := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-proxy-debt", Namespace: ns, Labels: labelsFor(RoleProxy),
+	}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-proxy-svc-debt", Namespace: ns, Labels: labelsFor(RoleProxy),
+	}}
+	policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-runner-egress-debt", Namespace: ns, Labels: labelsFor(RoleRunner),
+	}}
+	cs := fake.NewSimpleClientset(runner, proxy, service, policy)
+	c := NewClient(cs)
+
+	refs, err := c.ListSpawns(context.Background(), scope)
+	require.NoError(t, err)
+	require.Equal(t, []SpawnRef{{
+		SpawnID: spawnID, Namespace: ns,
+		RunnerPod: "rs-runner-debt", SecretName: "rs-secret-debt",
+		RepoLabel: "owner_repo",
+	}}, refs)
+	require.NoError(t, c.DeleteSpawn(
+		context.Background(), ns, "rs-secret-debt", spawnID, "owner_repo",
+	))
+
+	pods, err := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, pods.Items)
+	services, err := cs.CoreV1().Services(ns).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, services.Items)
+	policies, err := cs.NetworkingV1().NetworkPolicies(ns).List(
+		context.Background(), metav1.ListOptions{},
+	)
+	require.NoError(t, err)
+	require.Empty(t, policies.Items)
+}
+
+func TestDeleteSpawn_RejectsLabelSpoofedResource(t *testing.T) {
+	scope := "spoof"
+	spawnID := "debt"
+	ns := Namespace(scope)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "unrelated", Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_repo", LabelSpawnID: spawnID, LabelRole: RoleRunner,
+		},
+	}}
+	cs := fake.NewSimpleClientset(pod)
+
+	err := NewClient(cs).DeleteSpawn(
+		context.Background(), ns, "rs-secret-debt", spawnID, "owner_repo",
+	)
+	require.ErrorContains(t, err, "unexpected pod \"unrelated\"")
+	_, getErr := cs.CoreV1().Pods(ns).Get(context.Background(), "unrelated", metav1.GetOptions{})
+	require.NoError(t, getErr, "ambiguous resource must not be deleted")
+}
+
+func TestDeleteSpawn_RejectsMismatchedRepositoryLabel(t *testing.T) {
+	scope := "repo-mismatch"
+	spawnID := "debt"
+	ns := Namespace(scope)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-runner-debt", Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "other_repo",
+			LabelSpawnID: spawnID, LabelRole: RoleRunner,
+		},
+	}}
+	cs := fake.NewSimpleClientset(pod)
+
+	err := NewClient(cs).DeleteSpawn(
+		context.Background(), ns, "rs-secret-debt", spawnID, "owner_repo",
+	)
+	require.ErrorContains(t, err, "repository label \"other_repo\", want \"owner_repo\"")
+	_, getErr := cs.CoreV1().Pods(ns).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, getErr, "cross-repository resource must not be deleted")
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
+// DeleteSpawn confirmation failures
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestDeleteSpawn_ConfirmationReadErrorIsPropagated(t *testing.T) {
+	scope := "confirm-error"
+	ns := Namespace(scope)
+	spawnID := "confirm-error"
+	secretName := "rs-secret-confirm-error"
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: secretName, Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_repo", LabelSpawnID: spawnID, LabelRole: RoleProxy,
+		},
+	}}
+	cs := fake.NewSimpleClientset(secret)
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		// Simulate an API server that accepted foreground deletion while the
+		// object remains visible until its dependents have been removed.
+		return true, nil, nil
+	})
+	confirmErr := errors.New("injected confirmation read failure")
+	listCount := 0
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		listCount++
+		if listCount > 1 {
+			return true, nil, confirmErr
+		}
+		return false, nil, nil
+	})
+
+	err := NewClient(cs).DeleteSpawn(
+		context.Background(), ns, secretName, spawnID, "owner_repo",
+	)
+	require.ErrorIs(t, err, confirmErr)
+	require.ErrorContains(t, err, "confirm spawn \"confirm-error\" deletion")
+}
+
+func TestDeleteSpawn_ContextCancellationStopsConfirmation(t *testing.T) {
+	scope := "confirm-cancel"
+	ns := Namespace(scope)
+	spawnID := "confirm-cancel"
+	secretName := "rs-secret-confirm-cancel"
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: secretName, Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_repo", LabelSpawnID: spawnID, LabelRole: RoleProxy,
+		},
+	}}
+	cs := fake.NewSimpleClientset(secret)
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		// Keep the Secret present so DeleteSpawn must wait for foreground
+		// deletion rather than treating API acceptance as cleanup completion.
+		return true, nil, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewClient(cs).DeleteSpawn(ctx, ns, secretName, spawnID, "owner_repo")
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "confirm spawn \"confirm-cancel\" deletion")
+}
+
 // ListSpawns
-// ──────────────────────────────────────────────────────────────────────────────
 
 func TestListSpawns(t *testing.T) {
 	scope := "myscope"
 	ns := Namespace(scope)
 	secretUID := types.UID("fake-uid-1")
+	spawnSecret1 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rs-secret-spawn1",
+			Namespace: ns,
+			Labels: map[string]string{
+				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
+				LabelRole:    RoleProxy,
+				LabelSpawnID: "spawn1",
+			},
+		},
+	}
+	spawnSecret2 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rs-secret-spawn2",
+			Namespace: ns,
+			Labels: map[string]string{
+				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
+				LabelRole:    RoleProxy,
+				LabelSpawnID: "spawn2",
+			},
+		},
+	}
 
 	// Two runner pods with an OwnerReference to a Secret.
 	runnerPod1 := &corev1.Pod{
@@ -288,6 +576,7 @@ func TestListSpawns(t *testing.T) {
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
 				LabelRole:    RoleRunner,
 				LabelSpawnID: "spawn1",
 			},
@@ -308,6 +597,7 @@ func TestListSpawns(t *testing.T) {
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
 				LabelRole:    RoleRunner,
 				LabelSpawnID: "spawn2",
 			},
@@ -329,19 +619,21 @@ func TestListSpawns(t *testing.T) {
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
 				LabelRole:    RoleProxy,
 				LabelSpawnID: "spawn1",
 			},
 		},
 	}
 
-	cs := fake.NewSimpleClientset(runnerPod1, runnerPod2, proxyPod)
+	cs := fake.NewSimpleClientset(spawnSecret2, runnerPod1, proxyPod, spawnSecret1, runnerPod2)
 	c := NewClient(cs)
 	ctx := context.Background()
 
 	refs, err := c.ListSpawns(ctx, scope)
 	require.NoError(t, err)
-	require.Len(t, refs, 2, "ListSpawns must return exactly 2 runner pods")
+	require.Len(t, refs, 2, "ListSpawns must merge each owning Secret with its runner pod")
+	assert.Equal(t, []string{"spawn1", "spawn2"}, []string{refs[0].SpawnID, refs[1].SpawnID})
 
 	// Build a map for order-independent assertions.
 	byID := make(map[string]SpawnRef, len(refs))
@@ -361,34 +653,52 @@ func TestListSpawns(t *testing.T) {
 	assert.Equal(t, "rs-secret-spawn2", ref2.SecretName)
 }
 
+func TestListSpawns_SecretOnlyPartialSpawn(t *testing.T) {
+	scope := "partial-scope"
+	ns := Namespace(scope)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "rs-secret-partial",
+		Namespace: ns,
+		Labels: map[string]string{
+			LabelScope:   scope,
+			LabelRepo:    "owner_repo",
+			LabelRole:    RoleProxy,
+			LabelSpawnID: "partial",
+		},
+	}}
+	unrelated := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "orchestrator-auth",
+		Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope,
+		},
+	}}
+
+	refs, err := NewClient(fake.NewSimpleClientset(secret, unrelated)).ListSpawns(context.Background(), scope)
+	require.NoError(t, err)
+	require.Equal(t, []SpawnRef{{
+		SpawnID:    "partial",
+		Namespace:  ns,
+		RunnerPod:  "rs-runner-partial",
+		SecretName: "rs-secret-partial",
+		RepoLabel:  "owner_repo",
+	}}, refs)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Error-path tests (for coverage of branches that return errors)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestEnsureNamespace_NSCreateError verifies that a non-AlreadyExists error from
-// namespace creation is propagated.
-func TestEnsureNamespace_NSCreateError(t *testing.T) {
-	cs := fake.NewSimpleClientset()
-	injected := errors.New("injected ns create error")
-	cs.PrependReactor("create", "namespaces", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, injected
-	})
-	c := NewClient(cs)
-	err := c.EnsureNamespace(context.Background(), "err-scope")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "create namespace")
-}
-
-// TestEnsureNamespace_PolicyCreateError verifies that a non-AlreadyExists error
+// TestEnsureDefaultDenyPolicy_CreateError verifies that a non-AlreadyExists error
 // from NetworkPolicy creation is propagated.
-func TestEnsureNamespace_PolicyCreateError(t *testing.T) {
+func TestEnsureDefaultDenyPolicy_CreateError(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	injected := errors.New("injected policy create error")
 	cs.PrependReactor("create", "networkpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, injected
 	})
 	c := NewClient(cs)
-	err := c.EnsureNamespace(context.Background(), "err-scope2")
+	err := c.EnsureDefaultDenyPolicy(context.Background(), "err-scope2")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create default-deny policy")
 }
@@ -520,15 +830,24 @@ func TestApplySpawn_RunnerPodCreateError(t *testing.T) {
 
 // TestDeleteSpawn_Error verifies that a delete error is propagated.
 func TestDeleteSpawn_Error(t *testing.T) {
-	cs := fake.NewSimpleClientset()
+	scope := "del-err"
+	spawnID := "del-err"
+	ns := Namespace(scope)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-secret-del-err", Namespace: ns,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_repo", LabelSpawnID: spawnID, LabelRole: RoleProxy,
+		},
+	}}
+	cs := fake.NewSimpleClientset(secret)
 	injected := errors.New("injected delete error")
 	cs.PrependReactor("delete", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, injected
 	})
 	c := NewClient(cs)
-	err := c.DeleteSpawn(context.Background(), "runsecure-del-err", "rs-secret-del-err")
+	err := c.DeleteSpawn(context.Background(), ns, "rs-secret-del-err", spawnID, "owner_repo")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "delete secret")
+	assert.Contains(t, err.Error(), "delete spawn secret")
 }
 
 // TestListSpawns_Error verifies that a list error is propagated.
@@ -541,7 +860,93 @@ func TestListSpawns_Error(t *testing.T) {
 	c := NewClient(cs)
 	_, err := c.ListSpawns(context.Background(), "err-scope")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "list runner pods")
+	assert.Contains(t, err.Error(), "list spawn pods")
+}
+
+func TestListSpawns_SecretListError(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	injected := errors.New("injected secret list error")
+	cs.PrependReactor("list", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, injected
+	})
+
+	_, err := NewClient(cs).ListSpawns(context.Background(), "err-scope")
+	require.ErrorIs(t, err, injected)
+	require.ErrorContains(t, err, "list spawn secrets")
+}
+
+func TestListSpawns_RejectsMalformedOrAmbiguousResources(t *testing.T) {
+	scope := "invalid-scope"
+	ns := Namespace(scope)
+	spawnLabels := func(spawnID, role string) map[string]string {
+		return map[string]string{
+			LabelScope:   scope,
+			LabelRepo:    "owner_repo",
+			LabelRole:    role,
+			LabelSpawnID: spawnID,
+		}
+	}
+	secret := func(name, spawnID string) *corev1.Secret {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Labels: spawnLabels(spawnID, RoleProxy),
+		}}
+	}
+	pod := func(name, spawnID string, owners ...metav1.OwnerReference) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Labels: spawnLabels(spawnID, RoleRunner), OwnerReferences: owners,
+		}}
+	}
+	secretOwner := func(name string) metav1.OwnerReference {
+		return metav1.OwnerReference{APIVersion: "v1", Kind: "Secret", Name: name}
+	}
+
+	tests := []struct {
+		name    string
+		objects []runtime.Object
+		want    string
+	}{
+		{
+			name:    "empty secret spawn ID",
+			objects: []runtime.Object{secret("rs-secret-empty", "")},
+			want:    "has empty runsecure.io/spawn-id",
+		},
+		{
+			name: "noncanonical secret name",
+			objects: []runtime.Object{
+				secret("rs-secret-one", "duplicate"),
+				secret("rs-secret-two", "duplicate"),
+			},
+			want: "unexpected secret \"rs-secret-one\"",
+		},
+		{
+			name:    "empty runner pod spawn ID",
+			objects: []runtime.Object{pod("rs-runner-empty", "")},
+			want:    "has empty runsecure.io/spawn-id",
+		},
+		{
+			name: "noncanonical runner pod name",
+			objects: []runtime.Object{
+				pod("rs-runner-one", "duplicate"),
+				pod("rs-runner-two", "duplicate"),
+			},
+			want: "unexpected pod \"rs-runner-one\"",
+		},
+		{
+			name: "conflicting owner Secret",
+			objects: []runtime.Object{
+				secret("rs-secret-conflict", "conflict"),
+				pod("rs-runner-conflict", "conflict", secretOwner("rs-secret-other")),
+			},
+			want: "has unexpected owner Secret \"rs-secret-other\"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(fake.NewSimpleClientset(tt.objects...)).ListSpawns(context.Background(), scope)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
 }
 
 // TestListSpawns_FallbackSecretName exercises the path where a pod has no
@@ -556,6 +961,7 @@ func TestListSpawns_FallbackSecretName(t *testing.T) {
 			Namespace: ns,
 			Labels: map[string]string{
 				LabelScope:   scope,
+				LabelRepo:    "owner_repo",
 				LabelRole:    RoleRunner,
 				LabelSpawnID: "fb1",
 			},
@@ -681,12 +1087,15 @@ func TestWaitRunner_WatchError(t *testing.T) {
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
-		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	cs := fake.NewSimpleClientset(pod)
 	injected := errors.New("watch unavailable")
 	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		updated := pod.DeepCopy()
+		updated.Status.Phase = corev1.PodSucceeded
+		require.NoError(t, cs.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), updated, ns))
 		return true, nil, injected
 	})
 
@@ -706,19 +1115,21 @@ func TestWaitRunner_WatchChannelClosedViaFakeWatch(t *testing.T) {
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
-		Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
 	cs := fake.NewSimpleClientset(pod)
 
-	// Inject a RaceFreeFakeWatcher whose channel we close immediately.
+	// Transition the stored Pod before closing the watch. The relist must
+	// deliver that terminal phase rather than waiting until timeout.
 	fw := watch.NewRaceFreeFake()
 	cs.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		updated := pod.DeepCopy()
+		updated.Status.Phase = corev1.PodFailed
+		require.NoError(t, cs.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), updated, ns))
+		fw.Stop()
 		return true, fw, nil
 	})
-
-	// Close the channel before WaitRunner has a chance to consume any events.
-	fw.Stop()
 
 	c := NewClient(cs)
 	phase, timedOut := c.WaitRunner(context.Background(), ns, podName, 5*time.Second)
@@ -763,4 +1174,230 @@ func TestWaitRunner_NonPodEventIgnored(t *testing.T) {
 	phase, timedOut := c.WaitRunner(context.Background(), ns, podName, 5*time.Second)
 	assert.False(t, timedOut)
 	assert.Equal(t, corev1.PodSucceeded, phase)
+}
+
+func TestDeleteSpawn_RejectsInvalidIdentityBeforeAPIAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		namespace  string
+		secretName string
+		spawnID    string
+		repoLabel  string
+		want       string
+	}{
+		{
+			name:       "namespace outside RunSecure scope",
+			namespace:  "default",
+			secretName: "rs-secret-spawn",
+			spawnID:    "spawn",
+			repoLabel:  "owner_repo",
+			want:       "invalid spawn namespace",
+		},
+		{
+			name:       "empty spawn ID",
+			namespace:  "runsecure-scope",
+			secretName: "rs-secret-spawn",
+			repoLabel:  "owner_repo",
+			want:       "empty spawn ID",
+		},
+		{
+			name:       "empty repository label",
+			namespace:  "runsecure-scope",
+			secretName: "rs-secret-spawn",
+			spawnID:    "spawn",
+			want:       "empty repository label",
+		},
+		{
+			name:       "mismatched owning secret",
+			namespace:  "runsecure-scope",
+			secretName: "rs-secret-other",
+			spawnID:    "spawn",
+			repoLabel:  "owner_repo",
+			want:       "does not match spawn",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			apiCalled := false
+			cs.PrependReactor("*", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+				apiCalled = true
+				return false, nil, nil
+			})
+
+			err := NewClient(cs).DeleteSpawn(
+				context.Background(), tt.namespace, tt.secretName, tt.spawnID, tt.repoLabel,
+			)
+
+			require.ErrorContains(t, err, tt.want)
+			require.False(t, apiCalled, "invalid identity must be rejected before any API request")
+		})
+	}
+}
+
+func TestDeleteSpawn_PropagatesEveryResourceDiscoveryFailure(t *testing.T) {
+	for _, resource := range []string{"services", "networkpolicies", "secrets"} {
+		t.Run(resource, func(t *testing.T) {
+			injected := errors.New("injected " + resource + " list error")
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, injected
+			})
+
+			err := NewClient(cs).DeleteSpawn(
+				context.Background(),
+				"runsecure-discovery",
+				"rs-secret-spawn",
+				"spawn",
+				"owner_repo",
+			)
+
+			require.ErrorIs(t, err, injected)
+			require.ErrorContains(t, err, "list spawn")
+		})
+	}
+}
+
+func TestDeleteSpawn_ValidatesEveryDiscoveredResourceKind(t *testing.T) {
+	const (
+		scope     = "discovered"
+		namespace = "runsecure-discovered"
+		spawnID   = "spawn"
+	)
+	labels := map[string]string{
+		LabelScope:   scope,
+		LabelRepo:    "owner_repo",
+		LabelRole:    RoleRunner,
+		LabelSpawnID: spawnID,
+	}
+	tests := []struct {
+		name   string
+		object runtime.Object
+		want   string
+	}{
+		{
+			name: "service",
+			object: &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+				Name: "rs-proxy-svc-spawn", Namespace: namespace, Labels: labels,
+			}},
+			want: "unexpected service",
+		},
+		{
+			name: "network policy",
+			object: &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+				Name: "rs-proxy-egress-spawn", Namespace: namespace, Labels: labels,
+			}},
+			want: "unexpected networkpolicy",
+		},
+		{
+			name: "secret",
+			object: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name: "rs-secret-spawn", Namespace: namespace, Labels: labels,
+			}},
+			want: "unexpected secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := NewClient(fake.NewSimpleClientset(tt.object)).DeleteSpawn(
+				context.Background(), namespace, "rs-secret-spawn", spawnID, "owner_repo",
+			)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestDeleteSpawn_RejectsUnsupportedResourceKind(t *testing.T) {
+	err := NewClient(fake.NewSimpleClientset()).deleteSpawnResource(
+		context.Background(), "runsecure-scope", spawnResource{kind: "configmap", name: "foreign"},
+	)
+	require.ErrorContains(t, err, "unsupported spawn resource kind")
+}
+
+func TestListSpawns_PropagatesServiceAndPolicyFailures(t *testing.T) {
+	for _, resource := range []string{"services", "networkpolicies"} {
+		t.Run(resource, func(t *testing.T) {
+			injected := errors.New("injected " + resource + " list error")
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, injected
+			})
+
+			_, err := NewClient(cs).ListSpawns(context.Background(), "list-errors")
+
+			require.ErrorIs(t, err, injected)
+			require.ErrorContains(t, err, "list spawn")
+		})
+	}
+}
+
+func TestListSpawns_ValidatesServiceAndPolicyIdentity(t *testing.T) {
+	const (
+		scope     = "list-invalid"
+		namespace = "runsecure-list-invalid"
+		spawnID   = "spawn"
+	)
+	labels := map[string]string{
+		LabelScope:   scope,
+		LabelRepo:    "owner_repo",
+		LabelRole:    RoleRunner,
+		LabelSpawnID: spawnID,
+	}
+	tests := []struct {
+		name   string
+		object runtime.Object
+		want   string
+	}{
+		{
+			name: "service",
+			object: &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+				Name: "rs-proxy-svc-spawn", Namespace: namespace, Labels: labels,
+			}},
+			want: "unexpected service",
+		},
+		{
+			name: "network policy",
+			object: &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+				Name: "rs-proxy-egress-spawn", Namespace: namespace, Labels: labels,
+			}},
+			want: "unexpected networkpolicy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(fake.NewSimpleClientset(tt.object)).ListSpawns(
+				context.Background(), scope,
+			)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestListSpawns_RejectsConflictingRepositoryLabels(t *testing.T) {
+	const (
+		scope     = "conflicting-repo"
+		namespace = "runsecure-conflicting-repo"
+		spawnID   = "spawn"
+	)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-secret-spawn", Namespace: namespace,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_one", LabelRole: RoleProxy, LabelSpawnID: spawnID,
+		},
+	}}
+	runner := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-runner-spawn", Namespace: namespace,
+		Labels: map[string]string{
+			LabelScope: scope, LabelRepo: "owner_two", LabelRole: RoleRunner, LabelSpawnID: spawnID,
+		},
+	}}
+
+	_, err := NewClient(fake.NewSimpleClientset(secret, runner)).ListSpawns(
+		context.Background(), scope,
+	)
+
+	require.ErrorContains(t, err, "conflicting resources for spawn ID")
 }

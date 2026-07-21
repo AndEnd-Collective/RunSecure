@@ -3,6 +3,8 @@ package compose
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -29,11 +32,15 @@ type fakeDocker struct {
 	started []string
 
 	// Network state.
-	networkID       string
-	networksDeleted []string
+	networkID        string
+	networkRequest   docker.CreateNetworkRequest
+	networksDeleted  []string
+	deleteNetworkErr error
 
 	// DeleteContainer records.
-	containersDeleted []string
+	containersDeleted   []string
+	containerForces     map[string]bool
+	deleteContainerErrs map[string]error
 
 	// InspectContainer behaviour: first call returns inspectFirst, subsequent
 	// calls return inspectRest. If inspectErr is set every call returns it.
@@ -49,14 +56,17 @@ type fakeDocker struct {
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{
-		created:   map[string]docker.CreateContainerRequest{},
-		networkID: "net-fake-id",
+		created:             map[string]docker.CreateContainerRequest{},
+		containerForces:     map[string]bool{},
+		deleteContainerErrs: map[string]error{},
+		networkID:           "net-fake-id",
 	}
 }
 
 func (f *fakeDocker) CreateNetwork(_ context.Context, r docker.CreateNetworkRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.networkRequest = r
 	return f.networkID, nil
 }
 
@@ -64,7 +74,7 @@ func (f *fakeDocker) DeleteNetwork(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.networksDeleted = append(f.networksDeleted, id)
-	return nil
+	return f.deleteNetworkErr
 }
 
 func (f *fakeDocker) CreateContainer(_ context.Context, r docker.CreateContainerRequest) (string, error) {
@@ -101,11 +111,12 @@ func (f *fakeDocker) InspectContainer(_ context.Context, id string) (docker.Insp
 	return f.inspectRest, nil
 }
 
-func (f *fakeDocker) DeleteContainer(_ context.Context, id string, _ bool) error {
+func (f *fakeDocker) DeleteContainer(_ context.Context, id string, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.containersDeleted = append(f.containersDeleted, id)
-	return nil
+	f.containerForces[id] = force
+	return f.deleteContainerErrs[id]
 }
 
 func (f *fakeDocker) ListContainersForScope(_ context.Context, _ string) ([]docker.Container, error) {
@@ -124,13 +135,14 @@ func (f *fakeDocker) ListNetworksForScope(_ context.Context, _ string) ([]docker
 
 func minimalInput() backend.SpawnInput {
 	return backend.SpawnInput{
-		Scope:         "myscope",
-		Repo:          "owner/repo",
-		SpawnID:       "sp1",
-		RunnerImage:   "runner@sha256:r",
-		ProxyImage:    "proxy@sha256:p",
-		EgressNetwork: "myscope-spawn-egress",
-		EgressVolume:  "myscope-egress-configs",
+		Scope:           "myscope",
+		Repo:            "owner/repo",
+		SpawnID:         "sp1",
+		RunnerImage:     "runner@sha256:r",
+		ProxyImage:      "proxy@sha256:p",
+		EgressNetwork:   "myscope-spawn-egress",
+		EgressVolume:    "myscope-egress-configs",
+		EgressConfigDir: "/var/run/runsecure/egress/sp1",
 	}
 }
 
@@ -168,10 +180,23 @@ func TestSpawn_HappyPath(t *testing.T) {
 	if h.Refs["network"] != fd.networkID {
 		t.Errorf("Handle.Refs['network'] = %q, want %q", h.Refs["network"], fd.networkID)
 	}
+	if h.Refs["egress_config_dir"] != "/var/run/runsecure/egress/sp1" {
+		t.Errorf("Handle.Refs['egress_config_dir'] = %q, want exact spawn input path", h.Refs["egress_config_dir"])
+	}
 	// Parity: the network NAME (not the opaque ID) must be surfaced for the
 	// runner_created event. Regression guard for the backend refactor.
 	if name := h.Refs["network_name"]; !strings.HasPrefix(name, "rs-net-") {
 		t.Errorf("Handle.Refs['network_name'] = %q, want an 'rs-net-' name", name)
+	}
+	wantLabels := map[string]string{
+		"runsecure.scope":    "myscope",
+		"runsecure.repo":     "owner/repo",
+		"runsecure.spawn_id": "sp1",
+	}
+	for key, want := range wantLabels {
+		if got := fd.networkRequest.Labels[key]; got != want {
+			t.Errorf("network label %q = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -247,6 +272,28 @@ func TestSpawn_RollsBackNetworkOnSpawnError(t *testing.T) {
 	if !found {
 		t.Errorf("network %q was not deleted after spawn failure; deleted: %v", fd.networkID, deleted)
 	}
+}
+
+func TestSpawn_RollbackFailureReturnsExactTeardownHandle(t *testing.T) {
+	fd := newFakeDocker()
+	fd.errOnRole = "runner"
+	fd.deleteContainerErrs["cid-proxy"] = errors.New("proxy delete conflict")
+	fd.deleteNetworkErr = errors.New("network still has endpoint")
+	b := New(fd)
+
+	h, err := b.Spawn(context.Background(), minimalInput())
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "container rollback incomplete")
+	require.Contains(t, err.Error(), "rollback network")
+	require.Equal(t, "compose", h.Backend)
+	require.Equal(t, "cid-proxy", h.Refs["proxy"])
+	require.Equal(t, fd.networkID, h.Refs["network"])
+
+	fd.deleteContainerErrs["cid-proxy"] = nil
+	fd.deleteNetworkErr = nil
+	require.NoError(t, b.Teardown(context.Background(), h, true),
+		"returned handle must support an exact idempotent cleanup retry")
 }
 
 // TestSpawn_RollsBackNetworkOnNetworkCreateError is a sanity check: if
@@ -451,6 +498,96 @@ func TestTeardown_DeletesContainersAndNetwork(t *testing.T) {
 	if !foundNet {
 		t.Errorf("network 'net-id' was not deleted; networks deleted: %v", deletedNets)
 	}
+}
+
+// TestTeardown_AlwaysForcesProxy verifies the proxy sidecar is force-removed
+// after a normal runner exit. A non-forced delete of the still-running proxy
+// returns Docker 409 and was the cause of leaked proxies and networks in live
+// multi-runner shutdowns.
+func TestTeardown_AlwaysForcesProxy(t *testing.T) {
+	fd := newFakeDocker()
+	b := New(fd)
+	h := backend.Handle{
+		SpawnID: "sp1",
+		Backend: "compose",
+		Refs: map[string]string{
+			"runner":       "cid-runner",
+			"proxy":        "cid-proxy",
+			"network":      "net-id",
+			"network_name": "rs-net-owner_repo-sp1",
+		},
+	}
+
+	require.NoError(t, b.Teardown(context.Background(), h, false))
+
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	require.False(t, fd.containerForces["cid-runner"])
+	require.True(t, fd.containerForces["cid-proxy"])
+	require.NotContains(t, fd.containersDeleted, "rs-net-owner_repo-sp1",
+		"network_name is handle metadata, not a container reference")
+}
+
+// TestTeardown_AttemptsEveryPhaseAndReturnsErrors verifies cleanup fails
+// closed without letting one failed deletion suppress later cleanup attempts.
+func TestTeardown_AttemptsEveryPhaseAndReturnsErrors(t *testing.T) {
+	fd := newFakeDocker()
+	fd.deleteContainerErrs["cid-runner"] = errors.New("runner delete failed")
+	fd.deleteContainerErrs["cid-proxy"] = errors.New("proxy delete failed")
+	fd.deleteNetworkErr = errors.New("network delete failed")
+	b := New(fd)
+	h := backend.Handle{
+		SpawnID: "sp1",
+		Backend: "compose",
+		Refs: map[string]string{
+			"runner":  "cid-runner",
+			"proxy":   "cid-proxy",
+			"network": "net-id",
+		},
+	}
+
+	err := b.Teardown(context.Background(), h, false)
+	require.ErrorContains(t, err, "runner delete failed")
+	require.ErrorContains(t, err, "proxy delete failed")
+	require.ErrorContains(t, err, "network delete failed")
+
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	require.ElementsMatch(t, []string{"cid-runner", "cid-proxy"}, fd.containersDeleted)
+	require.Contains(t, fd.networksDeleted, "net-id")
+}
+
+func TestTeardown_ReturnsEgressConfigRemovalError(t *testing.T) {
+	originalMountPath := egressMountPath
+	notDirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(notDirectory, []byte("fixture"), 0o600))
+	egressMountPath = notDirectory
+	t.Cleanup(func() { egressMountPath = originalMountPath })
+
+	err := New(newFakeDocker()).Teardown(context.Background(), backend.Handle{
+		SpawnID: "cleanup-child",
+		Backend: "compose",
+		Refs:    map[string]string{},
+	}, false)
+
+	require.ErrorContains(t, err, "remove egress config")
+	require.ErrorContains(t, err, "not-a-directory/cleanup-child")
+}
+
+func TestTeardown_RemovesExactEgressConfigDirFromHandle(t *testing.T) {
+	egressDir := filepath.Join(t.TempDir(), "custom-base", "sp1")
+	require.NoError(t, os.MkdirAll(egressDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "squid.conf"), []byte("fixture"), 0o600))
+
+	err := New(newFakeDocker()).Teardown(context.Background(), backend.Handle{
+		SpawnID: "sp1",
+		Backend: "compose",
+		Refs:    map[string]string{"egress_config_dir": egressDir},
+	}, false)
+
+	require.NoError(t, err)
+	_, statErr := os.Stat(egressDir)
+	require.True(t, os.IsNotExist(statErr))
 }
 
 // TestTeardown_NetworkKeyNotTreatedAsContainer verifies that the "network"

@@ -27,9 +27,8 @@ func run() error {
 		return err
 	}
 	// LoadWithExtra merges the baked allowlist with an optional operator-supplied
-	// file (RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE). The extra file solves the
-	// release bootstrap problem: newly-published image digests can't be baked
-	// into the socket-proxy image before that image exists (#54 fix 3).
+	// custom-image file (RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE). Matching release
+	// proxy and runner digests are already present in the baked allowlist.
 	allow, err := imageallow.LoadWithExtra(cfg.AllowedImagesFile, cfg.AllowedImagesExtraFile)
 	if err != nil {
 		return err

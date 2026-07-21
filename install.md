@@ -7,6 +7,9 @@ coexisting with `infra/scripts/run.sh` and
 `infra/scripts/dev/bootstrap-self-runner.sh`, which remain first-class
 one-shot paths.
 
+The commands below require Docker with Compose v2, Python 3, `jq`, and an
+authenticated GitHub CLI (`gh`).
+
 For the design rationale, see
 `docs/superpowers/specs/2026-05-19-persistent-local-runners-design.md`
 (local-only; not committed).
@@ -102,13 +105,16 @@ domains as needed.
 
 ## 5. Create the scope config
 
-Copy the template:
+Keep the rendered scope outside the RunSecure checkout so repository cleanup,
+branch switches, and fresh clones cannot remove operator state:
 
 ```sh
-cp infra/orchestrator/scopes/example.yml infra/orchestrator/scopes/datacentric.yml
+mkdir -p "$HOME/.config/runsecure"
+cp infra/orchestrator/scopes/example.yml \
+  "$HOME/.config/runsecure/datacentric.scope.yml"
 ```
 
-Edit `infra/orchestrator/scopes/datacentric.yml`:
+Edit `$HOME/.config/runsecure/datacentric.scope.yml`:
 
 ```yaml
 apiVersion: runsecure.io/v1alpha1
@@ -131,28 +137,54 @@ repos:
     max_concurrent: 3
 ```
 
-Create a `.env` file (gitignored — see `infra/orchestrator/scopes/*` in
-`.gitignore`) that points the compose stack at your local images, PAT, and
-project workspace:
+Download the durable image manifest from one promoted release and resolve every
+Compose image from its immutable manifest digest. The socket-proxy from that
+same release contains the matching proxy and runner digest allowlist; mixing
+releases fails closed with `socket_proxy_denied`.
 
 ```sh
-cat > infra/orchestrator/scopes/datacentric.env <<EOF
+RUNSECURE_RELEASE=2.1.8
+RUNSECURE_RELEASE_MANIFEST="$HOME/.config/runsecure/runsecure-v${RUNSECURE_RELEASE}-release-images.json"
+gh release download "v${RUNSECURE_RELEASE}" \
+  --repo AndEnd-Collective/RunSecure \
+  --pattern "runsecure-v${RUNSECURE_RELEASE}-release-images.json" \
+  --dir "$HOME/.config/runsecure" \
+  --clobber
+python3 infra/scripts/verify-release-manifest.py \
+  "$RUNSECURE_RELEASE_MANIFEST" --expected-release "$RUNSECURE_RELEASE"
+
+SOCKET_PROXY_REF=$(jq -er '.images["socket-proxy"]' "$RUNSECURE_RELEASE_MANIFEST")
+ORCHESTRATOR_REF=$(jq -er '.images["orchestrator"]' "$RUNSECURE_RELEASE_MANIFEST")
+PROXY_REF=$(jq -er '.images["proxy"]' "$RUNSECURE_RELEASE_MANIFEST")
+RUNNER_REF=$(jq -er '.images["node-24"]' "$RUNSECURE_RELEASE_MANIFEST")
+```
+
+Create an external `.env` file that points the Compose stack at those exact
+refs, the scope, PAT file, and project workspace. It contains paths and image
+digests, never the PAT value itself:
+
+```sh
+cat > "$HOME/.config/runsecure/datacentric.env" <<EOF
 RUNSECURE_SCOPE=datacentric
-RUNSECURE_SOCKET_PROXY_IMAGE=runsecure-socket-proxy:local
-RUNSECURE_ORCHESTRATOR_IMAGE=runsecure-orchestrator:local
-RUNSECURE_PROXY_IMAGE=ghcr.io/andend-collective/runsecure/proxy:latest
-RUNSECURE_RUNNER_IMAGE_DEFAULT=ghcr.io/andend-collective/runsecure/runner-node:24
+RUNSECURE_SCOPE_FILE_HOST=$HOME/.config/runsecure/datacentric.scope.yml
+RUNSECURE_SOCKET_PROXY_IMAGE=$SOCKET_PROXY_REF
+RUNSECURE_ORCHESTRATOR_IMAGE=$ORCHESTRATOR_REF
+RUNSECURE_PROXY_IMAGE=$PROXY_REF
+RUNSECURE_RUNNER_IMAGE_DEFAULT=$RUNNER_REF
 RUNSECURE_PAT_FILE=$HOME/.config/runsecure/datacentric.pat
 RUNSECURE_PROJECTS_ROOT=$HOME/Code/Naor
+# Optional host ports; use distinct values for concurrent scope stacks.
+RUNSECURE_ORCHESTRATOR_HEALTH_PORT=8080
+RUNSECURE_ORCHESTRATOR_STATE_PORT=8081
 EOF
 ```
 
 `RUNSECURE_PROJECTS_ROOT` is the *parent* directory holding every repo
 checkout this scope will serve — `compose.scope.yml` mounts it once,
-read-only, at `/projects` inside the orchestrator container (the mount
-defaults to a harmless `/dev/null` when the variable is unset, so nothing
-breaks if you don't set it). Each repo's `project_dir` in the scope YAML
-must then point at the matching subdirectory, e.g. a checkout at
+read-only, at `/projects` inside the orchestrator container. Both it and
+`RUNSECURE_SCOPE_FILE_HOST` are required; Compose fails during configuration
+if either is absent. Each repo's `project_dir` in the scope YAML must then
+point at the matching subdirectory, e.g. a checkout at
 `$RUNSECURE_PROJECTS_ROOT/datacentric` is `project_dir: /projects/datacentric`.
 
 This means `infra/orchestrator/compose.scope.yml` never needs hand-editing
@@ -176,10 +208,10 @@ and it works on both backends with no code changes — the orchestrator
 applies the identical hardening to whatever image you name. Two requirements:
 
 1. **Allowlist it.** The socket-proxy only lets the daemon create containers
-   from digests in its allowlist. Add your image's `@sha256:…` digest to
-   `infra/socket-proxy/allowed-images.txt` (rebuild the socket-proxy image),
-   or use the `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` stopgap (see
-   Troubleshooting).
+   from digests in its allowlist. Released RunSecure images are baked into the
+   same release's socket-proxy from immutable build outputs. For a custom
+   image, point `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` at a local file
+   containing its `@sha256:…` reference (see Troubleshooting).
 2. **Satisfy the runner-image contract.** Your image MUST ship:
    - the GitHub Actions runner at `/home/runner/actions-runner`, and
    - RunSecure's JIT launcher at `/home/runner/entrypoint.sh`
@@ -188,9 +220,11 @@ applies the identical hardening to whatever image you name. Two requirements:
 
    **Easiest path — don't hand-roll an image.** Add your extra tools via the
    project's `runner.yml` `tools:` block instead. `compose-image.sh` layers
-   them onto a RunSecure base image *before* finalize-hardening, so the
-   result inherits the runner binary, the baked entrypoint, and every
-   hardening property automatically. Only reach for a fully custom image ref
+   them onto the exact release builder digest recorded by the terminal image,
+   using recipes and finalizer bytes embedded in that release. The result
+   inherits the runner binary, baked entrypoint, and every hardening property
+   automatically; a missing or mismatched digest fails closed. Only reach for
+   a fully custom image ref
    when the `tools:` block genuinely can't express what you need — and if you
    do, the cleanest way to meet the contract is to build `FROM` your own base
    and `COPY infra/scripts/entrypoint.sh /home/runner/entrypoint.sh` yourself.
@@ -199,23 +233,31 @@ applies the identical hardening to whatever image you name. Two requirements:
 
 ## 6. Bring up the stack
 
-Build local images (or pull from GHCR when published):
+Pull the exact same-release refs resolved above. Compose also pulls them on
+demand; doing it explicitly makes registry or architecture failures visible
+before the stack starts:
 
 ```sh
-docker build -t runsecure-socket-proxy:local infra/socket-proxy
-docker build -t runsecure-orchestrator:local  infra/orchestrator
+docker pull "$SOCKET_PROXY_REF"
+docker pull "$ORCHESTRATOR_REF"
+docker pull "$PROXY_REF"
+docker pull "$RUNNER_REF"
 ```
 
-Launch the scope:
+Launch the scope through the tracked wrapper. It resolves Compose's exact PAT
+bind source, checks it on the host with `os.lstat`, and requires a regular,
+non-symlink file owned by the invoking UID with mode exactly `0400`. The
+Compose file requires the wrapper's validation sentinel, so an accidental raw
+`docker compose up` fails closed before creating services.
 
 ```sh
-docker compose \
-  -f infra/orchestrator/compose.scope.yml \
-  --env-file infra/orchestrator/scopes/datacentric.env \
+infra/scripts/orchestrator-compose.sh \
+  --env-file "$HOME/.config/runsecure/datacentric.env" \
   up -d
 ```
 
-Three containers come up:
+Four long-running containers come up (plus the one-shot ownership and PAT
+initializers):
 
 - `rs-orch-datacentric-socket-proxy` — the **only** thing mounting
   `/var/run/docker.sock` (read-only).
@@ -223,13 +265,17 @@ Three containers come up:
   (allowlist defaults to `api.github.com` only).
 - `rs-orch-datacentric` — the orchestrator itself (distroless, nonroot,
   RO rootfs, `cap_drop: ALL`).
+- `rs-orch-datacentric-operator-relay` — an unprivileged, path-restricted
+  HAProxy relay that publishes health/state endpoints on loopback. It has no
+  PAT, Docker socket, project mount, or access to the socket-proxy network.
 
 ---
 
 ## 7. Verify
 
-The orchestrator exposes `/healthz` and `/metrics` on localhost ports
-(never published externally):
+The operator relay exposes `/healthz`, `/readyz`, `/metrics`, and the state
+snapshot on localhost ports (never published externally). The orchestrator
+itself remains attached only to Docker-internal networks:
 
 ```sh
 curl -sf http://127.0.0.1:8080/healthz
@@ -269,13 +315,14 @@ runsecure.orchestrator.spawn.completed
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Orchestrator exits with `auth.pat_file ... mode 0400` | PAT file has wrong perms | `chmod 0400 <pat>` |
-| `auth.pat_file ... no such file` | Bind-mount in compose.scope.yml is wrong | Verify `RUNSECURE_PAT_FILE` in .env points at the real file |
+| Wrapper rejects the PAT as non-regular, symlinked, wrong-owner, or not mode `0400` | `RUNSECURE_PAT_FILE` does not meet the host secret contract | Point it directly at a regular file owned by the invoking UID, then run `chmod 0400 <pat>`; do not use a symlink |
+| Orchestrator exits with `auth.pat_file ... mode 0400` | The named-volume PAT copy has unexpected permissions | Re-run the stack through `infra/scripts/orchestrator-compose.sh`; `pat-init` replaces the copy at UID 65532 and mode `0400` |
+| `auth.pat_file ... no such file` | PAT initialization did not complete | Inspect `rs-orch-<scope>-pat-init`, then verify `RUNSECURE_PAT_FILE` in the external `.env` points at the real host file |
 | Many `runsecure.orchestrator.auth.degraded` events | PAT lacks Administration:RW for one or more listed repos | Re-issue with correct permissions; the orchestrator reloads on PAT-file mtime change |
-| Many `socket_proxy_denied` in `spawn.failed` events | Runner image isn't in `infra/socket-proxy/allowed-images.txt` | The `weekly-version-bump.yml` workflow refreshes this; or rebuild the socket-proxy image with the digest you need. As a stopgap for a just-released digest not yet baked into the socket-proxy image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it in automatically, no tracked-file edits needed. |
+| Many `socket_proxy_denied` in `spawn.failed` events | Runner image digest is absent from the baked release allowlist and optional operator allowlist | Verify the runner and socket-proxy came from the same release. For a custom image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it automatically, with no tracked-file edit. |
 | Breaker stuck open (no spawns) | 5 consecutive spawn failures | `docker logs rs-orch-* \| grep breaker.opened` — fix the upstream cause; the breaker enters half-open after 5min cooldown |
 | Lots of `ratelimit.paused` events | GitHub API quota exhausted (rare at 15s polling) | Increase `poll_interval_seconds` or reduce scope size |
-| Runner containers accumulate (`docker ps` shows many) | Orchestrator died mid-flight without graceful drain | Restart it; A4 cold-start reconciliation re-counts in-flight; orphan proxy containers are torn down on the same path |
+| Runner containers accumulate (`docker ps` shows many) | Orchestrator died mid-flight without graceful drain | Restart it; cold-start reconciliation deletes only exact owned offline registrations and backend resources, and startup fails closed if ownership or GitHub cleanup cannot be proven |
 
 ---
 
@@ -301,8 +348,8 @@ every use-case `run.sh` supports for queued workflows. Keep `run.sh` for:
 Stop and remove the stack:
 
 ```sh
-docker compose -f infra/orchestrator/compose.scope.yml \
-  --env-file infra/orchestrator/scopes/datacentric.env \
+infra/scripts/orchestrator-compose.sh \
+  --env-file "$HOME/.config/runsecure/datacentric.env" \
   down --volumes --remove-orphans
 ```
 
@@ -317,6 +364,8 @@ Delete the local PAT file:
 
 ```sh
 rm ~/.config/runsecure/datacentric.pat
+rm ~/.config/runsecure/datacentric.scope.yml \
+   ~/.config/runsecure/datacentric.env
 ```
 
 Revoke the PAT on GitHub for completeness.

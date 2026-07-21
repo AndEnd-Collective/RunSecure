@@ -174,8 +174,8 @@ assert_in_service "${SCOPE_COMPOSE}" "orch-egress" \
     "Issue54-F2: orch-egress is attached to spawn-egress (ensures compose creates the network)"
 
 # --- Issue #54 fix 2: orchestrator must NOT be attached to spawn-egress ----
-# Verify the orchestrator is confined to orch-internal; attaching it to
-# spawn-egress would break the network-isolation model.
+# Verify the orchestrator is confined to internal networks; attaching it to
+# spawn-egress or operator-host would break the network-isolation model.
 # We check the networks: key of the orchestrator service specifically —
 # RUNSECURE_EGRESS_NETWORK env var contains "spawn-egress" in its value
 # which is expected and correct; we must not match that.
@@ -194,6 +194,89 @@ if [[ -n "$ORCH_RANGE" ]]; then
     else
         pass "Issue54-F2: orchestrator is not attached to spawn-egress (isolation preserved)"
     fi
+
+    ORCH_BLOCK=$(sed -n "${o_start},${o_end}p" "${SCOPE_COMPOSE}")
+    if grep -qE '^[[:space:]]*-[[:space:]]*operator-host$' <<<"${ORCH_BLOCK}"; then
+        fail "Operator endpoints: PAT-holding orchestrator must not attach to operator-host"
+    else
+        pass "Operator endpoints: PAT-holding orchestrator stays off operator-host"
+    fi
+    if grep -qE '^[[:space:]]*-[[:space:]]*operator-internal$' <<<"${ORCH_BLOCK}"; then
+        pass "Operator endpoints: orchestrator attaches to the relay-only internal bridge"
+    else
+        fail "Operator endpoints: orchestrator must attach to operator-internal"
+    fi
+fi
+
+RELAY_RANGE=$(_service_range "${SCOPE_COMPOSE}" "operator-relay")
+if [[ -n "$RELAY_RANGE" ]]; then
+    relay_start="${RELAY_RANGE%:*}"; relay_end="${RELAY_RANGE#*:}"
+    RELAY_BLOCK=$(sed -n "${relay_start},${relay_end}p" "${SCOPE_COMPOSE}")
+    LOOPBACK_BIND_COUNT=$(grep -cE 'host_ip:[[:space:]]*127\.0\.0\.1' <<<"${RELAY_BLOCK}" || true)
+    if [[ "${LOOPBACK_BIND_COUNT}" -eq 2 ]]; then
+        pass "Operator endpoints: health and state ports bind to loopback only"
+    else
+        fail "Operator endpoints: expected exactly two fixed 127.0.0.1 host bindings"
+    fi
+    if grep -qE 'host_ip:[[:space:]]*(0\.0\.0\.0|::)' <<<"${RELAY_BLOCK}"; then
+        fail "Operator endpoints: wildcard host publication is forbidden"
+    else
+        pass "Operator endpoints: no wildcard host publication"
+    fi
+    if grep -qF "\${RUNSECURE_ORCHESTRATOR_HEALTH_PORT:-8080}" <<<"${RELAY_BLOCK}" \
+       && grep -qF "\${RUNSECURE_ORCHESTRATOR_STATE_PORT:-8081}" <<<"${RELAY_BLOCK}"; then
+        pass "Operator endpoints: published ports default to 8080 and 8081"
+    else
+        fail "Operator endpoints: expected explicit health/state host-port defaults"
+    fi
+    if grep -qE '^[[:space:]]*-[[:space:]]*operator-host$' <<<"${RELAY_BLOCK}" \
+       && grep -qE '^[[:space:]]*-[[:space:]]*operator-internal$' <<<"${RELAY_BLOCK}"; then
+        pass "Operator endpoints: secretless relay bridges only operator networks"
+    else
+        fail "Operator endpoints: relay must bridge operator-internal and operator-host"
+    fi
+else
+    fail "Operator endpoints: operator-relay service not found"
+fi
+
+assert_in_service "${SCOPE_COMPOSE}" "operator-relay" '^[[:space:]]*read_only:[[:space:]]+true' \
+    "Operator endpoints: relay root filesystem is read-only"
+assert_in_service "${SCOPE_COMPOSE}" "operator-relay" 'no-new-privileges:true' \
+    "Operator endpoints: relay has no-new-privileges"
+assert_in_service "${SCOPE_COMPOSE}" "operator-relay" '^[[:space:]]*cap_drop:[[:space:]]*\[ALL\]' \
+    "Operator endpoints: relay drops all capabilities"
+
+OPERATOR_NETWORK_BLOCK=$(grep -A8 '^  operator-host:' "${SCOPE_COMPOSE}" || true)
+if grep -q 'enable_ip_masquerade:[[:space:]]*"false"' <<<"${OPERATOR_NETWORK_BLOCK}"; then
+    pass "Operator endpoints: host-publication bridge disables outbound masquerade"
+else
+    fail "Operator endpoints: operator-host must disable outbound masquerade"
+fi
+if grep -q 'host_binding_ipv4:[[:space:]]*"127\.0\.0\.1"' <<<"${OPERATOR_NETWORK_BLOCK}"; then
+    pass "Operator endpoints: host-publication bridge defaults to loopback"
+else
+    fail "Operator endpoints: operator-host must default host bindings to loopback"
+fi
+if grep -q 'internal:[[:space:]]*true' <<<"${OPERATOR_NETWORK_BLOCK}"; then
+    fail "Operator endpoints: Docker suppresses host publishing on internal networks"
+else
+    pass "Operator endpoints: host-publication bridge is not Docker-internal"
+fi
+
+OPERATOR_INTERNAL_BLOCK=$(grep -A4 '^  operator-internal:' "${SCOPE_COMPOSE}" || true)
+if grep -q 'internal:[[:space:]]*true' <<<"${OPERATOR_INTERNAL_BLOCK}"; then
+    pass "Operator endpoints: relay-to-orchestrator bridge is internal"
+else
+    fail "Operator endpoints: operator-internal must deny host egress"
+fi
+
+RELAY_CFG="${RUNSECURE_ROOT}/infra/orchestrator/operator-relay.haproxy.cfg"
+if grep -q 'acl health_path path /healthz /readyz' "${RELAY_CFG}" \
+   && grep -q 'acl state_path path /metrics /state/snapshot' "${RELAY_CFG}" \
+   && [[ "$(grep -c 'http-request deny' "${RELAY_CFG}")" -eq 4 ]]; then
+    pass "Operator endpoints: relay allowlists methods and operator paths"
+else
+    fail "Operator endpoints: relay must deny non-operator HTTP requests"
 fi
 
 # --- Print results -----------------------------------------------------------

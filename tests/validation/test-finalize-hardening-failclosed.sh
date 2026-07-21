@@ -61,6 +61,28 @@ else
     fail "M10-strict" "set -euo pipefail removed — script will continue past failures"
 fi
 
+# --- H03 lint: only inert scanner inventory may survive --------------------
+if grep -q 'install -m 0444 /var/lib/dpkg/status' "$FINALIZE" \
+    && grep -q 'chmod 0555 /var/lib/dpkg' "$FINALIZE"; then
+    pass "H03: dpkg scanner inventory is restored read-only"
+else
+    fail "H03-inventory-mode" "dpkg status inventory is not restored with read-only file and directory modes"
+fi
+
+if grep -qE '^[[:space:]]*/var/lib/dpkg[[:space:]]*\\' "$FINALIZE" \
+    && grep -q '/usr/bin/dpkg-query' "$FINALIZE"; then
+    pass "H03: dpkg executables and mutable database are removed before inventory restore"
+else
+    fail "H03-package-manager-removal" "dpkg executable or mutable database removal is missing"
+fi
+
+if grep -q '_unexpected_dpkg_entry=' "$FINALIZE" \
+    && grep -q '_writable_dpkg_entry=' "$FINALIZE"; then
+    pass "H03: post-condition rejects unexpected or writable dpkg state"
+else
+    fail "H03-inventory-postcheck" "dpkg inventory post-condition is missing"
+fi
+
 # --- M8 lint: apt-get update is no longer masked in compose-image.sh --------
 COMPOSE_IMAGE="${RUNSECURE_ROOT}/infra/scripts/compose-image.sh"
 if grep -vE '^\s*#|^\s*echo' "$COMPOSE_IMAGE" | grep -qE 'apt-get update.*\|\|[[:space:]]*true'; then
