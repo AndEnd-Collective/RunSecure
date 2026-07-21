@@ -349,6 +349,8 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		{Name: "RUNSECURE_VERSION", Value: in.Version},
 		{Name: "RUNSECURE_BUILD_SHA", Value: in.BuildSHA},
 		{Name: "RUNSECURE_SPAWN_ID", Value: in.SpawnID},
+		{Name: "RUNSECURE_RUNNER_IMAGE_REF", Value: in.RunnerImage},
+		{Name: "RUNSECURE_PROXY_IMAGE_REF", Value: in.ProxyImage},
 		{Name: "HTTP_PROXY", Value: proxyURL},
 		{Name: "HTTPS_PROXY", Value: proxyURL},
 		{Name: "http_proxy", Value: proxyURL},

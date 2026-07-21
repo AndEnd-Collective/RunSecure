@@ -4,8 +4,9 @@
 # ============================================================================
 # Verifies that:
 #   1. entrypoint.sh runs ./run.sh as a foreground child (not exec) and waits
-#      for the upload-complete marker in _diag/Worker_*.log before exiting.
-#   2. When the marker is present, the wait exits immediately.
+#      for the local queue-drain marker in _diag/Worker_*.log before exiting.
+#   2. When the marker is present, the wait exits immediately without claiming
+#      that GitHub persisted the remote log.
 #   3. When the marker is absent, the wait times out cleanly with a warning
 #      and the runner's exit code propagates.
 #   4. lib/diag-rotation.sh rotates _diag/ -> _diag.previous/ correctly.
@@ -93,19 +94,34 @@ run_modified_entrypoint() {
 TEST1_DIR="$WORK/marker-present"
 make_fake_runner "$TEST1_DIR" yes
 START_TIME=$(date +%s)
-T1_OUTPUT=$(run_modified_entrypoint "$TEST1_DIR" 10 || true)
+T1_OUTPUT=$(run_modified_entrypoint "$TEST1_DIR" 10)
 T1_EXIT=$?
 ELAPSED=$(( $(date +%s) - START_TIME ))
 
-if echo "$T1_OUTPUT" | grep -q "Log upload .* confirmed"; then
-    pass "wait succeeds when marker is present in Worker_*.log"
+if echo "$T1_OUTPUT" | grep -qF "Runner upload queues drained locally."; then
+    pass "marker reports that the runner's local upload queues drained"
 else
-    fail "marker-present case did not log 'Log upload confirmed' (output: $T1_OUTPUT)"
+    fail "marker-present case did not report local queue drain (output: $T1_OUTPUT)"
+fi
+if echo "$T1_OUTPUT" | grep -qF "Remote GitHub log availability is not independently verified."; then
+    pass "marker result explicitly leaves remote log availability unverified"
+else
+    fail "marker-present case did not disclaim remote delivery (output: $T1_OUTPUT)"
+fi
+if echo "$T1_OUTPUT" | grep -qiE 'log upload (already )?confirmed|log uploaded to GitHub'; then
+    fail "marker-present case made an unsupported remote-delivery claim (output: $T1_OUTPUT)"
+else
+    pass "marker-present case does not claim remote log delivery"
 fi
 if [[ "$ELAPSED" -lt 5 ]]; then
     pass "wait exits quickly when marker is present (${ELAPSED}s)"
 else
     fail "wait took ${ELAPSED}s with marker present (should be <5s)"
+fi
+if [[ "$T1_EXIT" -eq 1 ]]; then
+    pass "entrypoint preserves the runner's non-zero exit code"
+else
+    fail "entrypoint returned ${T1_EXIT}; expected fake runner exit code 1"
 fi
 
 # ----------------------------------------------------------------------------
@@ -117,10 +133,10 @@ START_TIME=$(date +%s)
 T2_OUTPUT=$(run_modified_entrypoint "$TEST2_DIR" 2 || true)
 ELAPSED=$(( $(date +%s) - START_TIME ))
 
-if echo "$T2_OUTPUT" | grep -q "log upload wait timed out"; then
+if echo "$T2_OUTPUT" | grep -qF "local upload-queue drain marker was not observed"; then
     pass "wait times out cleanly when marker is absent"
 else
-    fail "marker-absent case did not log 'log upload wait timed out' (output: $T2_OUTPUT)"
+    fail "marker-absent case did not report missing drain marker (output: $T2_OUTPUT)"
 fi
 if [[ "$ELAPSED" -ge 2 && "$ELAPSED" -lt 6 ]]; then
     pass "wait honored timeout (${ELAPSED}s, expected 2..5s)"
@@ -136,6 +152,7 @@ mkdir -p "$ROT_DIR/_diag"
 echo "first run log" > "$ROT_DIR/_diag/Worker_first.log"
 
 # shellcheck source=infra/scripts/lib/diag-rotation.sh
+# shellcheck disable=SC1091
 source "$ROTATION_HELPER"
 rotate_diag_dirs "$ROT_DIR" >/dev/null 2>&1
 
@@ -222,6 +239,26 @@ if echo "$NJ_OUTPUT" | grep -qE 'neither RUNNER_JIT_CONFIG_FILE nor RUNNER_JIT_C
     pass "no-JIT: entrypoint refuses with explicit error"
 else
     fail "no-JIT case did not error out (output: $NJ_OUTPUT)"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 4d: job-completed hook must not claim GitHub persisted the worker log
+# ----------------------------------------------------------------------------
+if [[ -n "${REPO_ROOT:-}" ]]; then
+    JOB_COMPLETED_HOOK="$REPO_ROOT/infra/runner-hooks/job-completed.sh"
+else
+    JOB_COMPLETED_HOOK="/mnt/infra/runner-hooks/job-completed.sh"
+fi
+HOOK_OUTPUT=$(bash "$JOB_COMPLETED_HOOK" 2>&1 || true)
+if echo "$HOOK_OUTPUT" | grep -qF "This hook does not confirm remote GitHub log availability."; then
+    pass "job-completed hook leaves remote log availability unverified"
+else
+    fail "job-completed hook lacks remote-delivery disclaimer (output: $HOOK_OUTPUT)"
+fi
+if echo "$HOOK_OUTPUT" | grep -qiE 'log upload (already )?confirmed|log uploaded to GitHub'; then
+    fail "job-completed hook made an unsupported remote-delivery claim (output: $HOOK_OUTPUT)"
+else
+    pass "job-completed hook does not claim remote log delivery"
 fi
 
 if [[ -n "${RUNSECURE_DISCOVERY_REPO:-}" && -n "${RUNSECURE_LAST_JOB_ID:-}" ]]; then

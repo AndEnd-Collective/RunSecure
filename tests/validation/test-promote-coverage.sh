@@ -81,6 +81,21 @@ else
     fail "promotion does not bind acceptance to the exact publish manifest"
 fi
 
+if grep -q 'live_acceptance_run_id:' "$PROMOTE_WF" \
+    && grep -Fq 'live-release-acceptance-${LIVE_ACCEPTANCE_RUN_ID}-${RUN_ATTEMPT}' "$PROMOTE_WF" \
+    && grep -Fq 'run-id: ${{ inputs.live_acceptance_run_id }}' "$PROMOTE_WF" \
+    && grep -Fq 'run.get("head_branch") != f"v{expected_version}"' "$PROMOTE_WF" \
+    && grep -Fq 'run.get("head_sha") != build_sha' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("all_logs_verified") is not True' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_runner_image_ref") != images.get("node-24")' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_proxy_image_ref") != images.get("proxy")' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_scope") != expected_scope' "$PROMOTE_WF" \
+    && grep -Fq 'expected_parallelism != 3 or observed_parallelism != 3' "$PROMOTE_WF"; then
+    pass "promotion requires exact-tag live multi-runner and job-log evidence"
+else
+    fail "promotion does not bind stable tags to exact live acceptance evidence"
+fi
+
 if grep -Fq 'run.get("head_branch") != f"v{expected_version}"' "$PROMOTE_WF"; then
     pass "promotion accepts only the expected version-tag Publish Images run"
 else

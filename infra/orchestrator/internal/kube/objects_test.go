@@ -532,6 +532,8 @@ func TestRunnerPod_HasRunSecureProvenanceEnv(t *testing.T) {
 	want := map[string]string{
 		"RUNSECURE_SCOPE": in.Scope, "RUNSECURE_VERSION": in.Version,
 		"RUNSECURE_BUILD_SHA": in.BuildSHA, "RUNSECURE_SPAWN_ID": in.SpawnID,
+		"RUNSECURE_RUNNER_IMAGE_REF": in.RunnerImage,
+		"RUNSECURE_PROXY_IMAGE_REF":  in.ProxyImage,
 	}
 	for name, value := range want {
 		if envMap[name] != value {

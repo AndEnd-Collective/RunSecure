@@ -200,6 +200,20 @@ func TestSpawn_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSpawn_RunnerReceivesImmutableImageRefs(t *testing.T) {
+	fd := newFakeDocker()
+	b := New(fd)
+	in := minimalInput()
+
+	_, err := b.Spawn(context.Background(), in)
+	require.NoError(t, err)
+
+	runner, ok := fd.created["runner"]
+	require.True(t, ok, "runner container was not created")
+	require.Contains(t, runner.Env, "RUNSECURE_RUNNER_IMAGE_REF="+in.RunnerImage)
+	require.Contains(t, runner.Env, "RUNSECURE_PROXY_IMAGE_REF="+in.ProxyImage)
+}
+
 // TestSpawn_RunnerIsInternalOnly verifies the core security property:
 // the runner container is NEVER attached to the egress network.
 func TestSpawn_RunnerIsInternalOnly(t *testing.T) {
