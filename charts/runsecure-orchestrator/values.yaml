@@ -50,14 +50,21 @@ image:
     pullPolicy: Always
 
 # ---------------------------------------------------------------------------
-# Kubernetes network dependencies. These addresses are cluster-specific and
-# must match the in-cluster `kubernetes` and DNS Service ClusterIPs. The
-# defaults match a standard kind/kubeadm service CIDR; override them elsewhere.
+# Kubernetes network dependencies. API traffic can be evaluated before or
+# after Service DNAT. Each API destination is an exact CIDR/port pair so a
+# Service address cannot inherit an endpoint port (or vice versa). DNS requires
+# both exact Service /32s and an exact namespace + Pod label selector.
 # ---------------------------------------------------------------------------
 kubernetesNetwork:
-  apiServerCIDR: "10.96.0.1/32"
-  apiServerPort: 443
-  dnsCIDR: "10.96.0.10/32"
+  apiServerPeers:
+    - cidr: "10.96.0.1/32"
+      port: 443
+  dnsServiceCIDRs:
+    - "10.96.0.10/32"
+  dnsNamespace: "kube-system"
+  dnsPodLabel:
+    key: "k8s-app"
+    value: "kube-dns"
 
 # ---------------------------------------------------------------------------
 # Scope configuration — mirrors infra/orchestrator/scopes/example.yml.

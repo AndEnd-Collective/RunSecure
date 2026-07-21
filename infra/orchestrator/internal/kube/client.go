@@ -1,7 +1,7 @@
 // Package kube provides a thin wrapper around the Kubernetes client-go API for
 // managing per-spawn runner+proxy stacks. It exposes only the operations
 // required by the RunSecure orchestrator:
-//   - EnsureNamespace: create the scoped namespace and default-deny policy.
+//   - EnsureDefaultDenyPolicy: reconcile the namespace default-deny policy.
 //   - ApplySpawn: create all per-spawn objects with owner references.
 //   - WaitRunner: watch a runner pod to a terminal phase.
 //   - DeleteSpawn: cascade-delete a spawn via its owning Secret.
@@ -84,29 +84,18 @@ func NewInCluster() (*Client, error) {
 	return NewClient(cs), nil
 }
 
-// EnsureNamespace creates the "runsecure-<scope>" namespace and the
-// default-deny NetworkPolicy inside it. Both operations are idempotent:
-// AlreadyExists errors are silently swallowed so callers may invoke this
-// function on every reconcile without error.
-func (c *Client) EnsureNamespace(ctx context.Context, scope string) error {
+// EnsureDefaultDenyPolicy creates the default-deny NetworkPolicy in the
+// chart-provisioned "runsecure-<scope>" namespace. It deliberately performs no
+// cluster-scoped Namespace API call: the orchestrator's Helm Role is scoped to
+// this namespace and must not require namespace-create privileges.
+//
+// AlreadyExists is tolerated so callers may invoke this on every reconcile.
+func (c *Client) EnsureDefaultDenyPolicy(ctx context.Context, scope string) error {
 	ns := Namespace(scope)
-
-	// Create the namespace; tolerate AlreadyExists.
-	_, err := c.cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: ns,
-			Labels: map[string]string{
-				LabelScope: scope,
-			},
-		},
-	}, metav1.CreateOptions{})
-	if err != nil && !k8serrors.IsAlreadyExists(err) {
-		return fmt.Errorf("kube: create namespace %q: %w", ns, err)
-	}
 
 	// Create the default-deny NetworkPolicy; tolerate AlreadyExists.
 	policy := DefaultDenyNetworkPolicy(scope)
-	_, err = c.cs.NetworkingV1().NetworkPolicies(ns).Create(ctx, policy, metav1.CreateOptions{})
+	_, err := c.cs.NetworkingV1().NetworkPolicies(ns).Create(ctx, policy, metav1.CreateOptions{})
 	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: create default-deny policy in %q: %w", ns, err)
 	}
@@ -178,12 +167,29 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Establish the watch from an observed resourceVersion. Without this Get,
+	// a short-lived runner can reach a terminal phase before the watch starts;
+	// Kubernetes versions that do not send initial watch events would then leave
+	// us waiting until the wall timeout even though the job already finished.
+	pod, err := c.cs.CoreV1().Pods(ns).Get(timeoutCtx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", waitDeadlineExpired(ctx, timeoutCtx)
+	}
+	if isTerminalPodPhase(pod.Status.Phase) {
+		return pod.Status.Phase, false
+	}
+
 	watcher, err := c.cs.CoreV1().Pods(ns).Watch(timeoutCtx, metav1.ListOptions{
-		FieldSelector: "metadata.name=" + podName,
+		FieldSelector:   "metadata.name=" + podName,
+		ResourceVersion: pod.ResourceVersion,
 	})
 	if err != nil {
 		// Cannot establish a watch — fall through to the re-list path.
-		return c.relist(ctx, ns, podName)
+		phase, timedOut := c.relist(timeoutCtx, ns, podName)
+		if phase == "" && waitDeadlineExpired(ctx, timeoutCtx) {
+			return "", true
+		}
+		return phase, timedOut
 	}
 	defer watcher.Stop()
 
@@ -192,20 +198,32 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				// Watch channel closed unexpectedly; re-list to get current phase.
-				return c.relist(ctx, ns, podName)
+				phase, timedOut := c.relist(timeoutCtx, ns, podName)
+				if phase == "" && waitDeadlineExpired(ctx, timeoutCtx) {
+					return "", true
+				}
+				return phase, timedOut
 			}
 			pod, ok := event.Object.(*corev1.Pod)
 			if !ok {
 				continue
 			}
-			switch pod.Status.Phase {
-			case corev1.PodSucceeded, corev1.PodFailed:
+			if isTerminalPodPhase(pod.Status.Phase) {
 				return pod.Status.Phase, false
 			}
 		case <-timeoutCtx.Done():
-			return "", true
+			// A parent cancellation is not a runner wall timeout.
+			return "", ctx.Err() == nil
 		}
 	}
+}
+
+func waitDeadlineExpired(parent, bounded context.Context) bool {
+	return parent.Err() == nil && bounded.Err() == context.DeadlineExceeded
+}
+
+func isTerminalPodPhase(phase corev1.PodPhase) bool {
+	return phase == corev1.PodSucceeded || phase == corev1.PodFailed
 }
 
 // relist performs a one-shot Get to retrieve the pod's current phase. It is

@@ -34,16 +34,22 @@ func testInput(t *testing.T, spawnID string) backend.SpawnInput {
 		require.NoError(t, os.WriteFile(filepath.Join(egressDir, name), []byte(content), 0o600))
 	}
 	return backend.SpawnInput{
-		Scope:           "testscope",
-		Repo:            "owner/repo",
-		SpawnID:         spawnID,
-		RunnerImage:     "ghcr.io/runsecure/runner-base:latest",
-		ProxyImage:      "ghcr.io/runsecure/proxy:latest",
-		JITConfigB64:    "dGVzdC1qaXQtY29uZmlnLWI2NA==",
-		EgressConfigDir: egressDir,
-		EnableDNSMasq:   false,
-		TCPEgressPorts:  []int{443},
-		KubeDNSCIDR:     "10.96.0.10/32",
+		Scope:                "testscope",
+		Repo:                 "owner/repo",
+		SpawnID:              spawnID,
+		RunnerImage:          "ghcr.io/runsecure/runner-base:latest",
+		ProxyImage:           "ghcr.io/runsecure/proxy:latest",
+		ResourcesMemory:      2 << 30,
+		ResourcesNanoCPUs:    2_000_000_000,
+		ResourcesPIDs:        512,
+		JITConfigB64:         "dGVzdC1qaXQtY29uZmlnLWI2NA==",
+		EgressConfigDir:      egressDir,
+		EnableDNSMasq:        false,
+		TCPEgressPorts:       []int{443},
+		KubeDNSServiceCIDRs:  []string{"10.96.0.10/32"},
+		KubeDNSNamespace:     "kube-system",
+		KubeDNSPodLabelKey:   "k8s-app",
+		KubeDNSPodLabelValue: "kube-dns",
 	}
 }
 
@@ -78,13 +84,16 @@ func TestSpawn_CreatesAllObjects(t *testing.T) {
 
 	ns := kube.Namespace(in.Scope) // "runsecure-testscope"
 
-	// ── Namespace ──────────────────────────────────────────────────────────
-	_, err = cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	require.NoError(t, err, "namespace must be created by Spawn")
+	// Helm owns Namespace creation. Runtime reconciliation must use only the
+	// namespace-scoped API surface granted by the chart Role.
+	for _, action := range cs.Actions() {
+		assert.NotEqual(t, "namespaces", action.GetResource().Resource,
+			"Spawn must not access the cluster-scoped Namespace API")
+	}
 
-	// ── Default-deny NetworkPolicy (created by EnsureNamespace) ──────────
+	// ── Default-deny NetworkPolicy ─────────────────────────────────────────
 	_, err = cs.NetworkingV1().NetworkPolicies(ns).Get(ctx, "default-deny-all", metav1.GetOptions{})
-	require.NoError(t, err, "default-deny-all policy must be created by EnsureNamespace via Spawn")
+	require.NoError(t, err, "default-deny-all policy must be reconciled by Spawn")
 
 	// ── Secret ────────────────────────────────────────────────────────────
 	secretName := h.Refs["secret"]
@@ -133,11 +142,25 @@ func TestSpawn_CreatesAllObjects(t *testing.T) {
 	expectedProxyURL := fmt.Sprintf("http://%s:3128", expectedProxyDNS)
 
 	require.Len(t, runnerPod.Spec.Containers, 1, "runner pod must have exactly 1 container")
-	runnerEnv := envMap(runnerPod.Spec.Containers[0].Env)
+	runner := runnerPod.Spec.Containers[0]
+	runnerEnv := envMap(runner.Env)
 	assert.Equal(t, expectedProxyURL, runnerEnv["HTTP_PROXY"],
 		"HTTP_PROXY must point at the proxy Service DNS")
 	assert.Equal(t, expectedProxyURL, runnerEnv["HTTPS_PROXY"],
 		"HTTPS_PROXY must point at the proxy Service DNS")
+	assert.Equal(t, int64(2_000), runner.Resources.Requests.Cpu().MilliValue())
+	assert.Equal(t, int64(2_000), runner.Resources.Limits.Cpu().MilliValue())
+	assert.Equal(t, int64(2<<30), runner.Resources.Requests.Memory().Value())
+	assert.Equal(t, int64(2<<30), runner.Resources.Limits.Memory().Value())
+	for _, volume := range runnerPod.Spec.Volumes {
+		if volume.Name == "tmp" {
+			require.NotNil(t, volume.EmptyDir)
+			require.NotNil(t, volume.EmptyDir.SizeLimit)
+			assert.Equal(t, int64(512<<20), volume.EmptyDir.SizeLimit.Value())
+			return
+		}
+	}
+	t.Fatal("runner Pod must have a bounded tmp volume")
 }
 
 func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
@@ -196,9 +219,9 @@ func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 		"proxy-ingress From must pin the same spawn-id (cross-spawn isolation)")
 }
 
-// TestSpawn_Idempotent_Namespace verifies that calling Spawn on the same scope
-// twice does not fail on the namespace already existing.
-func TestSpawn_Idempotent_Namespace(t *testing.T) {
+// TestSpawn_Idempotent_DefaultDeny verifies that repeated reconciles tolerate
+// the chart-owned default-deny policy already existing.
+func TestSpawn_Idempotent_DefaultDeny(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
@@ -206,7 +229,7 @@ func TestSpawn_Idempotent_Namespace(t *testing.T) {
 	require.NoError(t, err, "first Spawn must succeed")
 
 	_, err = b.Spawn(ctx, testInput(t, "spawn-idem-2"))
-	require.NoError(t, err, "second Spawn in the same scope must succeed (namespace already exists)")
+	require.NoError(t, err, "second Spawn in the same scope must tolerate the existing default-deny policy")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -511,12 +534,12 @@ func TestSpawn_ApplyAndRollbackFailureReturnsExactTeardownHandle(t *testing.T) {
 		"returned handle must support exact cleanup after the dependency recovers")
 }
 
-// TestSpawn_EnsureNamespaceError verifies that an EnsureNamespace failure
+// TestSpawn_EnsureDefaultDenyError verifies that policy reconciliation failure
 // is propagated immediately (before any object creation).
-func TestSpawn_EnsureNamespaceError(t *testing.T) {
+func TestSpawn_EnsureDefaultDenyError(t *testing.T) {
 	cs := fake.NewSimpleClientset()
-	injected := errors.New("injected namespace create error")
-	cs.PrependReactor("create", "namespaces", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+	injected := errors.New("injected network policy create error")
+	cs.PrependReactor("create", "networkpolicies", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, injected
 	})
 
@@ -526,7 +549,102 @@ func TestSpawn_EnsureNamespaceError(t *testing.T) {
 
 	_, err := b.Spawn(ctx, testInput(t, "spawn-nserr"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ensure namespace")
+	assert.Contains(t, err.Error(), "ensure default-deny policy")
+}
+
+func TestSpawn_RejectsUnboundedRunnerResourcesBeforeClusterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*backend.SpawnInput)
+		want   string
+	}{
+		{
+			name:   "missing memory limit",
+			mutate: func(in *backend.SpawnInput) { in.ResourcesMemory = 0 },
+			want:   "runner memory limit must be positive",
+		},
+		{
+			name:   "missing CPU limit",
+			mutate: func(in *backend.SpawnInput) { in.ResourcesNanoCPUs = 0 },
+			want:   "runner CPU limit must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, cs := newBackend(t)
+			in := testInput(t, "spawn-unbounded")
+			tt.mutate(&in)
+
+			_, err := b.Spawn(context.Background(), in)
+			require.ErrorContains(t, err, tt.want)
+			require.Empty(t, cs.Actions(), "invalid limits must fail before Kubernetes API access")
+		})
+	}
+}
+
+func TestSpawn_RejectsInvalidDNSSelectorBeforeClusterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*backend.SpawnInput)
+		want   string
+	}{
+		{
+			name:   "empty service CIDRs",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSServiceCIDRs = nil },
+			want:   "KubeDNSServiceCIDRs must not be empty",
+		},
+		{
+			name:   "broad service CIDR",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSServiceCIDRs = []string{"10.96.0.0/24"} },
+			want:   "KubeDNSServiceCIDRs must contain exact IPv4 /32 values",
+		},
+		{
+			name: "duplicate service CIDR",
+			mutate: func(in *backend.SpawnInput) {
+				in.KubeDNSServiceCIDRs = []string{"10.96.0.10/32", "10.96.0.10/32"}
+			},
+			want: "KubeDNSServiceCIDRs must contain unique CIDRs",
+		},
+		{
+			name:   "invalid namespace",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSNamespace = "INVALID_NAMESPACE" },
+			want:   "KubeDNSNamespace must be a DNS-1123 label",
+		},
+		{
+			name:   "invalid label key",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelKey = "invalid key" },
+			want:   "KubeDNSPodLabelKey must be a Kubernetes label key",
+		},
+		{
+			name:   "empty label value",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelValue = "" },
+			want:   "KubeDNSPodLabelValue must not be empty",
+		},
+		{
+			name:   "invalid label value",
+			mutate: func(in *backend.SpawnInput) { in.KubeDNSPodLabelValue = "invalid value" },
+			want:   "KubeDNSPodLabelValue must be a Kubernetes label value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, cs := newBackend(t)
+			in := testInput(t, "spawn-invalid-dns")
+			tt.mutate(&in)
+
+			h, err := b.Spawn(context.Background(), in)
+
+			require.ErrorContains(t, err, tt.want)
+			require.Empty(t, h.SpawnID)
+			namespaces, listErr := cs.CoreV1().Namespaces().List(
+				context.Background(), metav1.ListOptions{},
+			)
+			require.NoError(t, listErr)
+			require.Empty(t, namespaces.Items,
+				"invalid DNS policy must fail before creating the scoped namespace")
+		})
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

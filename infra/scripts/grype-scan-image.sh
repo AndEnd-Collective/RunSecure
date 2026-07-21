@@ -9,9 +9,23 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 IMAGE_REF SARIF_FILE [EXPECTED_DPKG_PACKAGE] [EXPECTED_CATALOGER] [EXPECTED_CATALOGER_PACKAGE] [EXPECTED_PRESENCE_CATALOGER] [EXPECTED_PRESENCE_PACKAGE]" >&2
+    echo "Usage: $0 [--platform linux/amd64|linux/arm64] IMAGE_REF SARIF_FILE [EXPECTED_DPKG_PACKAGE] [EXPECTED_CATALOGER] [EXPECTED_CATALOGER_PACKAGE] [EXPECTED_PRESENCE_CATALOGER] [EXPECTED_PRESENCE_PACKAGE]" >&2
     exit 2
 }
+
+SCAN_PLATFORM=''
+if [[ "${1:-}" == '--platform' ]]; then
+    [[ $# -ge 2 ]] || usage
+    SCAN_PLATFORM=$2
+    shift 2
+    case "$SCAN_PLATFORM" in
+        linux/amd64 | linux/arm64) ;;
+        *)
+            echo "ERROR: unsupported scan platform: ${SCAN_PLATFORM}" >&2
+            usage
+            ;;
+    esac
+fi
 
 [[ $# -ge 2 && $# -le 7 ]] || usage
 
@@ -46,9 +60,14 @@ cleanup() {
 trap cleanup EXIT
 
 CATALOGER_SELECTION='-binary-classifier-cataloger,-elf-binary-package-cataloger,-pe-binary-package-cataloger'
+SYFT_PLATFORM_ARGS=()
+if [[ -n "$SCAN_PLATFORM" ]]; then
+    SYFT_PLATFORM_ARGS=(--platform "$SCAN_PLATFORM")
+fi
 
 echo "Cataloguing ${IMAGE_REF} with ecosystem-aware Syft catalogers..."
 syft "$IMAGE_REF" \
+    "${SYFT_PLATFORM_ARGS[@]}" \
     --select-catalogers="$CATALOGER_SELECTION" \
     --output "syft-json=${SBOM_FILE}"
 
@@ -125,6 +144,7 @@ if [[ -n "$EXPECTED_PRESENCE_CATALOGER" ]]; then
         exit 1
     }
     syft "$IMAGE_REF" \
+        "${SYFT_PLATFORM_ARGS[@]}" \
         --select-catalogers="+${EXPECTED_PRESENCE_CATALOGER}" \
         --output "syft-json=${PRESENCE_SBOM_FILE}"
     jq -e \

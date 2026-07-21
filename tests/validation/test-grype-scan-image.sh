@@ -22,12 +22,20 @@ cat >"${FAKE_BIN}/syft" <<'EOF'
 set -euo pipefail
 OUTPUT=''
 SELECTION=''
-for arg in "$@"; do
+PLATFORM=''
+args=("$@")
+for ((index = 0; index < ${#args[@]}; index++)); do
+    arg=${args[$index]}
     case "$arg" in
         syft-json=*) OUTPUT="${arg#syft-json=}" ;;
         --select-catalogers=*) SELECTION="${arg#*=}"; printf 'selection=%s\n' "$SELECTION" >>"$FAKE_LOG" ;;
+        --platform)
+            index=$((index + 1))
+            PLATFORM=${args[$index]}
+            ;;
     esac
 done
+printf 'platform=%s\n' "${PLATFORM:-default}" >>"$FAKE_LOG"
 [[ -n "$OUTPUT" ]]
 if [[ "$SELECTION" == +binary-classifier-cataloger ]]; then
     if [[ "${FAKE_PRESENCE_MODE:-good}" == good ]]; then
@@ -122,6 +130,32 @@ if grep -Fxq "selection=${EXPECTED_SELECTION}" "$FAKE_LOG"; then
     pass "only generic raw-binary classifiers are excluded"
 else
     fail "cataloger exclusion set drifted"
+fi
+
+: >"$FAKE_LOG"
+PLATFORM_SARIF="${TEST_TMP}/arm64.sarif"
+if PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+    FAKE_PRESENCE_MODE=good bash "$SCANNER" --platform linux/arm64 \
+    image:test "$PLATFORM_SARIF" ca-certificates '' '' \
+    binary-classifier-cataloger rust >/dev/null 2>&1; then
+    pass "explicit image platform passes"
+else
+    fail "explicit image platform should pass"
+fi
+if [[ $(grep -Fxc 'platform=linux/arm64' "$FAKE_LOG") -eq 2 ]]; then
+    pass "policy and runtime-presence inventories use the requested platform"
+else
+    fail "every Syft inventory must use the requested platform"
+fi
+
+PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+    bash "$SCANNER" --platform linux/s390x image:test \
+    "${TEST_TMP}/unsupported-platform.sarif" >/dev/null 2>&1
+platform_status=$?
+if [[ $platform_status -eq 2 ]]; then
+    pass "unsupported image platform exits 2"
+else
+    fail "unsupported image platform must exit 2"
 fi
 
 TABLE_TARGET=$(awk -F: '/^grype=table:/{print substr($0, index($0, "sbom:")); exit}' "$FAKE_LOG")

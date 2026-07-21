@@ -115,12 +115,16 @@ spec:
               value: {{ .Values.scope.backend | quote }}
             - name: RUNSECURE_EGRESS_BASE_DIR
               value: /tmp/runsecure/egress
-            - name: RUNSECURE_KUBE_API_SERVER_CIDR
-              value: {{ .Values.kubernetesNetwork.apiServerCIDR | quote }}
-            - name: RUNSECURE_KUBE_API_SERVER_PORT
-              value: {{ .Values.kubernetesNetwork.apiServerPort | quote }}
-            - name: RUNSECURE_KUBE_DNS_CIDR
-              value: {{ .Values.kubernetesNetwork.dnsCIDR | quote }}
+            - name: RUNSECURE_KUBE_API_SERVER_PEERS
+              value: {{ .Values.kubernetesNetwork.apiServerPeers | toJson | quote }}
+            - name: RUNSECURE_KUBE_DNS_SERVICE_CIDRS
+              value: {{ join "," .Values.kubernetesNetwork.dnsServiceCIDRs | quote }}
+            - name: RUNSECURE_KUBE_DNS_NAMESPACE
+              value: {{ .Values.kubernetesNetwork.dnsNamespace | quote }}
+            - name: RUNSECURE_KUBE_DNS_POD_LABEL_KEY
+              value: {{ .Values.kubernetesNetwork.dnsPodLabel.key | quote }}
+            - name: RUNSECURE_KUBE_DNS_POD_LABEL_VALUE
+              value: {{ .Values.kubernetesNetwork.dnsPodLabel.value | quote }}
             - name: RUNSECURE_PROXY_IMAGE
               value: {{ include "runsecure-orchestrator.imageRef" .Values.image.proxy | quote }}
             - name: RUNSECURE_RUNNER_IMAGE_DEFAULT

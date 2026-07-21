@@ -72,11 +72,13 @@ func TestSnapshot(t *testing.T) {
 	s.IncrementInFlight("o/b")
 	s.IncrementInFlight("o/b")
 	s.SetRateLimit(10, 100, time.Now())
+	s.SetRateLimited(true)
 	snap := s.Snapshot()
 	require.Equal(t, 3, snap.GlobalInFlight)
 	require.Equal(t, 1, snap.PerRepo["o/a"].InFlight)
 	require.Equal(t, 2, snap.PerRepo["o/b"].InFlight)
 	require.Equal(t, 10, snap.RateLimitRemaining)
+	require.True(t, snap.RateLimited)
 }
 
 func TestAllRepos(t *testing.T) {

@@ -20,6 +20,7 @@ type pollDeps struct {
 	intents          chan SpawnIntent
 	pollTickCount    atomic.Int64
 	denyReservations bool
+	labelsForRepoFn  func(context.Context, string) ([]string, error)
 	rl               struct {
 		paused      atomic.Bool
 		stickPaused atomic.Bool // when set, MaybeClearRateLimit never clears
@@ -49,8 +50,11 @@ func (d *pollDeps) RateLimitContextFor(_ string) (int, int, string) {
 	return d.rl.remaining, d.rl.limit, d.rl.reset
 }
 func (d *pollDeps) RecordRateLimit(_ string, _ github.RateLimit) {}
-func (d *pollDeps) MarkRateLimited(_ string) bool                { return !d.rl.paused.Swap(true) }
-func (d *pollDeps) IsRateLimited(_ string) bool                  { return d.rl.paused.Load() }
+func (d *pollDeps) MarkRateLimited(_ string) bool {
+	d.st.SetRateLimited(true)
+	return !d.rl.paused.Swap(true)
+}
+func (d *pollDeps) IsRateLimited(_ string) bool { return d.rl.paused.Load() }
 func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
 	// Honour rl.stickPaused: when set, never clear (so the "still paused;
 	// skip this tick" return in tick() is exercised).
@@ -59,6 +63,7 @@ func (d *pollDeps) MaybeClearRateLimit(_ string) bool {
 	}
 	if d.rl.paused.Load() {
 		d.rl.paused.Store(false)
+		d.st.SetRateLimited(false)
 		return true
 	}
 	return false
@@ -72,7 +77,10 @@ func (d *pollDeps) NewSpawnID() string {
 }
 
 func (d *pollDeps) RecordPollTick() { d.pollTickCount.Add(1) }
-func (d *pollDeps) LabelsForRepo(_ string) ([]string, error) {
+func (d *pollDeps) LabelsForRepo(ctx context.Context, repo string) ([]string, error) {
+	if d.labelsForRepoFn != nil {
+		return d.labelsForRepoFn(ctx, repo)
+	}
 	return append([]string(nil), d.runnerYML.Labels...), d.runnerYMLErr
 }
 func (d *pollDeps) TryReserve(spawnID, repo string, repoCap, globalCap int) bool {
@@ -158,6 +166,36 @@ func TestPoll_ReservationsPreventDuplicateCapacityAcrossTicks(t *testing.T) {
 	p.tick(context.Background())
 	require.Len(t, d.intents, 3, "second poll must not duplicate pending capacity")
 	require.Equal(t, 3, d.st.GlobalInFlight())
+}
+
+func TestPoll_RotatesRepositoryPriorityAcrossTicks(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/a"] = 4
+	srv.queuedFor["o/b"] = 4
+	srv.mu.Unlock()
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{
+			{Repo: "o/a", MaxConcurrent: 3},
+			{Repo: "o/b", MaxConcurrent: 3},
+		},
+	}, d)
+
+	p.tick(context.Background())
+	released := <-d.intents
+	require.Equal(t, "o/a", released.Repo)
+	d.ReleaseReservation(released.SpawnID)
+
+	p.tick(context.Background())
+	repos := []string{}
+	for len(d.intents) > 0 {
+		repos = append(repos, (<-d.intents).Repo)
+	}
+	require.Contains(t, repos, "o/b",
+		"a later repository must receive the next freed global slot")
 }
 
 func TestPoll_OneQueuedJobCannotReserveDuplicateSlowRunner(t *testing.T) {
@@ -378,6 +416,42 @@ func TestPoll_AuthFailureEmitsAuthDegraded(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventAuthDegraded)
 }
 
+func TestPoll_RunnerConfigRateLimitPausesScope(t *testing.T) {
+	d := newPollDeps(t)
+	d.runnerYMLErr = &github.APIError{
+		Status: http.StatusTooManyRequests,
+		RateLimit: github.RateLimit{
+			Limit: 5000, Remaining: 0, ResetUnix: time.Now().Add(time.Minute).Unix(),
+		},
+		Operation: "get repository contents",
+		Err:       github.ErrRateLimited,
+	}
+
+	NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d).tick(context.Background())
+
+	require.True(t, d.IsRateLimited("s"))
+	require.Equal(t, "github_rate_limited", d.st.Snapshot().PerRepo["o/r"].LastPollError)
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused)
+}
+
+func TestPoll_RunnerConfigAuthFailureEmitsAuthDegraded(t *testing.T) {
+	d := newPollDeps(t)
+	d.runnerYMLErr = &github.APIError{
+		Status: http.StatusUnauthorized, Operation: "get repository contents", Err: github.ErrAuthFailed,
+	}
+
+	NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d).tick(context.Background())
+
+	require.Equal(t, "github_auth_failed", d.st.Snapshot().PerRepo["o/r"].LastPollError)
+	d.requireEmitted(t, cornerstone.EventAuthDegraded)
+}
+
 func TestPoll_Run_ExitsOnContextCancel(t *testing.T) {
 	d := newPollDeps(t)
 	gh, srv := newFakeGitHubClient(t)
@@ -403,6 +477,30 @@ func TestPoll_Run_ExitsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit on cancel")
+	}
+}
+
+func TestPoll_ContextCancelsRunnerConfigRefresh(t *testing.T) {
+	d := newPollDeps(t)
+	d.labelsForRepoFn = func(ctx context.Context, _ string) ([]string, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.tick(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner config refresh ignored poll cancellation")
 	}
 }
 

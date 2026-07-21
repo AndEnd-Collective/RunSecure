@@ -20,11 +20,9 @@ type Config struct {
 	// digest reference per line). If the path is non-empty but the file does not
 	// exist the socket-proxy starts normally with only the baked allowlist.
 	//
-	// This solves the release bootstrap problem (#54 fix 3): at release time the
-	// published proxy/runner image digests are not yet known, so they cannot be
-	// baked into the allowlist. Operators can mount a file with the release-specific
-	// digests via a volume in compose.scope.yml and set RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE
-	// to its path, without modifying or rebuilding the socket-proxy image itself.
+	// Released socket-proxy images already contain their same-release proxy and
+	// runner digests. Operators can mount this file for custom image digests via
+	// compose.scope.yml without modifying or rebuilding the socket-proxy image.
 	AllowedImagesExtraFile string
 
 	TLSMode         string // "plaintext" (default) | "mtls"

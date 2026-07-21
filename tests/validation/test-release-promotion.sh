@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROMOTER="${RUNSECURE_ROOT}/infra/scripts/promote-release-images.py"
+README="${RUNSECURE_ROOT}/README.md"
+
+if grep -Fq '| **Floating minor**' "$README" \
+    || grep -Fq '`python:1.1-3.12`' "$README" \
+    || grep -Fq '`:1.1`' "$README"; then
+    echo "FAIL: README promises floating-minor tags that promotion does not publish" >&2
+    exit 1
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/runsecure-promotion-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT

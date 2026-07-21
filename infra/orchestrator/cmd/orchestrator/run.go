@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -30,7 +31,7 @@ import (
 )
 
 //coverage:ignore Run is the production wiring; covered by integration tests
-func Run(ctx context.Context, scopePath string) error {
+func Run(ctx context.Context, scopePath string) (runErr error) {
 	s, err := config.Load(scopePath)
 	if err != nil {
 		return err
@@ -58,6 +59,39 @@ func Run(ctx context.Context, scopePath string) error {
 		repoNames = append(repoNames, repo.Repo)
 	}
 	st.Configure(repoNames, s.GlobalMaxRunners, s.GlobalMaxRunners, version, buildSHA)
+	serverDeps := newServerDeps(st, clk, s.PollIntervalSeconds)
+	gh.SetRequestObserver(serverDeps.recordAPICall)
+
+	// Bind liveness before cold-start reconciliation. Recovered runner cleanup
+	// performs bounded-but-sequential GitHub and backend calls and must not be
+	// killed by a liveness probe merely because it legitimately outlasts three
+	// poll intervals. /readyz remains fail-closed because BackendReady has not
+	// been installed and no repository has completed a demand refresh.
+	serverCtx, stopServer := context.WithCancel(ctx)
+	srv := server.New(":8080", ":8081", serverDeps, em)
+	serverDone, err := srv.Start(serverCtx)
+	if err != nil {
+		stopServer()
+		return fmt.Errorf("orchestrator: start management server: %w", err)
+	}
+	serverStopped := false
+	var serverRunErr error
+	waitServer := func() error {
+		if !serverStopped {
+			serverRunErr = <-serverDone
+			serverStopped = true
+		}
+		return serverRunErr
+	}
+	defer func() {
+		stopServer()
+		if !serverStopped {
+			if err := waitServer(); err != nil {
+				runErr = errors.Join(runErr,
+					fmt.Errorf("orchestrator: management server: %w", err))
+			}
+		}
+	}()
 
 	// Initialize and reconcile only the selected runtime backend. Kubernetes
 	// deployments intentionally have no Docker socket-proxy or DOCKER_HOST;
@@ -69,13 +103,6 @@ func Run(ctx context.Context, scopePath string) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: backend init: %w", err)
 	}
-
-	// Server (healthz + metrics + snapshot) starts only after cold-start
-	// reconciliation succeeds, so a failed cleanup cannot look live while the
-	// process is about to exit.
-	serverDeps := newServerDeps(st, clk, s.PollIntervalSeconds)
-	srv := server.New(":8080", ":8081", serverDeps, em)
-	go func() { _ = srv.Run(ctx) }()
 
 	// Build everything the poll + spawn deps need.
 	intentCh := make(chan orchestrator.SpawnIntent, 32)
@@ -145,7 +172,11 @@ func Run(ctx context.Context, scopePath string) error {
 					pdeps.ReleaseReservation(intent.SpawnID)
 					continue
 				}
-				_ = worker.Execute(workerCtx, intent)
+				outcome := "success"
+				if err := worker.Execute(workerCtx, intent); err != nil {
+					outcome = "failure"
+				}
+				serverDeps.recordSpawn(intent.Scope, intent.Repo, outcome)
 			}
 		}()
 	}
@@ -164,12 +195,20 @@ func Run(ctx context.Context, scopePath string) error {
 	// Wait for SIGTERM / SIGINT.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 	select {
 	case <-ctx.Done():
 	case sig := <-sigCh:
 		fmt.Fprintln(os.Stderr, "orchestrator: caught", sig, "— draining…")
+	case serverRunErr = <-serverDone:
+		serverStopped = true
+		if serverRunErr == nil && ctx.Err() == nil {
+			return errors.New("orchestrator: management server stopped unexpectedly")
+		}
+		if serverRunErr != nil {
+			return fmt.Errorf("orchestrator: management server: %w", serverRunErr)
+		}
 	}
-	signal.Stop(sigCh)
 
 	// Stop and join the sole channel producer before closing intentCh. The old
 	// order closed the channel while Poll was still live, allowing a send on a
@@ -284,6 +323,7 @@ type serverDeps struct {
 	clk          clock.Clock
 	intervalS    int
 	lastPoll     atomic.Pointer[time.Time]
+	pollStarted  atomic.Bool
 	api          sync.Map // server.APICallKey → *int64
 	spawns       sync.Map
 	breakerSnap  func() map[string]bool
@@ -305,6 +345,7 @@ func (d *serverDeps) LastPollAt() time.Time {
 	}
 	return *p
 }
+func (d *serverDeps) PollStarted() bool        { return d.pollStarted.Load() }
 func (d *serverDeps) Now() time.Time           { return d.clk.Now() }
 func (d *serverDeps) PollIntervalSeconds() int { return d.intervalS }
 func (d *serverDeps) StateSnapshot() state.Snapshot {
@@ -337,7 +378,7 @@ func (d *serverDeps) BackendReady(ctx context.Context) error {
 func (d *serverDeps) APICalls() map[server.APICallKey]int64 {
 	out := map[server.APICallKey]int64{}
 	d.api.Range(func(k, v any) bool {
-		out[k.(server.APICallKey)] = *(v.(*int64))
+		out[k.(server.APICallKey)] = atomic.LoadInt64(v.(*int64))
 		return true
 	})
 	return out
@@ -345,10 +386,49 @@ func (d *serverDeps) APICalls() map[server.APICallKey]int64 {
 func (d *serverDeps) SpawnsTotal() map[server.SpawnKey]int64 {
 	out := map[server.SpawnKey]int64{}
 	d.spawns.Range(func(k, v any) bool {
-		out[k.(server.SpawnKey)] = *(v.(*int64))
+		out[k.(server.SpawnKey)] = atomic.LoadInt64(v.(*int64))
 		return true
 	})
 	return out
+}
+
+func (d *serverDeps) recordAPICall(method, path, status string) {
+	key := server.APICallKey{Endpoint: githubAPIEndpoint(method, path), Status: status}
+	counter, _ := d.api.LoadOrStore(key, new(int64))
+	atomic.AddInt64(counter.(*int64), 1)
+}
+
+func (d *serverDeps) recordSpawn(scope, repo, outcome string) {
+	key := server.SpawnKey{Scope: scope, Repo: repo, Outcome: outcome}
+	counter, _ := d.spawns.LoadOrStore(key, new(int64))
+	atomic.AddInt64(counter.(*int64), 1)
+}
+
+func githubAPIEndpoint(method, path string) string {
+	cleanPath := path
+	if query := strings.IndexByte(cleanPath, '?'); query >= 0 {
+		cleanPath = cleanPath[:query]
+	}
+	switch {
+	case strings.Contains(cleanPath, "/contents/.github/runner.yml"):
+		return "runner_yml"
+	case strings.Contains(cleanPath, "/generate-jitconfig"):
+		return "generate_jit_config"
+	case strings.Contains(cleanPath, "/actions/runs/") && strings.HasSuffix(cleanPath, "/jobs"):
+		return "workflow_jobs"
+	case strings.HasSuffix(cleanPath, "/actions/runs"):
+		return "workflow_runs"
+	case strings.Contains(cleanPath, "/actions/jobs/"):
+		return "workflow_job"
+	case strings.Contains(cleanPath, "/actions/runners/") && method == "DELETE":
+		return "delete_runner"
+	case strings.Contains(cleanPath, "/actions/runners/"):
+		return "get_runner"
+	case strings.HasSuffix(cleanPath, "/actions/runners"):
+		return "list_runners"
+	default:
+		return "other"
+	}
 }
 func (d *serverDeps) SpawnDurations() map[string][]float64 { return nil }
 func (d *serverDeps) BreakerOpen() map[string]bool {
@@ -397,26 +477,28 @@ func (p *productionDeps) Egress() orchestrator.EgressGenerator {
 func (p *productionDeps) State() orchestrator.StateLike { return p.st }
 
 func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot, error) {
-	p.runnerMu.Lock()
-	defer p.runnerMu.Unlock()
-	if p.runnerCache == nil {
-		p.runnerCache = map[string]*orchestrator.RunnerYMLSnapshot{}
-	}
+	return p.RunnerYMLContext(context.Background(), repo)
+}
+
+func (p *productionDeps) RunnerYMLContext(
+	ctx context.Context,
+	repo string,
+) (*orchestrator.RunnerYMLSnapshot, error) {
 	for _, r := range p.scopeRef.Repos {
 		if r.Repo != repo {
 			continue
 		}
 		if p.scopeRef.Backend == "kube" {
-			snapshot, err := loadRunnerYMLFromAPI(context.Background(), p.gh, p.st, repo)
+			snapshot, err := loadRunnerYMLFromAPI(ctx, p.gh, p.st, repo)
 			if errors.Is(err, errRunnerYMLNotModified) {
-				if cached, ok := p.runnerCache[repo]; ok {
+				if cached, ok := p.cachedRunnerYML(repo); ok {
 					return cached, nil
 				}
 			}
 			if err != nil {
 				return nil, err
 			}
-			p.runnerCache[repo] = snapshot
+			p.storeRunnerYML(repo, snapshot)
 			return snapshot, nil
 		}
 		yml, err := runneryml.Parse(filepath_join(r.ProjectDir, ".github", "runner.yml"))
@@ -430,10 +512,31 @@ func (p *productionDeps) RunnerYML(repo string) (*orchestrator.RunnerYMLSnapshot
 			return nil, fmt.Errorf("runner.yml egress validation: %w", err)
 		}
 		snapshot := &orchestrator.RunnerYMLSnapshot{YML: yml}
-		p.runnerCache[repo] = snapshot
+		p.storeRunnerYML(repo, snapshot)
 		return snapshot, nil
 	}
 	return nil, errors.New("unknown repo")
+}
+
+func (p *productionDeps) cachedRunnerYML(
+	repo string,
+) (*orchestrator.RunnerYMLSnapshot, bool) {
+	p.runnerMu.Lock()
+	defer p.runnerMu.Unlock()
+	cached, ok := p.runnerCache[repo]
+	return cached, ok
+}
+
+func (p *productionDeps) storeRunnerYML(
+	repo string,
+	snapshot *orchestrator.RunnerYMLSnapshot,
+) {
+	p.runnerMu.Lock()
+	if p.runnerCache == nil {
+		p.runnerCache = map[string]*orchestrator.RunnerYMLSnapshot{}
+	}
+	p.runnerCache[repo] = snapshot
+	p.runnerMu.Unlock()
 }
 
 // loadRunnerYMLFromAPI fetches runner.yml via the GitHub Contents API using
@@ -520,6 +623,7 @@ func (p *productionDeps) MarkRateLimited(_ string) bool {
 		r = time.Now().Add(time.Minute)
 	}
 	p.rlReset = r
+	p.st.SetRateLimited(true)
 	p.rlMu.Unlock()
 	return newlyPaused
 }
@@ -533,6 +637,7 @@ func (p *productionDeps) MaybeClearRateLimit(_ string) bool {
 	defer p.rlMu.Unlock()
 	if p.rlPaused && time.Now().After(p.rlReset) {
 		p.rlPaused = false
+		p.st.SetRateLimited(false)
 		return true
 	}
 	return false
@@ -541,8 +646,11 @@ func (p *productionDeps) NewSpawnID() string {
 	return fmt.Sprintf("%d%d", time.Now().UnixNano(), nextSeq())
 }
 
-func (p *productionDeps) LabelsForRepo(repo string) ([]string, error) {
-	snapshot, err := p.RunnerYML(repo)
+func (p *productionDeps) LabelsForRepo(
+	ctx context.Context,
+	repo string,
+) ([]string, error) {
+	snapshot, err := p.RunnerYMLContext(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -587,6 +695,7 @@ func (p *productionDeps) RecordPollFailure(repo, class, detail string) (bool, in
 func (p *productionDeps) RecordPollTick() {
 	t := time.Now()
 	p.serverDeps.lastPoll.Store(&t)
+	p.serverDeps.pollStarted.Store(true)
 }
 
 // SpawnDeps-only --------------------------------------------------------

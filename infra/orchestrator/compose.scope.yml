@@ -2,7 +2,7 @@
 #
 # Usage:
 #   export RUNSECURE_SCOPE=datacentric
-#   docker compose -f infra/orchestrator/compose.scope.yml \
+#   infra/scripts/orchestrator-compose.sh \
 #     --env-file infra/orchestrator/scopes/datacentric.env up -d
 #
 # Long-running containers per stack:
@@ -30,14 +30,10 @@ services:
       RUNSECURE_EGRESS_NETWORK: ${RUNSECURE_SCOPE}-spawn-egress
       # Egress-volume gate: only role=proxy may mount this named volume.
       RUNSECURE_EGRESS_VOLUME: ${RUNSECURE_SCOPE}-egress-configs
-      # Optional: operator-supplied extra allowlist for release-specific digests.
-      # At release time the newly-published image digests are not yet baked into
-      # the socket-proxy image (bootstrap problem, #54 fix 3). The container path
-      # is fixed; point RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST (in the scope
-      # .env file, gitignored) at a real host file to populate it — the volume
-      # mount below defaults to /dev/null (parses as zero extra entries) when
-      # unset, so this is a no-op until an operator opts in. Never hardcode a
-      # host path here; see install.md.
+      # Matching release images are baked into the same release's socket-proxy
+      # allowlist. This optional file is only for operator-supplied custom image
+      # digests. The mount defaults to /dev/null (zero extra entries) when unset;
+      # never hardcode an operator host path here. See install.md.
       RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE: /run/secrets/extra-images.txt
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -107,15 +103,39 @@ services:
     user: "0:0"
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE]
+    environment:
+      # Set only by infra/scripts/orchestrator-compose.sh after an os.lstat
+      # host check. Requiring it makes an accidental raw Compose launch fail
+      # closed; it is not a security boundary against a malicious operator.
+      RUNSECURE_PAT_HOST_VALIDATED: ${RUNSECURE_PAT_HOST_VALIDATED:?launch with infra/scripts/orchestrator-compose.sh}
     entrypoint:
       - sh
       - -euc
       - |
-        cp /host-pat /secret/runsecure-pat
-        # Set the mode while root still owns the copy. After chown, chmod
-        # would require CAP_FOWNER, which this least-privilege init lacks.
-        chmod 400 /secret/runsecure-pat
-        chown 65532:65532 /secret/runsecure-pat
+        fail() { echo "[RunSecure] ERROR: $$*" >&2; exit 1; }
+        [ "$$RUNSECURE_PAT_HOST_VALIDATED" = "runsecure-host-pat-v1" ] \
+          || fail "host PAT validation sentinel is invalid"
+        [ -f /host-pat ] && [ ! -L /host-pat ] \
+          || fail "mounted PAT source must be a regular non-symlink file"
+        [ "$$(stat -c '%a' /host-pat)" = "400" ] \
+          || fail "mounted PAT source must be mode 0400"
+
+        # Replace the destination through a new inode. A previous successful
+        # run leaves the old file UID 65532-owned and mode 0400; copying over
+        # that inode is not restart-safe with this init's reduced capability
+        # set. The volume root remains root-owned and writable by this one-shot
+        # init, so atomically renaming the prepared inode over the old name
+        # works without CAP_FOWNER and never exposes a partially-written PAT.
+        target=/secret/runsecure-pat
+        staged=/secret/.runsecure-pat.new
+        rm -f "$$staged"
+        trap 'rm -f "$$staged"' EXIT
+        umask 077
+        cp /host-pat "$$staged"
+        chmod 400 "$$staged"
+        chown 65532:65532 "$$staged"
+        mv -f "$$staged" "$$target"
+        trap - EXIT
     volumes:
       - ${RUNSECURE_PAT_FILE:?RUNSECURE_PAT_FILE is required}:/host-pat:ro
       - pat-secret:/secret

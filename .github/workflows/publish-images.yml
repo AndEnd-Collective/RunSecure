@@ -567,6 +567,14 @@ jobs:
       actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -591,6 +599,8 @@ jobs:
         env:
           DIGEST_FILE: .scan-digest/release-digest-base.txt
           EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/base
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-base-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
           IFS= read -r IMAGE_REF < "$DIGEST_FILE"
@@ -604,14 +614,15 @@ jobs:
             exit 1
           fi
           bash infra/scripts/grype-scan-image.sh \
-            "$IMAGE_REF" grype-base.sarif ca-certificates
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" ca-certificates
 
       - name: Upload Grype scan results (base) to GitHub Security
-        if: always() && hashFiles('grype-base.sarif') != ''
+        if: always() && hashFiles(format('grype-base-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-base.sarif
-          category: grype-base
+          sarif_file: grype-base-${{ matrix.platform_slug }}.sarif
+          category: grype-base-${{ matrix.platform_slug }}
 
   # Scan every pushed terminal language image. The finalizer preserves the
   # read-only dpkg inventory specifically so Syft/Grype can still enumerate
@@ -629,6 +640,8 @@ jobs:
         include:
           - name: node
             lang_version: "24"
+            platform: linux/amd64
+            platform_slug: amd64
             sarif_name: node-24
             expected_dpkg_package: nodejs
             expected_cataloger: javascript-package-cataloger
@@ -637,6 +650,8 @@ jobs:
             expected_presence_package: ''
           - name: node
             lang_version: "22"
+            platform: linux/amd64
+            platform_slug: amd64
             sarif_name: node-22
             expected_dpkg_package: nodejs
             expected_cataloger: javascript-package-cataloger
@@ -645,6 +660,8 @@ jobs:
             expected_presence_package: ''
           - name: python
             lang_version: "3.12"
+            platform: linux/amd64
+            platform_slug: amd64
             sarif_name: python-3.12
             expected_dpkg_package: ca-certificates
             expected_cataloger: python-installed-package-cataloger
@@ -653,12 +670,54 @@ jobs:
             expected_presence_package: ''
           - name: rust
             lang_version: stable
+            platform: linux/amd64
+            platform_slug: amd64
             sarif_name: rust-stable
             expected_dpkg_package: ca-certificates
             expected_cataloger: ''
             expected_cataloger_package: ''
             # rustup ships rustc outside a package database. Prove the exact
             # Rust binary separately; this heuristic SBOM is never fed to Grype.
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+          - name: node
+            lang_version: "24"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: python-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: rust-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
             expected_presence_cataloger: binary-classifier-cataloger
             expected_presence_package: rust
     steps:
@@ -685,7 +744,8 @@ jobs:
         env:
           DIGEST_FILE: .scan-digest/release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
           EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
-          SARIF_FILE: "grype-${{ matrix.sarif_name }}.sarif"
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: "grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif"
           EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
           EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
           EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
@@ -704,17 +764,169 @@ jobs:
             exit 1
           fi
           bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
             "$IMAGE_REF" "$SARIF_FILE" \
             "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
             "$EXPECTED_CATALOGER_PACKAGE" \
             "$EXPECTED_PRESENCE_CATALOGER" "$EXPECTED_PRESENCE_PACKAGE"
 
       - name: Upload Grype scan results (terminal language image)
-        if: always() && hashFiles(format('grype-{0}.sarif', matrix.sarif_name)) != ''
+        if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-${{ matrix.sarif_name }}.sarif
-          category: grype-${{ matrix.sarif_name }}
+          sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
+          category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
+
+  # Build-only composition inputs are promoted alongside terminal images and
+  # can add packages before final hardening. Scan their exact manifest digests
+  # on both release architectures before a Publish Images run can be accepted.
+  grype-scan-build-stages:
+    needs: [gate, languages]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: node
+            lang_version: "24"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-build-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: node-build-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: python-build-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/amd64
+            platform_slug: amd64
+            sarif_name: rust-build-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+          - name: node
+            lang_version: "24"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-build-24
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: node
+            lang_version: "22"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: node-build-22
+            expected_dpkg_package: nodejs
+            expected_cataloger: javascript-package-cataloger
+            expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: python
+            lang_version: "3.12"
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: python-build-3.12
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: python-installed-package-cataloger
+            expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
+          - name: rust
+            lang_version: stable
+            platform: linux/arm64
+            platform_slug: arm64
+            sarif_name: rust-build-stable
+            expected_dpkg_package: ca-certificates
+            expected_cataloger: ''
+            expected_cataloger_package: ''
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable composition-stage digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}
+          path: .scan-digest
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install checksum-pinned Syft + Grype
+        run: |
+          set -euo pipefail
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
+
+      - name: Grype scan (composition-stage image) — fail on HIGH/CRITICAL with fix
+        env:
+          DIGEST_FILE: .scan-digest/release-digest-${{ matrix.name }}-build-${{ matrix.lang_version }}.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: "grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif"
+          EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
+          EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
+          EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
+          EXPECTED_PRESENCE_CATALOGER: ${{ matrix.expected_presence_cataloger }}
+          EXPECTED_PRESENCE_PACKAGE: ${{ matrix.expected_presence_package }}
+        run: |
+          set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
+          bash infra/scripts/grype-scan-image.sh \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
+            "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
+            "$EXPECTED_CATALOGER_PACKAGE" \
+            "$EXPECTED_PRESENCE_CATALOGER" "$EXPECTED_PRESENCE_PACKAGE"
+
+      - name: Upload Grype scan results (composition-stage image)
+        if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
+          category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: proxy image (dnsmasq + haproxy CVEs) ---------
   grype-scan-proxy:
@@ -724,6 +936,14 @@ jobs:
       actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -748,6 +968,8 @@ jobs:
         env:
           DIGEST_FILE: .scan-digest/release-digest-proxy.txt
           EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/proxy
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-proxy-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
           IFS= read -r IMAGE_REF < "$DIGEST_FILE"
@@ -761,14 +983,15 @@ jobs:
             exit 1
           fi
           bash infra/scripts/grype-scan-image.sh \
-            "$IMAGE_REF" grype-proxy.sarif squid
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" squid
 
       - name: Upload Grype scan results (proxy) to GitHub Security
-        if: always() && hashFiles('grype-proxy.sarif') != ''
+        if: always() && hashFiles(format('grype-proxy-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-proxy.sarif
-          category: grype-proxy
+          sarif_file: grype-proxy-${{ matrix.platform_slug }}.sarif
+          category: grype-proxy-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: orchestrator image (distroless Go binary) -----
   # The orchestrator is a long-running control-plane binary; CVEs in its Go
@@ -780,6 +1003,14 @@ jobs:
       actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -804,6 +1035,8 @@ jobs:
         env:
           DIGEST_FILE: .scan-digest/release-digest-orchestrator.txt
           EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/orchestrator
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-orchestrator-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
           IFS= read -r IMAGE_REF < "$DIGEST_FILE"
@@ -817,15 +1050,16 @@ jobs:
             exit 1
           fi
           bash infra/scripts/grype-scan-image.sh \
-            "$IMAGE_REF" grype-orchestrator.sarif \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
             '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (orchestrator) to GitHub Security
-        if: always() && hashFiles('grype-orchestrator.sarif') != ''
+        if: always() && hashFiles(format('grype-orchestrator-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-orchestrator.sarif
-          category: grype-orchestrator
+          sarif_file: grype-orchestrator-${{ matrix.platform_slug }}.sarif
+          category: grype-orchestrator-${{ matrix.platform_slug }}
 
   # --- Post-publish Grype scan: socket-proxy image (distroless Go binary) -----
   # socket-proxy is the only component mounting docker.sock; its binary must be
@@ -837,6 +1071,14 @@ jobs:
       actions: read
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: amd64
+          - platform: linux/arm64
+            platform_slug: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -861,6 +1103,8 @@ jobs:
         env:
           DIGEST_FILE: .scan-digest/release-digest-socket-proxy.txt
           EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/socket-proxy
+          PLATFORM: ${{ matrix.platform }}
+          SARIF_FILE: grype-socket-proxy-${{ matrix.platform_slug }}.sarif
         run: |
           set -euo pipefail
           IFS= read -r IMAGE_REF < "$DIGEST_FILE"
@@ -874,12 +1118,13 @@ jobs:
             exit 1
           fi
           bash infra/scripts/grype-scan-image.sh \
-            "$IMAGE_REF" grype-socket-proxy.sarif \
+            --platform "$PLATFORM" \
+            "$IMAGE_REF" "$SARIF_FILE" \
             '' go-module-binary-cataloger ''
 
       - name: Upload Grype scan results (socket-proxy) to GitHub Security
-        if: always() && hashFiles('grype-socket-proxy.sarif') != ''
+        if: always() && hashFiles(format('grype-socket-proxy-{0}.sarif', matrix.platform_slug)) != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
-          sarif_file: grype-socket-proxy.sarif
-          category: grype-socket-proxy
+          sarif_file: grype-socket-proxy-${{ matrix.platform_slug }}.sarif
+          category: grype-socket-proxy-${{ matrix.platform_slug }}

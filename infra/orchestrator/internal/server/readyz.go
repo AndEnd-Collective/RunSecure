@@ -56,6 +56,9 @@ func readinessReasons(snap state.Snapshot, now time.Time, pollIntervalSeconds in
 	if snap.Draining {
 		reasons = append(reasons, "draining")
 	}
+	if snap.RateLimited {
+		reasons = append(reasons, "rate_limited")
+	}
 	limit := time.Duration(3*pollIntervalSeconds) * time.Second
 	for repo, repoState := range snap.PerRepo {
 		switch {

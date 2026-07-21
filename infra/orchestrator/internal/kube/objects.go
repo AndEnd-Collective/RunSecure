@@ -359,12 +359,14 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 	}
 
 	// Memory-backed /tmp keeps transient job data bounded and off the writable
-	// runner image layer.
+	// runner image layer. Match the Compose backend's 512 MiB tmpfs ceiling.
+	tmpSizeLimit := resource.MustParse("512Mi")
 	tmpVolume := corev1.Volume{
 		Name: "tmp",
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium: corev1.StorageMediumMemory,
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &tmpSizeLimit,
 			},
 		},
 	}
@@ -393,6 +395,11 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		ReadOnly:  true,
 	}
 
+	// Kubernetes expresses CPU in cores; SpawnInput carries Docker-compatible
+	// nano-CPUs. Preserve the exact value without a float conversion. Requests
+	// equal limits so scheduler placement reflects the actual runner ceiling.
+	cpu := *resource.NewScaledQuantity(in.ResourcesNanoCPUs, resource.Nano)
+	memory := *resource.NewQuantity(in.ResourcesMemory, resource.BinarySI)
 	runner := corev1.Container{
 		Name:            "runner",
 		Image:           in.RunnerImage,
@@ -403,8 +410,18 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		// leaving Args empty preserves the baked default behavior.
 		Command:         []string{backend.RunnerEntrypoint},
 		SecurityContext: runnerContainerSecCtx(),
-		Env:             runnerEnv,
-		VolumeMounts:    []corev1.VolumeMount{tmpMount, jitMount},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    cpu,
+				corev1.ResourceMemory: memory,
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    cpu,
+				corev1.ResourceMemory: memory,
+			},
+		},
+		Env:          runnerEnv,
+		VolumeMounts: []corev1.VolumeMount{tmpMount, jitMount},
 	}
 
 	return &corev1.Pod{
@@ -534,8 +551,9 @@ func DefaultDenyNetworkPolicy(scope string) *networkingv1.NetworkPolicy {
 //   - 3128/TCP   — HTTP CONNECT (always).
 //   - 53/UDP+TCP  — dnsmasq (only when EnableDNSMasq is true).
 //   - Each port in TCPEgressPorts.
-//   - 53/UDP+TCP to the exact operator-configured cluster DNS /32 so the proxy
-//     Service DNS name can be resolved without opening general egress.
+//   - 53/UDP+TCP to exact operator-configured cluster DNS Service /32s and DNS
+//     Pods. The Service peers cover pre-DNAT evaluation; the namespace + Pod
+//     selector covers post-DNAT evaluation without opening general egress.
 //
 // All other egress from the runner is denied by the DefaultDenyNetworkPolicy.
 // No Ingress rule is created — the runner must not accept inbound connections.
@@ -578,9 +596,7 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 	}
 
 	dnsRule := networkingv1.NetworkPolicyEgressRule{
-		To: []networkingv1.NetworkPolicyPeer{{
-			IPBlock: &networkingv1.IPBlock{CIDR: in.KubeDNSCIDR},
-		}},
+		To: clusterDNSPeers(in),
 		Ports: []networkingv1.NetworkPolicyPort{
 			{Protocol: &udpProto, Port: ptrIntStr(dnsPort)},
 			{Protocol: &tcpProto, Port: ptrIntStr(dnsPort)},
@@ -641,15 +657,9 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 	tcpProto := corev1.ProtocolTCP
 	udpProto := corev1.ProtocolUDP
 
-	// Rule 1: DNS to the operator-configured cluster DNS service address.
+	// Rule 1: DNS to the operator-configured cluster DNS Pods.
 	dnsRule := networkingv1.NetworkPolicyEgressRule{
-		To: []networkingv1.NetworkPolicyPeer{
-			{
-				IPBlock: &networkingv1.IPBlock{
-					CIDR: in.KubeDNSCIDR,
-				},
-			},
-		},
+		To: clusterDNSPeers(in),
 		Ports: []networkingv1.NetworkPolicyPort{
 			{Protocol: &udpProto, Port: ptrIntStr(dnsPort)},
 			{Protocol: &tcpProto, Port: ptrIntStr(dnsPort)},
@@ -711,6 +721,23 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 			Egress: egressRules,
 		},
 	}
+}
+
+func clusterDNSPeers(in backend.SpawnInput) []networkingv1.NetworkPolicyPeer {
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(in.KubeDNSServiceCIDRs)+1)
+	for _, cidr := range in.KubeDNSServiceCIDRs {
+		peers = append(peers, networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: cidr},
+		})
+	}
+	return append(peers, networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			"kubernetes.io/metadata.name": in.KubeDNSNamespace,
+		}},
+		PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			in.KubeDNSPodLabelKey: in.KubeDNSPodLabelValue,
+		}},
+	})
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

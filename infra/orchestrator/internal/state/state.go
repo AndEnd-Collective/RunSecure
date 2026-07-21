@@ -42,6 +42,7 @@ type State struct {
 	rlRemaining  int
 	rlLimit      int
 	rlReset      time.Time
+	rateLimited  bool
 
 	configuredCapacity int
 	workerCapacity     int
@@ -470,6 +471,12 @@ func (s *State) RateLimit() (remaining, limit int, reset time.Time) {
 	return s.rlRemaining, s.rlLimit, s.rlReset
 }
 
+func (s *State) SetRateLimited(paused bool) {
+	s.mu.Lock()
+	s.rateLimited = paused
+	s.mu.Unlock()
+}
+
 // Snapshot is the complete operator-visible runtime state.
 type Snapshot struct {
 	PerRepo                 map[string]RepoState  `json:"per_repo"`
@@ -478,6 +485,7 @@ type Snapshot struct {
 	RateLimitRemaining      int                   `json:"rate_limit_remaining"`
 	RateLimitLimit          int                   `json:"rate_limit_limit"`
 	RateLimitReset          time.Time             `json:"rate_limit_reset"`
+	RateLimited             bool                  `json:"rate_limited"`
 	ConfiguredCapacity      int                   `json:"configured_capacity"`
 	WorkerCapacity          int                   `json:"worker_capacity"`
 	Version                 string                `json:"version"`
@@ -502,6 +510,7 @@ func (s *State) Snapshot() Snapshot {
 		RateLimitRemaining:      s.rlRemaining,
 		RateLimitLimit:          s.rlLimit,
 		RateLimitReset:          s.rlReset,
+		RateLimited:             s.rateLimited,
 		ConfiguredCapacity:      s.configuredCapacity,
 		WorkerCapacity:          s.workerCapacity,
 		Version:                 s.version,

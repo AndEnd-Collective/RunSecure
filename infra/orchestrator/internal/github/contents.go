@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,11 @@ func (c *Client) GetRunnerYML(ctx context.Context, repo, etag string) (body []by
 	}
 
 	resp, err := c.hc.Do(req)
+	status := "transport_error"
+	if resp != nil {
+		status = strconv.Itoa(resp.StatusCode)
+	}
+	c.observe(http.MethodGet, path, status)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("github: get runner.yml for %s: %w", repo, err)
 	}
@@ -58,7 +64,10 @@ func (c *Client) GetRunnerYML(ctx context.Context, repo, etag string) (body []by
 		return nil, "", true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", false, fmt.Errorf("github: get runner.yml for %s: unexpected status %d", repo, resp.StatusCode)
+		return nil, "", false, fmt.Errorf(
+			"github: get runner.yml for %s: %w",
+			repo, responseError(resp, "get repository contents"),
+		)
 	}
 
 	rawBody, err := io.ReadAll(resp.Body)

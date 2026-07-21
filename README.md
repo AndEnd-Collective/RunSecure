@@ -461,11 +461,12 @@ Images are at `ghcr.io/andend-collective/runsecure/<image>:<tag>`. Three tag sty
 | Tag form | Example | What it points at | When to use |
 |---|---|---|---|
 | **Pinned** | `python:1.1.5-3.12` | One specific build, byte-identical forever | Production. Lock to a known-good build; bump deliberately. |
-| **Floating minor** | `python:1.1-3.12` | The latest patch of the 1.1.x line | Stable projects that want auto-patches but not breaking changes. (Tag is published only by promote-to-stable after acceptance.) |
 | **Rolling latest** | `python:latest-3.12` | Whatever the most recent successful release was | Local development, CI scratchpads. **Do not use in production** — a new release can silently change behavior under you. |
 | **Canary** | `python:1.1.5-canary-3.12` | The just-published, not-yet-acceptance-validated build | Don't pull this directly. It exists so the acceptance suite can test before promote. |
 
-The promotion is server-side via `docker buildx imagetools create` — `:1.1.5`, `:1.1`, and `:latest` are all the same digest as the canary that passed acceptance. No rebuild, no drift.
+The promotion is server-side via `docker buildx imagetools create` — `:1.1.5`
+and `:latest` are the same digest as the canary that passed acceptance. No
+rebuild, no drift.
 
 ### Verify what you pulled
 
@@ -488,7 +489,7 @@ If `revision` doesn't match a commit on `main` of the source repo, the image isn
 
 - A new patch release ships every Monday at 02:30 UTC (`weekly-version-bump.yml`).
 - Pinned tags (`:1.1.5`, `:1.1.5-3.12`, etc.) are **never moved**. Once published, the digest behind that tag is permanent.
-- Floating tags (`:1.1`, `:1.1-3.12`, `:latest`, `:latest-3.12`) move on every release.
+- Rolling tags (`:latest`, `:latest-3.12`, etc.) move on every release.
 - We do not delete old pinned tags. Consumers can stay on an older pin indefinitely; security fixes only land in newer pins.
 
 ### Anti-patterns — don't do this

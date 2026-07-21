@@ -16,23 +16,26 @@ import (
 // testInput returns a fully-populated SpawnInput for use in table tests.
 func testInput() backend.SpawnInput {
 	return backend.SpawnInput{
-		Scope:              "ci",
-		Repo:               "acme/widget",
-		SpawnID:            "spawn-abc123",
-		Version:            "v2.1.8",
-		BuildSHA:           "abc123",
-		RunnerImage:        "ghcr.io/acme/runner@sha256:aaaa",
-		ProxyImage:         "ghcr.io/acme/proxy@sha256:bbbb",
-		SeccompProfilePath: "/etc/seccomp/node-runner.json",
-		ResourcesMemory:    2147483648,
-		ResourcesNanoCPUs:  2000000000,
-		ResourcesPIDs:      512,
-		JITConfigB64:       "base64jitconfig==",
-		EgressConfigDir:    "/var/run/runsecure/egress/spawn-abc123",
-		EnableDNSMasq:      true,
-		Labels:             []string{"runsecure.scope=ci"},
-		TCPEgressPorts:     []int{443, 8080},
-		KubeDNSCIDR:        "10.96.0.10/32",
+		Scope:                "ci",
+		Repo:                 "acme/widget",
+		SpawnID:              "spawn-abc123",
+		Version:              "v2.1.8",
+		BuildSHA:             "abc123",
+		RunnerImage:          "ghcr.io/acme/runner@sha256:aaaa",
+		ProxyImage:           "ghcr.io/acme/proxy@sha256:bbbb",
+		SeccompProfilePath:   "/etc/seccomp/node-runner.json",
+		ResourcesMemory:      2147483648,
+		ResourcesNanoCPUs:    2000000000,
+		ResourcesPIDs:        512,
+		JITConfigB64:         "base64jitconfig==",
+		EgressConfigDir:      "/var/run/runsecure/egress/spawn-abc123",
+		EnableDNSMasq:        true,
+		Labels:               []string{"runsecure.scope=ci"},
+		TCPEgressPorts:       []int{443, 8080},
+		KubeDNSServiceCIDRs:  []string{"10.96.0.10/32", "10.100.0.10/32"},
+		KubeDNSNamespace:     "kube-system",
+		KubeDNSPodLabelKey:   "k8s-app",
+		KubeDNSPodLabelValue: "kube-dns",
 	}
 }
 
@@ -331,6 +334,38 @@ func TestRunnerPod_Namespace(t *testing.T) {
 	if pod.Namespace != kube.Namespace(in.Scope) {
 		t.Errorf("RunnerPod namespace = %q, want %q", pod.Namespace, kube.Namespace(in.Scope))
 	}
+}
+
+func TestRunnerPod_ResourceRequestsLimitsAndTmpBound(t *testing.T) {
+	in := testInput()
+	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("RunnerPod: got %d containers, want 1", len(pod.Spec.Containers))
+	}
+	runner := pod.Spec.Containers[0]
+	if got := runner.Resources.Requests.Cpu().MilliValue(); got != 2_000 {
+		t.Errorf("runner CPU request = %dm, want 2000m", got)
+	}
+	if got := runner.Resources.Limits.Cpu().MilliValue(); got != 2_000 {
+		t.Errorf("runner CPU limit = %dm, want 2000m", got)
+	}
+	if got := runner.Resources.Requests.Memory().Value(); got != 2<<30 {
+		t.Errorf("runner memory request = %d, want %d", got, int64(2<<30))
+	}
+	if got := runner.Resources.Limits.Memory().Value(); got != 2<<30 {
+		t.Errorf("runner memory limit = %d, want %d", got, int64(2<<30))
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name != "tmp" {
+			continue
+		}
+		if volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory ||
+			volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.Value() != 512<<20 {
+			t.Errorf("runner tmp must be a 512Mi memory EmptyDir, got %#v", volume.EmptyDir)
+		}
+		return
+	}
+	t.Error("RunnerPod: tmp volume is missing")
 }
 
 // -------------------------------------------------------------------
@@ -763,9 +798,20 @@ func TestRunnerEgressNetworkPolicy_ToProxyAndClusterDNSOnly(t *testing.T) {
 		proxyPeer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
 		t.Errorf("RunnerEgress: proxy peer is not pinned to this spawn: %+v", proxyPeer)
 	}
-	dnsPeer := pol.Spec.Egress[1].To[0]
-	if dnsPeer.IPBlock == nil || dnsPeer.IPBlock.CIDR != in.KubeDNSCIDR {
-		t.Errorf("RunnerEgress: DNS peer = %+v, want exact %s", dnsPeer, in.KubeDNSCIDR)
+	dnsPeers := pol.Spec.Egress[1].To
+	if len(dnsPeers) != len(in.KubeDNSServiceCIDRs)+1 {
+		t.Fatalf("RunnerEgress: DNS peers = %d, want service /32s + Pod selector", len(dnsPeers))
+	}
+	for index, cidr := range in.KubeDNSServiceCIDRs {
+		if dnsPeers[index].IPBlock == nil || dnsPeers[index].IPBlock.CIDR != cidr {
+			t.Errorf("RunnerEgress: DNS service peer %d = %+v, want %s", index, dnsPeers[index], cidr)
+		}
+	}
+	dnsPeer := dnsPeers[len(dnsPeers)-1]
+	if dnsPeer.IPBlock != nil || dnsPeer.NamespaceSelector == nil || dnsPeer.PodSelector == nil ||
+		dnsPeer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != in.KubeDNSNamespace ||
+		dnsPeer.PodSelector.MatchLabels[in.KubeDNSPodLabelKey] != in.KubeDNSPodLabelValue {
+		t.Errorf("RunnerEgress: DNS peer is not pinned to configured namespace + Pod label: %+v", dnsPeer)
 	}
 	if len(pol.Spec.Egress[1].Ports) != 2 ||
 		!networkPolicyHasPort(pol.Spec.Egress[1:2], 53) {
@@ -860,6 +906,21 @@ func TestProxyEgressNetworkPolicy_AllowsDNS(t *testing.T) {
 	// Must have a rule that allows port 53 (kube-dns).
 	if !networkPolicyHasPort(pol.Spec.Egress, 53) {
 		t.Errorf("ProxyEgress: missing port 53 (kube-dns)")
+	}
+	dnsPeers := pol.Spec.Egress[0].To
+	if len(dnsPeers) != len(in.KubeDNSServiceCIDRs)+1 {
+		t.Fatalf("ProxyEgress: DNS peers = %d, want service /32s + Pod selector", len(dnsPeers))
+	}
+	for index, cidr := range in.KubeDNSServiceCIDRs {
+		if dnsPeers[index].IPBlock == nil || dnsPeers[index].IPBlock.CIDR != cidr {
+			t.Errorf("ProxyEgress: DNS service peer %d = %+v, want %s", index, dnsPeers[index], cidr)
+		}
+	}
+	dnsPeer := dnsPeers[len(dnsPeers)-1]
+	if dnsPeer.IPBlock != nil || dnsPeer.NamespaceSelector == nil || dnsPeer.PodSelector == nil ||
+		dnsPeer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != in.KubeDNSNamespace ||
+		dnsPeer.PodSelector.MatchLabels[in.KubeDNSPodLabelKey] != in.KubeDNSPodLabelValue {
+		t.Errorf("ProxyEgress: DNS peer is not pinned to configured namespace + Pod label: %+v", dnsPeer)
 	}
 }
 

@@ -44,7 +44,8 @@ func TestReadyz_FailsForBackendDependency(t *testing.T) {
 func TestReadinessReasons_FailClosed(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	snap := state.Snapshot{
-		Draining: true,
+		Draining:    true,
+		RateLimited: true,
 		PerRepo: map[string]state.RepoState{
 			"never/polled": {},
 			"stale/repo":   {LastPollSuccess: now.Add(-30 * time.Second)},
@@ -59,12 +60,23 @@ func TestReadinessReasons_FailClosed(t *testing.T) {
 	}
 	reasons := readinessReasons(snap, now, 10)
 	require.ElementsMatch(t, []string{
-		"config_not_loaded", "draining", "poll_never_succeeded:never/polled",
+		"config_not_loaded", "draining", "rate_limited", "poll_never_succeeded:never/polled",
 		"poll_stale:stale/repo", "poll_error:auth/repo:github_auth_failed",
 		"runner_operation_error:auth/repo:generate_jit_config:github_auth_failed",
 		"breaker_open:auth/repo",
 		"teardown_blocked:auth/repo",
 	}, reasons)
+}
+
+func TestReadyz_FailsWhileSchedulerRateLimited(t *testing.T) {
+	d := readyDeps(t)
+	d.snap.RateLimited = true
+	rr := httpRec()
+
+	NewReadyz(d).ServeHTTP(rr, httpReq(http.MethodGet, "/readyz"))
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	require.Contains(t, rr.Body.String(), "rate_limited")
 }
 
 func TestReadyz_RunnerCapabilityAuthFailureSurvivesDemandSuccess(t *testing.T) {

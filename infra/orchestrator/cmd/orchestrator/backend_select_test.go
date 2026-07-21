@@ -295,6 +295,29 @@ func TestRunnerYML_KubeBackend_FetchesFromAPI(t *testing.T) {
 		"kube backend must return the runner.yml fetched from the GitHub API")
 }
 
+func TestRunnerYML_KubeBackend_RespectsCallerCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	pd := &productionDeps{
+		gh: makeGHClient(t, srv.URL),
+		st: state.New(),
+		scopeRef: &config.Scope{
+			Backend: "kube",
+			Repos:   []config.RepoBlock{{Repo: "o/r"}},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	_, err := pd.RunnerYMLContext(ctx, "o/r")
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 150*time.Millisecond)
+}
+
 // TestRunnerYML_KubeBackend_304_ReturnsNotModifiedSentinel verifies that a
 // 304 response from the GitHub API causes RunnerYML to return errRunnerYMLNotModified.
 func TestRunnerYML_KubeBackend_304_ReturnsNotModifiedSentinel(t *testing.T) {

@@ -102,7 +102,7 @@ type PollDeps interface {
 	MaybeClearRateLimit(scope string) bool
 
 	NewSpawnID() string
-	LabelsForRepo(repo string) ([]string, error)
+	LabelsForRepo(ctx context.Context, repo string) ([]string, error)
 	TryReserve(spawnID, repo string, repoCap, globalCap int) bool
 	ReleaseReservation(spawnID string)
 	RecordPollAttempt(repo string)
@@ -131,7 +131,7 @@ type SpawnDeps interface {
 	Emit() *cornerstone.Emitter
 	Clock() ClockLike
 	Egress() EgressGenerator
-	RunnerYML(repo string) (*RunnerYMLSnapshot, error)
+	RunnerYMLContext(ctx context.Context, repo string) (*RunnerYMLSnapshot, error)
 	State() StateLike
 
 	GlobalMaxRunners() int

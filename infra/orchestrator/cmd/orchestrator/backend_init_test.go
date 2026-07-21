@@ -22,9 +22,11 @@ func setValidKubeImages(t *testing.T) {
 	} {
 		t.Setenv(name, "registry.example/runsecure/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	}
-	t.Setenv("RUNSECURE_KUBE_DNS_CIDR", "10.96.0.10/32")
-	t.Setenv("RUNSECURE_KUBE_API_SERVER_CIDR", "10.96.0.1/32")
-	t.Setenv("RUNSECURE_KUBE_API_SERVER_PORT", "443")
+	t.Setenv("RUNSECURE_KUBE_DNS_NAMESPACE", "kube-system")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_KEY", "k8s-app")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_VALUE", "kube-dns")
+	t.Setenv("RUNSECURE_KUBE_DNS_SERVICE_CIDRS", "10.96.0.10/32")
+	t.Setenv("RUNSECURE_KUBE_API_SERVER_PEERS", `[{"cidr":"10.96.0.1/32","port":443},{"cidr":"172.18.0.2/32","port":6443}]`)
 }
 
 func TestInitializeBackendKubeNeverConstructsDocker(t *testing.T) {
@@ -91,12 +93,21 @@ func TestValidateKubeEnvironmentRejectsNetworkDependencies(t *testing.T) {
 		name  string
 		value string
 	}{
-		{name: "RUNSECURE_KUBE_DNS_CIDR", value: ""},
-		{name: "RUNSECURE_KUBE_DNS_CIDR", value: "10.96.0.10/24"},
-		{name: "RUNSECURE_KUBE_API_SERVER_CIDR", value: "not-a-cidr"},
-		{name: "RUNSECURE_KUBE_API_SERVER_CIDR", value: "10.96.0.0/24"},
-		{name: "RUNSECURE_KUBE_API_SERVER_PORT", value: "0"},
-		{name: "RUNSECURE_KUBE_API_SERVER_PORT", value: "65536"},
+		{name: "RUNSECURE_KUBE_DNS_NAMESPACE", value: ""},
+		{name: "RUNSECURE_KUBE_DNS_NAMESPACE", value: "KUBE_SYSTEM"},
+		{name: "RUNSECURE_KUBE_DNS_POD_LABEL_KEY", value: "bad key"},
+		{name: "RUNSECURE_KUBE_DNS_POD_LABEL_VALUE", value: ""},
+		{name: "RUNSECURE_KUBE_DNS_POD_LABEL_VALUE", value: "invalid value"},
+		{name: "RUNSECURE_KUBE_DNS_SERVICE_CIDRS", value: ""},
+		{name: "RUNSECURE_KUBE_DNS_SERVICE_CIDRS", value: "10.96.0.0/24"},
+		{name: "RUNSECURE_KUBE_DNS_SERVICE_CIDRS", value: "10.96.0.10/32,10.96.0.10/32"},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: "not-json"},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: "[]"},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: `[{"cidr":"10.96.0.0/24","port":443}]`},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: `[{"cidr":"10.96.0.1/32","port":0}]`},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: `[{"cidr":"10.96.0.1/32","port":443},{"cidr":"10.96.0.1/32","port":443}]`},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: `[{"cidr":"10.96.0.1/32","port":443,"extra":true}]`},
+		{name: "RUNSECURE_KUBE_API_SERVER_PEERS", value: `[{"cidr":"10.96.0.1/32","port":443}] {}`},
 	} {
 		t.Run(tc.name+tc.value, func(t *testing.T) {
 			setValidKubeImages(t)

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -52,9 +54,7 @@ func New(healthzAddr, debugAddr string, deps AllDeps, em *cornerstone.Emitter) *
 	}
 }
 
-// Run starts both listeners and blocks until ctx is cancelled, then shuts
-// them down gracefully.
-func (s *Server) Run(ctx context.Context) error {
+func (s *Server) httpServers() (*http.Server, *http.Server) {
 	healthzMux := http.NewServeMux()
 	healthzMux.Handle("/healthz", s.healthz)
 	healthzMux.Handle("/readyz", s.readyz)
@@ -79,19 +79,68 @@ func (s *Server) Run(ctx context.Context) error {
 		WriteTimeout:      HTTPWriteTimeout(),
 		IdleTimeout:       HTTPIdleTimeout(),
 	}
+	return healthzSrv, debugSrv
+}
+
+// Start binds both management listeners synchronously, then serves them in
+// the background. A successful return guarantees that supervisors can reach
+// /healthz before the caller begins potentially slow cold-start reconciliation.
+// The returned channel yields exactly one terminal server result.
+func (s *Server) Start(ctx context.Context) (<-chan error, error) {
+	healthzListener, err := net.Listen("tcp", s.healthzAddr)
+	if err != nil {
+		return nil, fmt.Errorf("health listener %s: %w", s.healthzAddr, err)
+	}
+	debugListener, err := net.Listen("tcp", s.debugAddr)
+	if err != nil {
+		_ = healthzListener.Close()
+		return nil, fmt.Errorf("debug listener %s: %w", s.debugAddr, err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.serve(ctx, healthzListener, debugListener)
+		close(done)
+	}()
+	return done, nil
+}
+
+// Run starts both listeners and blocks until ctx is cancelled, then shuts
+// them down gracefully.
+func (s *Server) Run(ctx context.Context) error {
+	done, err := s.Start(ctx)
+	if err != nil {
+		return err
+	}
+	return <-done
+}
+
+func (s *Server) serve(
+	ctx context.Context,
+	healthzListener net.Listener,
+	debugListener net.Listener,
+) error {
+	healthzSrv, debugSrv := s.httpServers()
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- healthzSrv.ListenAndServe() }()
-	go func() { errCh <- debugSrv.ListenAndServe() }()
+	go func() { errCh <- healthzSrv.Serve(healthzListener) }()
+	go func() { errCh <- debugSrv.Serve(debugListener) }()
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), HTTPShutdownTimeout())
+	shutdown := func() {
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(), HTTPShutdownTimeout(),
+		)
 		defer cancel()
 		_ = healthzSrv.Shutdown(shutdownCtx)
 		_ = debugSrv.Shutdown(shutdownCtx)
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return nil
 	case err := <-errCh:
+		shutdown()
 		return err
 	}
 }

@@ -264,14 +264,30 @@ assert "generate-release-manifest.py" in manifest_steps
 assert "--publish-run-id '${{ github.run_id }}'" in manifest_steps
 assert "release-image-manifest-" in manifest_steps
 assert set(jobs["grype-scan-languages"]["needs"]) == {"gate", "languages"}
-assert len(jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]) == 4
-rust_scan = next(
-    row
-    for row in jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]
-    if row["name"] == "rust"
+language_scans = jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]
+assert len(language_scans) == 8
+assert {row["platform"] for row in language_scans} == {"linux/amd64", "linux/arm64"}
+assert {row["platform_slug"] for row in language_scans} == {"amd64", "arm64"}
+assert {
+    (row["name"], str(row["lang_version"]), row["platform"])
+    for row in language_scans
+} == {
+    ("node", "24", "linux/amd64"),
+    ("node", "24", "linux/arm64"),
+    ("node", "22", "linux/amd64"),
+    ("node", "22", "linux/arm64"),
+    ("python", "3.12", "linux/amd64"),
+    ("python", "3.12", "linux/arm64"),
+    ("rust", "stable", "linux/amd64"),
+    ("rust", "stable", "linux/arm64"),
+}
+rust_scans = [row for row in language_scans if row["name"] == "rust"]
+assert len(rust_scans) == 2
+assert all(
+    row["expected_presence_cataloger"] == "binary-classifier-cataloger"
+    and row["expected_presence_package"] == "rust"
+    for row in rust_scans
 )
-assert rust_scan["expected_presence_cataloger"] == "binary-classifier-cataloger"
-assert rust_scan["expected_presence_package"] == "rust"
 
 assert "Refresh socket-proxy allowed-images.txt" not in weekly_path.read_text()
 weekly_text = weekly_path.read_text()

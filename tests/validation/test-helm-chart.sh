@@ -356,12 +356,17 @@ else
     pass "Kubernetes runtime: no DOCKER_HOST or socket-proxy endpoint injected"
 fi
 
-# ── Test 28: readiness uses truthful /readyz ────────────────────────────────
+# ── Test 28: liveness and readiness use distinct truthful endpoints ────────
 
-if echo "${RENDERED}" | grep -q 'path: /readyz'; then
-    pass "Readiness probe targets /readyz"
+LIVENESS_BLOCK="$(echo "${RENDERED}" | sed -n '/^[[:space:]]*livenessProbe:/,/^[[:space:]]*readinessProbe:/p')"
+READINESS_BLOCK="$(echo "${RENDERED}" | sed -n '/^[[:space:]]*readinessProbe:/,/^[[:space:]]*resources:/p')"
+if echo "${LIVENESS_BLOCK}" | grep -q 'path: /healthz' &&
+   ! echo "${LIVENESS_BLOCK}" | grep -q 'path: /readyz' &&
+   echo "${READINESS_BLOCK}" | grep -q 'path: /readyz' &&
+   ! echo "${READINESS_BLOCK}" | grep -q 'path: /healthz'; then
+    pass "Liveness targets /healthz while readiness targets /readyz"
 else
-    fail "Readiness probe does not target /readyz"
+    fail "Liveness/readiness probes do not target distinct truthful endpoints"
 fi
 
 # ── Test 29: writable bounded egress state is under /tmp ───────────────────
@@ -392,20 +397,24 @@ else
     fail "Kubernetes lifecycle: singleton/Recreate/90s drain contract missing"
 fi
 
-# ── Test 32: cluster dependency /32s are rendered into env and policy ──────
+# ── Test 32: cluster dependency peers are rendered into env and policy ─────
 
 NETWORK_ENV_OK=1
-for env_name in RUNSECURE_KUBE_API_SERVER_CIDR RUNSECURE_KUBE_API_SERVER_PORT RUNSECURE_KUBE_DNS_CIDR; do
+for env_name in RUNSECURE_KUBE_API_SERVER_PEERS RUNSECURE_KUBE_DNS_SERVICE_CIDRS \
+  RUNSECURE_KUBE_DNS_NAMESPACE RUNSECURE_KUBE_DNS_POD_LABEL_KEY \
+  RUNSECURE_KUBE_DNS_POD_LABEL_VALUE; do
     if ! echo "${RENDERED}" | grep -q -- "- name: ${env_name}"; then
         NETWORK_ENV_OK=0
     fi
 done
 if [[ "${NETWORK_ENV_OK}" -eq 1 ]] &&
    echo "${RENDERED}" | grep -q 'cidr: "10.96.0.1/32"' &&
-   echo "${RENDERED}" | grep -q 'cidr: "10.96.0.10/32"'; then
-    pass "Kubernetes network: exact API and DNS /32 dependencies reach runtime and policy"
+   echo "${RENDERED}" | grep -q 'cidr: "10.96.0.10/32"' &&
+   echo "${RENDERED}" | grep -q 'kubernetes.io/metadata.name: "kube-system"' &&
+   echo "${RENDERED}" | grep -q '"k8s-app": "kube-dns"'; then
+    pass "Kubernetes network: exact API pair and pre/post-DNAT DNS peers reach runtime and policy"
 else
-    fail "Kubernetes network: API/DNS runtime env or exact policy CIDR missing"
+    fail "Kubernetes network: API/DNS runtime env or exact policy peer missing"
 fi
 
 # ── Test 33: unsafe replicas, drain grace, and broad CIDRs fail closed ─────
@@ -420,15 +429,46 @@ if render_chart --set terminationGracePeriodSeconds=89 &>/dev/null; then
 else
     pass "Kubernetes lifecycle: drain grace below 90 seconds is rejected"
 fi
-if render_chart --set kubernetesNetwork.dnsCIDR=10.96.0.0/24 &>/dev/null; then
-    fail "Kubernetes network: broad DNS CIDR was accepted"
+if render_chart --set kubernetesNetwork.dnsNamespace=KUBE_SYSTEM &>/dev/null; then
+    fail "Kubernetes network: invalid DNS namespace was accepted"
 else
-    pass "Kubernetes network: DNS destination must be an exact /32"
+    pass "Kubernetes network: DNS namespace selector must be valid"
 fi
-if render_chart --set kubernetesNetwork.apiServerCIDR=10.96.0.0/24 &>/dev/null; then
+if render_chart --set 'kubernetesNetwork.dnsServiceCIDRs[0]=10.96.0.0/24' &>/dev/null ||
+   render_chart --set 'kubernetesNetwork.dnsServiceCIDRs[1]=10.96.0.10/32' &>/dev/null; then
+    fail "Kubernetes network: broad or duplicate DNS Service CIDR was accepted"
+else
+    pass "Kubernetes network: DNS Service peers must be unique exact /32s"
+fi
+if render_chart --set 'kubernetesNetwork.apiServerPeers[0].cidr=10.96.0.0/24' &>/dev/null; then
     fail "Kubernetes network: broad API-server CIDR was accepted"
 else
     pass "Kubernetes network: API-server destination must be an exact /32"
+fi
+if render_chart --set 'kubernetesNetwork.apiServerPeers[0].port=0' &>/dev/null ||
+   render_chart --set-string 'kubernetesNetwork.apiServerPeers[1].cidr=10.96.0.1/32' \
+     --set 'kubernetesNetwork.apiServerPeers[1].port=443' &>/dev/null; then
+    fail "Kubernetes network: invalid or duplicate API-server pair was accepted"
+else
+    pass "Kubernetes network: API-server pairs must be valid and unique"
+fi
+
+PAIR_RENDERED=$(render_chart \
+  --set-string 'kubernetesNetwork.apiServerPeers[0].cidr=10.96.0.1/32' \
+  --set 'kubernetesNetwork.apiServerPeers[0].port=443' \
+  --set-string 'kubernetesNetwork.apiServerPeers[1].cidr=172.18.0.2/32' \
+  --set 'kubernetesNetwork.apiServerPeers[1].port=6443' 2>/dev/null || echo "")
+API_PAIR_POLICY=$(echo "${PAIR_RENDERED}" | sed -n '/# kube-apiserver Service and endpoints/,/# Cluster DNS/p')
+SERVICE_PAIR_RULE=$(echo "${API_PAIR_POLICY}" | grep -B3 -A1 'cidr: "10.96.0.1/32"' || true)
+ENDPOINT_PAIR_RULE=$(echo "${API_PAIR_POLICY}" | grep -B3 -A1 'cidr: "172.18.0.2/32"' || true)
+if [[ $(echo "${API_PAIR_POLICY}" | grep -c '^    - ports:') -eq 2 ]] &&
+   echo "${SERVICE_PAIR_RULE}" | grep -q 'port: 443' &&
+   ! echo "${SERVICE_PAIR_RULE}" | grep -q 'port: 6443' &&
+   echo "${ENDPOINT_PAIR_RULE}" | grep -q 'port: 6443' &&
+   ! echo "${ENDPOINT_PAIR_RULE}" | grep -q 'port: 443'; then
+    pass "Kubernetes network: API CIDRs and ports render as exact pairs without cross-pairs"
+else
+    fail "Kubernetes network: API peer rendering introduced a CIDR/port cross-product"
 fi
 
 # ── Print results ────────────────────────────────────────────────────────────

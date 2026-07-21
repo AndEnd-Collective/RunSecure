@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/stretchr/testify/require"
@@ -61,7 +62,7 @@ func TestLifecycleFastCompletedJobUsesPostExitJobCorrelation(t *testing.T) {
 	require.NoError(t, err)
 	require.Less(t, time.Since(started), d.lifecycle.PollInterval,
 		"correlation must not wait for the next runner polling interval")
-	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 	require.Equal(t, int64(1), d.st.Snapshot().AssignmentsTotal)
 }
@@ -222,6 +223,92 @@ func TestLifecycleDeadlineMakesFinalRunnerObservation(t *testing.T) {
 	fake.mu.Unlock()
 	require.Equal(t, 2, getCalls)
 	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned)
+}
+
+func TestLifecycleOnlineDeadlineFinalObservationAuthFailure(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.runnerErrCode = http.StatusForbidden
+	fake.runnerErrAfter = 2
+	fake.mu.Unlock()
+	d.be.waitDelay = 2 * time.Second
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
+		PollInterval: 200 * time.Millisecond,
+	}
+
+	result := NewSpawnWorker(d).waitForLifecycle(
+		context.Background(),
+		SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "online-deadline-auth-failure"},
+		"rs-online-deadline-auth-failure",
+		fake.jitOnRunnerID,
+		backend.Handle{SpawnID: "online-deadline-auth-failure", Backend: "fake"},
+		time.Minute,
+	)
+
+	require.ErrorIs(t, result.err, github.ErrAuthFailed)
+	require.Equal(t, "github_runner_observation_failed", result.failureReason)
+}
+
+func TestLifecycleAssignmentDeadlineFinalObservationRateLimit(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "online"
+	fake.runnerBusy = false
+	fake.runnerErrCode = http.StatusTooManyRequests
+	fake.runnerErrAfter = 2
+	fake.mu.Unlock()
+	d.be.waitDelay = 2 * time.Second
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 200 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
+		PollInterval: 200 * time.Millisecond,
+	}
+
+	result := NewSpawnWorker(d).waitForLifecycle(
+		context.Background(),
+		SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "assignment-deadline-rate-limit"},
+		"rs-assignment-deadline-rate-limit",
+		fake.jitOnRunnerID,
+		backend.Handle{SpawnID: "assignment-deadline-rate-limit", Backend: "fake"},
+		time.Minute,
+	)
+
+	require.ErrorIs(t, result.err, github.ErrRateLimited)
+	require.Equal(t, "github_runner_observation_rate_limited", result.failureReason)
+}
+
+func TestLifecycleOnlineDeadlineBoundsBlockedGitHubObservation(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerBlock = true
+	fake.mu.Unlock()
+	d.be.waitDelay = 2 * time.Second
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 25 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
+		PollInterval: 200 * time.Millisecond,
+	}
+	started := time.Now()
+
+	result := NewSpawnWorker(d).waitForLifecycle(
+		context.Background(),
+		SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "blocked-observation"},
+		"rs-blocked-observation",
+		fake.jitOnRunnerID,
+		backend.Handle{SpawnID: "blocked-observation", Backend: "fake"},
+		time.Minute,
+	)
+
+	require.Equal(t, "runner_online_timeout", result.failureReason)
+	require.Less(t, time.Since(started), 150*time.Millisecond,
+		"a blocked GitHub request must not extend the online deadline")
 }
 
 func TestLifecycleFinalRunnerObservationAuthFailureStopsClassification(t *testing.T) {

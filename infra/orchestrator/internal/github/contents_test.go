@@ -78,6 +78,53 @@ func TestGetRunnerYML_NonOKStatus_Error(t *testing.T) {
 	require.Contains(t, err.Error(), "404")
 }
 
+func TestGetRunnerYML_PreservesAuthAndRateLimitErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		remaining string
+		want      error
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, want: ErrAuthFailed},
+		{name: "forbidden", status: http.StatusForbidden, remaining: "42", want: ErrAuthFailed},
+		{name: "rate limited", status: http.StatusTooManyRequests, remaining: "0", want: ErrRateLimited},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-RateLimit-Limit", "5000")
+				w.Header().Set("X-RateLimit-Remaining", tc.remaining)
+				w.Header().Set("X-RateLimit-Reset", "12345")
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			_, _, _, err := makeClient(t, srv.URL).GetRunnerYML(context.Background(), "o/r", "")
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, tc.status, ErrorStatus(err))
+			require.Equal(t, 5000, ErrorRateLimit(err).Limit)
+		})
+	}
+}
+
+func TestGetRunnerYML_ReportsRequestToObserver(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+	c := makeClient(t, srv.URL)
+	var method, path, status string
+	c.SetRequestObserver(func(gotMethod, gotPath, gotStatus string) {
+		method, path, status = gotMethod, gotPath, gotStatus
+	})
+
+	_, _, _, err := c.GetRunnerYML(context.Background(), "o/r", `"etag"`)
+	require.NoError(t, err)
+	require.Equal(t, http.MethodGet, method)
+	require.Equal(t, "/repos/o/r/contents/.github/runner.yml", path)
+	require.Equal(t, "304", status)
+}
+
 func TestGetRunnerYML_InvalidJSON_Error(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -25,8 +25,9 @@ type RepoRef struct {
 
 // Poll is one per-scope poll loop.
 type Poll struct {
-	scope ScopeRef
-	deps  PollDeps
+	scope    ScopeRef
+	deps     PollDeps
+	nextRepo int
 }
 
 // NewPoll constructs a per-scope poll loop.
@@ -91,7 +92,8 @@ func (p *Poll) tick(ctx context.Context) {
 		RateLimitResetISO:  reset,
 	})
 
-	for _, repo := range p.scope.Repos {
+	for offset := range p.scope.Repos {
+		repo := p.scope.Repos[(p.nextRepo+offset)%len(p.scope.Repos)]
 		// Half-open transition? (B4)
 		p.deps.BreakerMaybeHalfOpen(repo.Repo)
 		if p.deps.BreakerIsOpen(repo.Repo) {
@@ -99,9 +101,11 @@ func (p *Poll) tick(ctx context.Context) {
 		}
 
 		p.deps.RecordPollAttempt(repo.Repo)
-		labels, err := p.deps.LabelsForRepo(repo.Repo)
+		labels, err := p.deps.LabelsForRepo(ctx, repo.Repo)
 		if err != nil {
-			p.recordPollFailure(repo.Repo, "runner_config", err.Error())
+			p.deps.RecordRateLimit(p.scope.Name, github.ErrorRateLimit(err))
+			p.recordPollFailure(repo.Repo, classifyRunnerConfigError(err), err.Error())
+			p.handlePollError(repo.Repo, err)
 			continue
 		}
 		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels)
@@ -151,6 +155,9 @@ func (p *Poll) tick(ctx context.Context) {
 			}
 		}
 	}
+	if len(p.scope.Repos) > 0 {
+		p.nextRepo = (p.nextRepo + 1) % len(p.scope.Repos)
+	}
 }
 
 func (p *Poll) recordPollFailure(repo, class, detail string) {
@@ -178,6 +185,17 @@ func classifyPollError(err error) string {
 		return "github_auth_failed"
 	default:
 		return "github_demand_failed"
+	}
+}
+
+func classifyRunnerConfigError(err error) string {
+	switch {
+	case errors.Is(err, github.ErrRateLimited):
+		return "github_rate_limited"
+	case errors.Is(err, github.ErrAuthFailed):
+		return "github_auth_failed"
+	default:
+		return "runner_config"
 	}
 }
 

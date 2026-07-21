@@ -32,6 +32,37 @@ func TestClient_AddsAuthorizationHeader(t *testing.T) {
 	require.Equal(t, "Bearer ghp_xxxx", gotAuth)
 }
 
+func TestClient_RequestObserverReceivesResponseStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	c := makeClient(t, srv.URL)
+	var method, path, status string
+	c.SetRequestObserver(func(gotMethod, gotPath, gotStatus string) {
+		method, path, status = gotMethod, gotPath, gotStatus
+	})
+
+	resp, err := c.Do(context.Background(), http.MethodPost, "/repos/o/r/actions/runners/generate-jitconfig", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.MethodPost, method)
+	require.Equal(t, "/repos/o/r/actions/runners/generate-jitconfig", path)
+	require.Equal(t, "202", status)
+}
+
+func TestClient_RequestObserverReceivesTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close()
+	c := makeClient(t, srv.URL)
+	var status string
+	c.SetRequestObserver(func(_, _, gotStatus string) { status = gotStatus })
+
+	_, err := c.Do(context.Background(), http.MethodGet, "/x", nil)
+	require.Error(t, err)
+	require.Equal(t, "transport_error", status)
+}
+
 func TestClient_ReloadsPATOnMtimeChange(t *testing.T) {
 	dir := t.TempDir()
 	patFile := filepath.Join(dir, "pat")

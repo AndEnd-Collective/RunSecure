@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-api-peer-one
+  namespace: default
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: listener
+      image: busybox:1.37.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          while true; do nc -l -p 8443 >/dev/null 2>&1 || true; done &
+          while true; do nc -l -p 9443 >/dev/null 2>&1 || true; done &
+          wait
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-api-peer-two
+  namespace: default
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: listener
+      image: busybox:1.37.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          while true; do nc -l -p 8443 >/dev/null 2>&1 || true; done &
+          while true; do nc -l -p 9443 >/dev/null 2>&1 || true; done &
+          wait
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp

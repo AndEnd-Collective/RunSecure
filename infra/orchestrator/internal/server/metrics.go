@@ -101,6 +101,13 @@ func renderMetrics(w io.Writer, deps MetricsDeps, snap state.Snapshot) error {
 	fmt.Fprintln(w, "# HELP runsecure_orchestrator_api_rate_limit_remaining GitHub rate-limit remaining.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_api_rate_limit_remaining gauge")
 	fmt.Fprintf(w, "runsecure_orchestrator_api_rate_limit_remaining %d\n", snap.RateLimitRemaining)
+	rateLimited := 0
+	if snap.RateLimited {
+		rateLimited = 1
+	}
+	fmt.Fprintln(w, "# HELP runsecure_orchestrator_rate_limited Whether scheduling is paused by a GitHub rate limit.")
+	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_rate_limited gauge")
+	fmt.Fprintf(w, "runsecure_orchestrator_rate_limited %d\n", rateLimited)
 	// last_poll_timestamp_seconds
 	fmt.Fprintln(w, "# HELP runsecure_orchestrator_last_poll_timestamp_seconds Unix epoch of the last poll-loop tick.")
 	fmt.Fprintln(w, "# TYPE runsecure_orchestrator_last_poll_timestamp_seconds gauge")

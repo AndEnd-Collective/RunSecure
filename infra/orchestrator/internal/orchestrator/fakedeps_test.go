@@ -52,6 +52,7 @@ type fakeGitHubBackend struct {
 	runnerErrCode      int
 	runnerGetCalled    int
 	runnerErrAfter     int
+	runnerBlock        bool
 	runnerStatusAfter  string
 	runnerBusyAfter    bool
 	runnerChangeAfter  int
@@ -259,6 +260,12 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 		// GET /repos/o/r/actions/runners/<id>
 		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet {
 			g.runnerGetCalled++
+			if g.runnerBlock {
+				g.mu.Unlock()
+				<-r.Context().Done()
+				g.mu.Lock()
+				return
+			}
 			if g.runnerErrCode != 0 && (g.runnerErrAfter == 0 || g.runnerGetCalled >= g.runnerErrAfter) {
 				w.WriteHeader(g.runnerErrCode)
 				return
@@ -595,7 +602,7 @@ func (d *spawnDeps) Backend() backend.Backend   { return d.be }
 func (d *spawnDeps) Emit() *cornerstone.Emitter { return d.em }
 func (d *spawnDeps) Clock() ClockLike           { return d.clk }
 func (d *spawnDeps) Egress() EgressGenerator    { return d.eg }
-func (d *spawnDeps) RunnerYML(_ string) (*RunnerYMLSnapshot, error) {
+func (d *spawnDeps) RunnerYMLContext(_ context.Context, _ string) (*RunnerYMLSnapshot, error) {
 	if d.runnerYMLErr != nil {
 		return nil, d.runnerYMLErr
 	}
@@ -628,7 +635,10 @@ func (d *spawnDeps) RecordRateLimit(_ string, lim github.RateLimit) {
 	d.rateLimit = lim
 	d.rlMu.Unlock()
 }
-func (d *spawnDeps) MarkRateLimited(_ string) bool    { return !d.ratePaused.Swap(true) }
+func (d *spawnDeps) MarkRateLimited(_ string) bool {
+	d.st.SetRateLimited(true)
+	return !d.ratePaused.Swap(true)
+}
 func (d *spawnDeps) LifecycleTiming() LifecycleTiming { return d.lifecycle }
 func (d *spawnDeps) Version() string                  { return d.version }
 func (d *spawnDeps) BuildSHA() string                 { return d.buildSHA }

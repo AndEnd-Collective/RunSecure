@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-orchestrator-network-test
+  namespace: runsecure-itest
+  labels:
+    app.kubernetes.io/name: runsecure-orchestrator
+    app.kubernetes.io/instance: rs-itest
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: network-test
+      image: nicolaka/netshoot:v0.13
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+        - infinity
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rs-unlabelled-network-control
+  namespace: runsecure-itest
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: tmp
+      emptyDir:
+        medium: Memory
+  containers:
+    - name: network-test
+      image: nicolaka/netshoot:v0.13
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+        - infinity
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp

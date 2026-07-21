@@ -16,6 +16,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
@@ -35,12 +36,13 @@ func New(c *kube.Client) backend.Backend {
 func (b *kubeBackend) Name() string { return "kube" }
 
 // Spawn creates a full per-spawn stack in Kubernetes:
-//  1. Ensures the scoped namespace and its default-deny NetworkPolicy exist.
+//  1. Ensures the default-deny NetworkPolicy exists in the chart-provisioned
+//     scoped namespace.
 //  2. Builds all objects (Secret, Service, NetworkPolicies, ProxyPod,
 //     RunnerPod) via the kube object builders.
 //  3. Creates all objects via ApplySpawn (owner references are stamped there).
 //
-// On any error after EnsureNamespace, a best-effort DeleteSpawn is attempted
+// On any error after EnsureDefaultDenyPolicy, a best-effort DeleteSpawn is attempted
 // to clean up partially created objects before the error is returned.
 //
 // The returned Handle carries:
@@ -52,13 +54,41 @@ func (b *kubeBackend) Name() string { return "kube" }
 //	Refs["network_name"] → "" (not used by the kube backend)
 func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend.Handle, error) {
 	ns := kube.Namespace(in.Scope)
-	dnsPrefix, err := netip.ParsePrefix(in.KubeDNSCIDR)
-	if err != nil || !dnsPrefix.Addr().Is4() || dnsPrefix.Bits() != 32 || dnsPrefix != dnsPrefix.Masked() {
-		return backend.Handle{}, errors.New("kube backend: KubeDNSCIDR must be an exact IPv4 /32")
+	if in.ResourcesMemory <= 0 {
+		return backend.Handle{}, errors.New("kube backend: runner memory limit must be positive")
+	}
+	if in.ResourcesNanoCPUs <= 0 {
+		return backend.Handle{}, errors.New("kube backend: runner CPU limit must be positive")
+	}
+	seenDNSCIDRs := make(map[netip.Prefix]struct{}, len(in.KubeDNSServiceCIDRs))
+	for _, cidr := range in.KubeDNSServiceCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 || prefix != prefix.Masked() {
+			return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must contain exact IPv4 /32 values")
+		}
+		if _, ok := seenDNSCIDRs[prefix]; ok {
+			return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must contain unique CIDRs")
+		}
+		seenDNSCIDRs[prefix] = struct{}{}
+	}
+	if len(in.KubeDNSServiceCIDRs) == 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSServiceCIDRs must not be empty")
+	}
+	if errs := kubevalidation.IsDNS1123Label(in.KubeDNSNamespace); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSNamespace must be a DNS-1123 label")
+	}
+	if errs := kubevalidation.IsQualifiedName(in.KubeDNSPodLabelKey); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelKey must be a Kubernetes label key")
+	}
+	if in.KubeDNSPodLabelValue == "" {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelValue must not be empty")
+	}
+	if errs := kubevalidation.IsValidLabelValue(in.KubeDNSPodLabelValue); len(errs) != 0 {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelValue must be a Kubernetes label value")
 	}
 
-	if err := b.c.EnsureNamespace(ctx, in.Scope); err != nil {
-		return backend.Handle{}, fmt.Errorf("kube backend: ensure namespace: %w", err)
+	if err := b.c.EnsureDefaultDenyPolicy(ctx, in.Scope); err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: ensure default-deny policy: %w", err)
 	}
 
 	// The proxy supervisor cannot start safely with a missing or empty config.

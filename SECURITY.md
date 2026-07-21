@@ -59,11 +59,18 @@ read-only — the actions-runner writes `run-helper.sh` and other files into
 its own install directory at job start, and a read-only rootfs breaks every
 job. This is the one hardening axis relaxed on the runner; the proxy
 container's rootfs remains read-only, and every other runner control below
-(non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, resource
+(non-root user, `cap_drop: ALL`, seccomp, no-new-privileges, CPU/memory
 limits, internal-only network, no host binds) stays intact. This holds on
 **both** backends — Compose sets `HostConfig.ReadonlyRootfs=false` on the
 runner only, and Kubernetes sets `readOnlyRootFilesystem: false` on the
 runner container only (proxy Pod containers stay read-only).
+
+Kubernetes maps `runner.yml` CPU and memory values to equal Pod requests and
+limits and caps the runner's memory-backed `/tmp` at 512 MiB. Kubernetes' core
+Pod API does **not** expose a per-Pod PID-limit field: `runner.yml`'s `pids`
+value is enforced by the Compose backend only. Kubernetes deployments must set
+a bounded kubelet `podPidsLimit`; that is a node-level prerequisite and is not
+equivalent to RunSecure enforcing the exact per-runner value.
 
 | Flag | What it prevents | Verified by |
 |------|-----------------|-------------|
@@ -72,7 +79,7 @@ runner container only (proxy Pod containers stay read-only).
 | `--tmpfs /tmp:noexec` | Executing downloaded binaries from /tmp | `validate-runner.sh` |
 | `--cap-drop=ALL` | All Linux capability-based attacks | `test-attack-simulation.sh` |
 | `--security-opt=no-new-privileges` | Privilege escalation via setuid/setgid at runtime | `test-attack-simulation.sh` |
-| `--pids-limit` | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test) |
+| `--pids-limit` (Compose); kubelet `podPidsLimit` prerequisite (Kubernetes) | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test); cluster configuration |
 | `--memory` / `--memory-swap` | Memory exhaustion, OOM attacks | `validate-runner.sh` |
 | `--cpus` | CPU exhaustion (cryptomining) | `validate-runner.sh` |
 | Seccomp profile (`node-runner.json`) | Dangerous syscalls (ptrace, mount, bpf, keyctl) | Architecture |

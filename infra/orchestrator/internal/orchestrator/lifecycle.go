@@ -55,6 +55,9 @@ func (w *SpawnWorker) waitForLifecycle(
 	wallTimeout time.Duration,
 ) lifecycleResult {
 	timing := normalizedLifecycleTiming(w.deps.LifecycleTiming())
+	startedAt := time.Now()
+	onlineDeadlineAt := startedAt.Add(timing.OnlineTimeout)
+	assignmentDeadlineAt := startedAt.Add(timing.AssignmentTimeout)
 	waitCtx, cancelWait := context.WithCancel(ctx)
 	defer cancelWait()
 
@@ -69,8 +72,8 @@ func (w *SpawnWorker) waitForLifecycle(
 	lastObservationErr := error(nil)
 	correlationSince := w.deps.Clock().Now().Add(-defaultJobCorrelationLookback)
 
-	observe := func() lifecycleResult {
-		runner, _, err := w.deps.GitHub().GetRunner(ctx, intent.Repo, runnerID)
+	observe := func(observationCtx context.Context) lifecycleResult {
+		runner, _, err := w.deps.GitHub().GetRunner(observationCtx, intent.Repo, runnerID)
 		w.recordRunnerOperation(intent.Repo, runnerOperationGetRunner, err)
 		if err != nil {
 			lastObservationErr = err
@@ -106,22 +109,48 @@ func (w *SpawnWorker) waitForLifecycle(
 		return lifecycleResult{}
 	}
 
-	if failure := observe(); failure.err != nil {
+	observationDeadline := func() time.Time {
+		if !online && onlineDeadlineAt.Before(assignmentDeadlineAt) {
+			return onlineDeadlineAt
+		}
+		return assignmentDeadlineAt
+	}
+	observeBeforeDeadline := func() lifecycleResult {
+		observationCtx, cancel := context.WithDeadline(ctx, observationDeadline())
+		defer cancel()
+		return observe(observationCtx)
+	}
+
+	// Start absolute lifecycle deadlines before the first GitHub observation.
+	// Every observation is itself bounded by the active deadline, so a stalled
+	// HTTP request cannot extend the 60/120-second delivery contract.
+	onlineTimer := time.NewTimer(time.Until(onlineDeadlineAt))
+	defer stopTimer(onlineTimer)
+	assignmentTimer := time.NewTimer(time.Until(assignmentDeadlineAt))
+	defer stopTimer(assignmentTimer)
+	onlineFinalTimer := time.NewTimer(time.Until(onlineDeadlineAt.Add(-finalObservationLead(timing.OnlineTimeout))))
+	defer stopTimer(onlineFinalTimer)
+	assignmentFinalTimer := time.NewTimer(time.Until(assignmentDeadlineAt.Add(-finalObservationLead(timing.AssignmentTimeout))))
+	defer stopTimer(assignmentFinalTimer)
+	onlineFinalC := onlineFinalTimer.C
+	assignmentFinalC := assignmentFinalTimer.C
+
+	if failure := observeBeforeDeadline(); failure.err != nil {
 		return failure
 	}
 
 	poll := time.NewTicker(timing.PollInterval)
 	defer poll.Stop()
 	pollC := poll.C
-	onlineTimer := time.NewTimer(timing.OnlineTimeout)
-	defer stopTimer(onlineTimer)
-	assignmentTimer := time.NewTimer(timing.AssignmentTimeout)
-	defer stopTimer(assignmentTimer)
 	if online {
 		stopTimer(onlineTimer)
+		stopTimer(onlineFinalTimer)
+		onlineFinalC = nil
 	}
 	if assigned {
 		stopTimer(assignmentTimer)
+		stopTimer(assignmentFinalTimer)
+		assignmentFinalC = nil
 		poll.Stop()
 		pollC = nil
 	}
@@ -142,15 +171,26 @@ func (w *SpawnWorker) waitForLifecycle(
 			// samples. Re-query GitHub after process exit before classifying the
 			// zero-exit container as unassigned.
 			if !assigned {
-				if failure := observe(); failure.err != nil {
+				if failure := observeBeforeDeadline(); failure.err != nil {
 					return failure
 				}
 			}
+			if !online && !time.Now().Before(onlineDeadlineAt) {
+				return runnerDeadlineFailure(runnerID, "online", timing.OnlineTimeout, lastObservationErr)
+			}
+			if !assigned && !time.Now().Before(assignmentDeadlineAt) {
+				return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, lastObservationErr)
+			}
 			if !assigned {
+				correlationCtx, cancelCorrelation := context.WithDeadline(ctx, assignmentDeadlineAt)
 				correlated, err := w.correlateCompletedJob(
-					ctx, intent, containerName, runnerID, correlationSince,
+					correlationCtx, intent, containerName, runnerID, correlationSince,
 				)
+				cancelCorrelation()
 				if err != nil {
+					if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+						return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, err)
+					}
 					return lifecycleFailure("github_job_correlation_failed", err)
 				}
 				assigned = correlated
@@ -170,34 +210,30 @@ func (w *SpawnWorker) waitForLifecycle(
 			}
 			return lifecycleResult{exitCode: result.exitCode, timedOut: result.timedOut}
 		case <-pollC:
-			if failure := observe(); failure.err != nil {
+			if failure := observeBeforeDeadline(); failure.err != nil {
 				return failure
+			}
+		case <-onlineFinalC:
+			onlineFinalC = nil
+			if !online {
+				if failure := observeBeforeDeadline(); failure.err != nil {
+					return failure
+				}
+			}
+		case <-assignmentFinalC:
+			assignmentFinalC = nil
+			if !assigned {
+				if failure := observeBeforeDeadline(); failure.err != nil {
+					return failure
+				}
 			}
 		case <-onlineTimer.C:
 			if !online {
-				if failure := observe(); failure.err != nil {
-					return failure
-				}
-			}
-			if !online {
-				detail := fmt.Sprintf("runner %d did not become online within %s", runnerID, timing.OnlineTimeout)
-				if lastObservationErr != nil {
-					detail = fmt.Sprintf("%s: last observation: %v", detail, lastObservationErr)
-				}
-				return lifecycleFailure("runner_online_timeout", errors.New(detail))
+				return runnerDeadlineFailure(runnerID, "online", timing.OnlineTimeout, lastObservationErr)
 			}
 		case <-assignmentTimer.C:
 			if !assigned {
-				if failure := observe(); failure.err != nil {
-					return failure
-				}
-			}
-			if !assigned {
-				detail := fmt.Sprintf("runner %d did not receive a job within %s", runnerID, timing.AssignmentTimeout)
-				if lastObservationErr != nil {
-					detail = fmt.Sprintf("%s: last observation: %v", detail, lastObservationErr)
-				}
-				return lifecycleFailure("runner_assignment_timeout", errors.New(detail))
+				return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, lastObservationErr)
 			}
 		}
 
@@ -205,15 +241,45 @@ func (w *SpawnWorker) waitForLifecycle(
 		// Disable elapsed deadlines once the corresponding state is observed.
 		if online {
 			stopTimer(onlineTimer)
+			stopTimer(onlineFinalTimer)
+			onlineFinalC = nil
 		}
 		if assigned {
 			stopTimer(assignmentTimer)
+			stopTimer(assignmentFinalTimer)
+			assignmentFinalC = nil
 			if pollC != nil {
 				poll.Stop()
 				pollC = nil
 			}
 		}
 	}
+}
+
+func finalObservationLead(timeout time.Duration) time.Duration {
+	lead := timeout / 2
+	if lead > time.Second {
+		return time.Second
+	}
+	return lead
+}
+
+func runnerDeadlineFailure(
+	runnerID int64,
+	phase string,
+	timeout time.Duration,
+	lastObservationErr error,
+) lifecycleResult {
+	detail := fmt.Sprintf("runner %d did not become online within %s", runnerID, timeout)
+	reason := "runner_online_timeout"
+	if phase == "assignment" {
+		detail = fmt.Sprintf("runner %d did not receive a job within %s", runnerID, timeout)
+		reason = "runner_assignment_timeout"
+	}
+	if lastObservationErr != nil {
+		detail = fmt.Sprintf("%s: last observation: %v", detail, lastObservationErr)
+	}
+	return lifecycleFailure(reason, errors.New(detail))
 }
 
 func (w *SpawnWorker) correlateCompletedJob(
@@ -288,7 +354,14 @@ func (w *SpawnWorker) markCorrelatedAssignment(
 	containerName string,
 	runnerID int64,
 ) {
-	if w.deps.State().MarkAssigned(intent.SpawnID, w.deps.Clock().Now()) {
+	now := w.deps.Clock().Now()
+	if w.deps.State().MarkOnline(intent.SpawnID, now) {
+		_ = w.deps.Emit().EmitRunnerOnline(cornerstone.RunnerOnlineFields{
+			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+			ContainerName: containerName, GitHubRunnerID: runnerID,
+		})
+	}
+	if w.deps.State().MarkAssigned(intent.SpawnID, now) {
 		_ = w.deps.Emit().EmitJobAssigned(cornerstone.JobAssignedFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
 			ContainerName: containerName, GitHubRunnerID: runnerID,

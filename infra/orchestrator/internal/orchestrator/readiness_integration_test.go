@@ -26,6 +26,7 @@ func (d runtimeReadinessDeps) BackendReady(context.Context) error {
 	return nil
 }
 func (d runtimeReadinessDeps) LastPollAt() time.Time { return d.now }
+func (d runtimeReadinessDeps) PollStarted() bool     { return true }
 
 func TestRunnerManagementAuthFailureFailsReadinessButNotLiveness(t *testing.T) {
 	d := newSpawnDeps(t)
@@ -99,6 +100,10 @@ func TestRunnerManagementRateLimitFailsReadinessUntilSameOperationRecovers(t *te
 	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "jit-rate-recovered",
 	}))
+	// The production poll loop clears the separate scheduler pause only after
+	// the advertised reset. This focused worker test has no poll loop, so model
+	// that transition explicitly after proving the same API operation recovered.
+	d.st.SetRateLimited(false)
 
 	recoveredResponse := httptest.NewRecorder()
 	server.NewReadyz(deps).ServeHTTP(recoveredResponse,

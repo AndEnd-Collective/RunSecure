@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,10 @@ func makePATFile(t *testing.T) string {
 }
 
 func TestSpawn_HappyPath(t *testing.T) {
+	t.Setenv("RUNSECURE_KUBE_DNS_SERVICE_CIDRS", "10.96.0.10/32,10.100.0.10/32")
+	t.Setenv("RUNSECURE_KUBE_DNS_NAMESPACE", "kube-system")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_KEY", "k8s-app")
+	t.Setenv("RUNSECURE_KUBE_DNS_POD_LABEL_VALUE", "kube-dns")
 	d := newSpawnDeps(t)
 	w := NewSpawnWorker(d)
 
@@ -64,6 +69,10 @@ func TestSpawn_HappyPath(t *testing.T) {
 	d.be.mu.Unlock()
 	require.Equal(t, "v-test", spawnInput.Version)
 	require.Equal(t, "sha-test", spawnInput.BuildSHA)
+	require.Equal(t, []string{"10.96.0.10/32", "10.100.0.10/32"}, spawnInput.KubeDNSServiceCIDRs)
+	require.Equal(t, "kube-system", spawnInput.KubeDNSNamespace)
+	require.Equal(t, "k8s-app", spawnInput.KubeDNSPodLabelKey)
+	require.Equal(t, "kube-dns", spawnInput.KubeDNSPodLabelValue)
 }
 
 func TestSpawn_JITRegistrationCarriesRestartDiscoveryLabels(t *testing.T) {
@@ -80,6 +89,17 @@ func TestSpawn_JITRegistrationCarriesRestartDiscoveryLabels(t *testing.T) {
 	fake.mu.Unlock()
 	require.ElementsMatch(t, []string{
 		"self-hosted", "Linux", JITOwnerLabel, JITScopeLabelPrefix + "vladislav",
+	}, labels)
+}
+
+func TestJITRunnerLabelsRejectEmptyAndDuplicateOwnershipLabels(t *testing.T) {
+	labels := jitRunnerLabels("vladislav", []string{
+		"", "self-hosted", JITOwnerLabel, "self-hosted",
+		JITScopeLabelPrefix + "vladislav",
+	})
+
+	require.Equal(t, []string{
+		"self-hosted", JITOwnerLabel, JITScopeLabelPrefix + "vladislav",
 	}, labels)
 }
 
@@ -300,6 +320,83 @@ func TestSpawn_DeregistrationFailureFailsRuntimeCleanup(t *testing.T) {
 	require.False(t, d.st.TryReserve("replacement", "o/r", 5, 10, d.clk.Now()))
 }
 
+func TestSpawn_DeregistrationAuthFailureUsesSlowRetryBackoff(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-auth-backoff",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked
+	}, time.Second, time.Millisecond)
+	fake.mu.Lock()
+	initialCalls := fake.deleteCalled
+	fake.mu.Unlock()
+	require.Equal(t, 1, initialCalls)
+	d.clk.Advance(d.lifecycle.CleanupRetryInterval)
+	time.Sleep(10 * time.Millisecond)
+	fake.mu.Lock()
+	require.Equal(t, initialCalls, fake.deleteCalled,
+		"authentication failures must not retry at the generic cleanup cadence")
+	fake.mu.Unlock()
+	cancel()
+	require.ErrorIs(t, <-done, github.ErrAuthFailed)
+}
+
+func TestSpawn_DeregistrationRateLimitWaitsUntilReset(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	resetAt := d.clk.Now().Add(10 * time.Second)
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusTooManyRequests
+	fake.deleteErrUntil = 1
+	fake.rlRemaining = 0
+	fake.rlReset = fmt.Sprint(resetAt.Unix())
+	fake.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "deregister-rate-reset",
+		})
+	}()
+	require.Eventually(t, func() bool {
+		return d.st.Snapshot().TeardownBlocked && d.ratePaused.Load()
+	}, time.Second, time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // let the fake-clock reset timer register
+	d.clk.Advance(9 * time.Second)
+	time.Sleep(10 * time.Millisecond)
+	fake.mu.Lock()
+	require.Equal(t, 1, fake.deleteCalled)
+	fake.mu.Unlock()
+	d.clk.Advance(time.Second)
+	err := <-done
+	require.ErrorIs(t, err, github.ErrRateLimited)
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	fake.mu.Lock()
+	require.Equal(t, 2, fake.deleteCalled)
+	fake.mu.Unlock()
+}
+
+func TestRunnerDeletionRateLimitWithoutResetUsesSafeFallback(t *testing.T) {
+	d := newSpawnDeps(t)
+	err := &github.APIError{
+		Status: http.StatusTooManyRequests, Operation: "delete runner", Err: github.ErrRateLimited,
+	}
+
+	delay := NewSpawnWorker(d).runnerDeletionRetryDelay("s", err, time.Second)
+
+	require.Equal(t, time.Minute, delay)
+}
+
 func TestSpawn_DeregistrationRetryResolvesDebtOnlyAfterExactSuccess(t *testing.T) {
 	d := newSpawnDeps(t)
 	gh, fake := newFakeGitHubClient(t)
@@ -388,6 +485,65 @@ func TestSpawn_PartialBackendHandleIsRetriedEvenWhenCleanupRecoversImmediately(t
 	require.Zero(t, d.st.GlobalInFlight())
 	require.False(t, d.st.Snapshot().TeardownBlocked)
 	d.requireEmitted(t, cornerstone.EventRunnerLeakCleaned)
+}
+
+func TestSpawn_PartialBackendAndRegistrationCleanupRecoverTogether(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	d.be.spawnErr = errors.New("runner start failed; rollback incomplete")
+	d.be.spawnPartialHandle = true
+	d.be.teardownErrs = []error{errors.New("network still has endpoint"), nil}
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusInternalServerError
+	fake.deleteErrUntil = 1
+	fake.mu.Unlock()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "partial-backend-and-runner-recover",
+	})
+
+	require.ErrorContains(t, err, "runner start failed; rollback incomplete")
+	require.ErrorContains(t, err, "backend teardown failed: network still has endpoint")
+	require.ErrorContains(t, err, "runner deregistration failed")
+	require.Equal(t, 2, d.be.teardownCount())
+	fake.mu.Lock()
+	deleteCalls := fake.deleteCalled
+	fake.mu.Unlock()
+	require.Equal(t, 2, deleteCalls)
+	require.Zero(t, d.st.GlobalInFlight())
+	require.False(t, d.st.Snapshot().TeardownBlocked)
+	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)
+}
+
+func TestSettlePartialSpawnRetainsDebtWhenRunnerCleanupIsInterrupted(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.deleteErrCode = http.StatusInternalServerError
+	fake.mu.Unlock()
+	intent := SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "partial-runner-interrupted"}
+	require.True(t, d.st.TryReserve(intent.SpawnID, intent.Repo, d.repoCap, d.globalCap, d.clk.Now()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewSpawnWorker(d).settlePartialSpawn(
+		ctx,
+		intent,
+		"rs-partial-runner-interrupted",
+		backend.Handle{SpawnID: intent.SpawnID, Backend: "fake"},
+		errors.New("runner start failed; rollback incomplete"),
+		100,
+	)
+
+	require.ErrorContains(t, err, "runner deregistration failed")
+	require.ErrorContains(t, err, "runner deregistration reconciliation interrupted")
+	require.ErrorIs(t, err, context.Canceled)
+	snapshot := d.st.Snapshot()
+	require.True(t, snapshot.TeardownBlocked)
+	require.Equal(t, 1, snapshot.GlobalInFlight)
+	require.Equal(t, state.PhaseTeardownBlocked, snapshot.Reservations[intent.SpawnID].Phase)
 }
 
 func TestSpawn_LeakCleanup_OnPostJITFailure(t *testing.T) {
@@ -496,6 +652,8 @@ func TestSpawn_TeardownFailureCannotReportSuccess(t *testing.T) {
 	require.ErrorContains(t, err, "proxy delete returned conflict")
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"backend_teardown_failed"`)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventSpawnCompleted)
+	require.Contains(t, d.emBuf.String(), cornerstone.EventRunnerCompleted)
+	require.Equal(t, int64(1), d.st.Snapshot().CompletedTotal)
 	require.Equal(t, int64(1), d.st.Snapshot().DeregistrationsTotal)
 	require.Equal(t, int64(1), d.st.Snapshot().TeardownFailuresTotal)
 	require.Equal(t, int64(1), d.st.Snapshot().TeardownReconciledTotal)

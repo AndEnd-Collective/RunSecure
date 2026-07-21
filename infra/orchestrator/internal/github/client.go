@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/auth"
@@ -23,9 +25,11 @@ const DefaultBaseURL = "https://api.github.com"
 // credential management to an auth.Provider; every outbound request carries
 // the token returned by provider.Token(ctx).
 type Client struct {
-	baseURL  string
-	provider auth.Provider
-	hc       *http.Client
+	baseURL    string
+	provider   auth.Provider
+	hc         *http.Client
+	observerMu sync.RWMutex
+	observer   func(method, path, status string)
 }
 
 // HTTPClientTimeout is the per-request timeout for outbound GitHub calls.
@@ -81,5 +85,28 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return c.hc.Do(req)
+	resp, err := c.hc.Do(req)
+	status := "transport_error"
+	if resp != nil {
+		status = strconv.Itoa(resp.StatusCode)
+	}
+	c.observe(method, path, status)
+	return resp, err
+}
+
+// SetRequestObserver installs an optional concurrency-safe callback for actual
+// outbound GitHub HTTP requests. The callback must return promptly.
+func (c *Client) SetRequestObserver(observer func(method, path, status string)) {
+	c.observerMu.Lock()
+	c.observer = observer
+	c.observerMu.Unlock()
+}
+
+func (c *Client) observe(method, path, status string) {
+	c.observerMu.RLock()
+	observer := c.observer
+	c.observerMu.RUnlock()
+	if observer != nil {
+		observer(method, path, status)
+	}
 }

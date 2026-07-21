@@ -5,11 +5,11 @@
 #   1. PSS Restricted admission rejects privileged pods
 #   2. NetworkPolicy: runner can ONLY reach its proxy (not internet, not apiserver,
 #      not a different spawn's proxy)
-#   3. RBAC: least-privilege SA (can manage pods/services/secrets/networkpolicies
-#      in its ns; cannot create clusterroles; cannot act in kube-system)
-#   4. Helm: chart template renders + dry-run install succeeds
+#   3. RBAC: least-privilege SA can perform runtime policy reconciliation in
+#      its namespace but cannot create namespaces/clusterroles or act elsewhere
+#   4. Helm/runtime: chart renders and generated runners retain resource bounds
 #
-# SKIP (exit 0) if kind/kubectl/helm are absent.
+# SKIP (exit 0) if kind/kubectl/helm/go are absent.
 # FAIL loudly (exit 1) on any security violation.
 #
 # Usage:
@@ -26,6 +26,7 @@ NS="runsecure-itest"
 SA_NAME="rs-itest-runsecure-orchestrator"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFESTS="${SCRIPT_DIR}/manifests"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Calico v3.29.3 — monolithic manifest (no tigera-operator).
 # The operator approach fails on k8s >=1.30 because installations.operator.tigera.io
@@ -75,7 +76,7 @@ wait_for_pod_ready() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Prerequisite check — SKIP if tools are absent
 # ─────────────────────────────────────────────────────────────────────────────
-for tool in kind kubectl helm; do
+for tool in kind kubectl helm go; do
   if ! command -v "${tool}" &>/dev/null; then
     log "SKIP: ${tool} not found in PATH — skipping k8s integration tests"
     exit 0
@@ -169,6 +170,7 @@ kubectl apply -f "${MANIFESTS}/runner-pod.yaml"
 
 # Deploy spawn02 attacker proxy for cross-spawn isolation test
 kubectl apply -f "${MANIFESTS}/attacker-pod.yaml"
+kubectl apply -f "${MANIFESTS}/api-peer-pods.yaml"
 
 log "Waiting for proxy pod rs-proxy-spawn01 to be Ready..."
 wait_for_pod_ready "${NS}" "rs-proxy-spawn01" 120
@@ -178,6 +180,10 @@ wait_for_pod_ready "${NS}" "rs-runner-spawn01" 120
 
 log "Waiting for attacker proxy rs-proxy-spawn02 to be Ready..."
 wait_for_pod_ready "${NS}" "rs-proxy-spawn02" 120
+
+log "Waiting for exact-pair API policy probes to be Ready..."
+wait_for_pod_ready default "rs-api-peer-one" 120
+wait_for_pod_ready default "rs-api-peer-two" 120
 
 # Give Calico policy programming time to propagate (DataPath convergence)
 log "Sleeping 10s for Calico NetworkPolicy programming to converge..."
@@ -192,12 +198,45 @@ PROXY_SVC2_IP=$(kubectl get svc rs-proxy-svc-spawn02 -n "${NS}" \
   -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
 APISERVER_IP=$(kubectl get svc kubernetes -n default \
   -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "10.96.0.1")
+APISERVER_ENDPOINT_IP=$(kubectl get endpoints kubernetes -n default \
+  -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
+APISERVER_ENDPOINT_PORT=$(kubectl get endpoints kubernetes -n default \
+  -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || echo "")
+DNS_SERVICE_IP=$(kubectl get svc kube-dns -n kube-system \
+  -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+DNS_POD_IP=$(kubectl get pods -n kube-system -l k8s-app=kube-dns \
+  -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+API_PEER_ONE_IP=$(kubectl get pod rs-api-peer-one -n default \
+  -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
+API_PEER_TWO_IP=$(kubectl get pod rs-api-peer-two -n default \
+  -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
 
-log "Resolved: proxy-svc=${PROXY_SVC_IP}, proxy-svc2=${PROXY_SVC2_IP}, apiserver=${APISERVER_IP}"
+log "Resolved: proxy-svc=${PROXY_SVC_IP}, proxy-svc2=${PROXY_SVC2_IP}, apiserver-service=${APISERVER_IP}:443, apiserver-endpoint=${APISERVER_ENDPOINT_IP}:${APISERVER_ENDPOINT_PORT}, dns-service=${DNS_SERVICE_IP}, dns-pod=${DNS_POD_IP}, pair-probes=${API_PEER_ONE_IP}:8443/${API_PEER_TWO_IP}:9443"
 
 if [[ -z "${PROXY_SVC_IP}" ]]; then
   fail "Could not resolve ClusterIP for rs-proxy-svc-spawn01 — cannot run NetworkPolicy assertions"
 fi
+if [[ -z "${APISERVER_ENDPOINT_IP}" || -z "${APISERVER_ENDPOINT_PORT}" ]]; then
+  fail "Could not resolve the Kubernetes API endpoint — cannot prove post-DNAT policy"
+fi
+if [[ -z "${DNS_SERVICE_IP}" || -z "${DNS_POD_IP}" ]]; then
+  fail "Could not resolve both cluster DNS Service and Pod peers"
+fi
+if [[ -z "${API_PEER_ONE_IP}" || -z "${API_PEER_TWO_IP}" ]]; then
+  fail "Could not resolve exact-pair policy probe Pod IPs"
+fi
+
+HELM_NETWORK_ARGS=(
+  --set-string "kubernetesNetwork.apiServerPeers[0].cidr=${APISERVER_IP}/32"
+  --set "kubernetesNetwork.apiServerPeers[0].port=443"
+  --set-string "kubernetesNetwork.apiServerPeers[1].cidr=${APISERVER_ENDPOINT_IP}/32"
+  --set "kubernetesNetwork.apiServerPeers[1].port=${APISERVER_ENDPOINT_PORT}"
+  --set-string "kubernetesNetwork.apiServerPeers[2].cidr=${API_PEER_ONE_IP}/32"
+  --set "kubernetesNetwork.apiServerPeers[2].port=8443"
+  --set-string "kubernetesNetwork.apiServerPeers[3].cidr=${API_PEER_TWO_IP}/32"
+  --set "kubernetesNetwork.apiServerPeers[3].port=9443"
+  --set-string "kubernetesNetwork.dnsServiceCIDRs[0]=${DNS_SERVICE_IP}/32"
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 5: NetworkPolicy assertions
@@ -212,6 +251,16 @@ if kubectl exec rs-runner-spawn01 -n "${NS}" -c runner -- \
   pass "NetworkPolicy: runner resolved and reached own proxy at ${PROXY_SVC_DNS}:3128"
 else
   fail "NetworkPolicy: runner CANNOT resolve/reach own proxy at ${PROXY_SVC_DNS}:3128"
+fi
+
+RUNNER_DNS_SERVICE_RESULT=$(kubectl exec rs-runner-spawn01 -n "${NS}" -c runner -- \
+  dig +time=5 +tries=1 +short @"${DNS_SERVICE_IP}" kubernetes.default.svc.cluster.local 2>/dev/null || echo "")
+RUNNER_DNS_POD_RESULT=$(kubectl exec rs-runner-spawn01 -n "${NS}" -c runner -- \
+  dig +time=5 +tries=1 +short @"${DNS_POD_IP}" kubernetes.default.svc.cluster.local 2>/dev/null || echo "")
+if [[ -n "${RUNNER_DNS_SERVICE_RESULT}" && -n "${RUNNER_DNS_POD_RESULT}" ]]; then
+  pass "NetworkPolicy: runner reaches exact pre-DNAT DNS Service and post-DNAT DNS Pod peers"
+else
+  fail "NetworkPolicy: runner cannot reach both exact DNS Service and Pod peers"
 fi
 
 # 5b. Runner → internet (1.1.1.1) MUST fail (blocked by default-deny + RunnerEgress only allows proxy)
@@ -308,8 +357,47 @@ else
   fail "RBAC: SA CANNOT create networkpolicies in ${NS}"
 fi
 
-# 6e. CANNOT create clusterroles (cluster-scoped — no ClusterRole granted)
-log "6e. SA cannot create clusterroles — MUST be denied..."
+# 6e. Exercise the runtime's actual namespace-scoped reconciliation operation,
+# not only an authorization query. This is the sole API create performed by
+# EnsureDefaultDenyPolicy after Helm has provisioned the namespace.
+log "6e. SA can create and delete a reconciliation NetworkPolicy — MUST succeed..."
+if kubectl create --as="${SA_FQDN}" -f - >/dev/null 2>&1 <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rs-runtime-reconcile-check
+  namespace: ${NS}
+spec:
+  podSelector:
+    matchLabels:
+      runsecure.io/runtime-reconcile-check: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+EOF
+then
+  if kubectl delete networkpolicy rs-runtime-reconcile-check \
+      --as="${SA_FQDN}" -n "${NS}" --wait=true >/dev/null 2>&1; then
+    pass "RBAC: chart SA performed namespace-scoped runtime policy reconciliation"
+  else
+    fail "RBAC: chart SA created but could not delete reconciliation policy"
+  fi
+else
+  fail "RBAC: chart SA could not perform runtime policy reconciliation"
+fi
+
+# 6f. CANNOT create namespaces. Helm owns the scope Namespace; granting this
+# cluster-scoped privilege would violate the chart's least-privilege contract.
+log "6f. SA cannot create namespaces — MUST be denied..."
+if kubectl auth can-i create namespaces \
+    --as="${SA_FQDN}" 2>/dev/null | grep -q "^yes"; then
+  fail "RBAC VIOLATION: SA can create namespaces — over-privileged"
+else
+  pass "RBAC: SA cannot create namespaces (Helm owns namespace provisioning)"
+fi
+
+# 6g. CANNOT create clusterroles (cluster-scoped — no ClusterRole granted)
+log "6g. SA cannot create clusterroles — MUST be denied..."
 if kubectl auth can-i create clusterroles \
     --as="${SA_FQDN}" 2>/dev/null | grep -q "^yes"; then
   fail "RBAC VIOLATION: SA can create clusterroles — over-privileged"
@@ -317,8 +405,8 @@ else
   pass "RBAC: SA cannot create clusterroles (least-privilege confirmed)"
 fi
 
-# 6f. CANNOT create pods in kube-system (Role is namespace-scoped)
-log "6f. SA cannot create pods in kube-system — MUST be denied..."
+# 6h. CANNOT create pods in kube-system (Role is namespace-scoped)
+log "6h. SA cannot create pods in kube-system — MUST be denied..."
 if kubectl auth can-i create pods \
     --as="${SA_FQDN}" \
     -n kube-system 2>/dev/null | grep -q "^yes"; then
@@ -327,8 +415,8 @@ else
   pass "RBAC: SA cannot create pods in kube-system (namespace-scoped Role confirmed)"
 fi
 
-# 6g. CANNOT delete nodes (cluster-scoped, not in role)
-log "6g. SA cannot delete nodes — MUST be denied..."
+# 6i. CANNOT delete nodes (cluster-scoped, not in role)
+log "6i. SA cannot delete nodes — MUST be denied..."
 if kubectl auth can-i delete nodes \
     --as="${SA_FQDN}" 2>/dev/null | grep -q "^yes"; then
   fail "RBAC VIOLATION: SA can delete nodes — dangerous cluster privilege"
@@ -346,6 +434,7 @@ log "7a. helm template renders without errors..."
 if helm template rs-helm-test "${CHART_DIR}" \
     -f "${MANIFESTS}/helm-test-values.yaml" \
     --set scope.name=itest \
+    "${HELM_NETWORK_ARGS[@]}" \
     --output-dir /tmp/rs-helm-render 2>/dev/null; then
   pass "Helm: chart template renders cleanly"
 else
@@ -360,6 +449,7 @@ log "7b. helm install --dry-run against live cluster..."
 if helm install rs-helm-dryrun "${CHART_DIR}" \
     -f "${MANIFESTS}/helm-test-values.yaml" \
     --set scope.name=dryrun \
+    "${HELM_NETWORK_ARGS[@]}" \
     -n "runsecure-dryrun" \
     --create-namespace \
     --dry-run 2>/dev/null; then
@@ -368,26 +458,111 @@ else
   fail "Helm: dry-run install failed"
 fi
 
-# 7c. Runtime wiring parity: a rendered Kubernetes deployment must be able to
-# initialize and spawn without Docker/socket-proxy, must receive every exact
-# runtime image reference, and must use truthful readiness + readable Secret
-# projections.
+# 7c. Runtime wiring parity: compile and execute the backend Spawn contract so
+# generated runner Pods prove CPU/memory requests+limits, bounded /tmp, and no
+# cluster-scoped Namespace API calls. Then inspect the rendered Deployment for
+# immutable images, truthful readiness, and readable Secret projections.
 log "7c. helm runtime wiring matches Kubernetes backend contract..."
+if (cd "${REPO_ROOT}/infra/orchestrator" && \
+    go test ./internal/backend/kube -run '^TestSpawn_CreatesAllObjects$' -count=1); then
+  pass "Kubernetes runtime: generated runner resources are bounded and reconciliation is namespace-scoped"
+else
+  fail "Kubernetes runtime: generated runner resource/reconciliation contract failed"
+fi
 HELM_RUNTIME_MANIFEST=$(helm template rs-runtime "${CHART_DIR}" \
   -f "${MANIFESTS}/helm-test-values.yaml" \
-  --set scope.name=itest 2>/dev/null || echo "")
+  --set scope.name=itest \
+  "${HELM_NETWORK_ARGS[@]}" 2>/dev/null || echo "")
 RUNTIME_WIRING_OK=1
 for name in RUNSECURE_PROXY_IMAGE RUNSECURE_RUNNER_IMAGE_DEFAULT \
   RUNSECURE_RUNNER_IMAGE_NODE RUNSECURE_RUNNER_IMAGE_PYTHON \
   RUNSECURE_RUNNER_IMAGE_RUST RUNSECURE_EGRESS_BASE_DIR \
-  RUNSECURE_KUBE_API_SERVER_CIDR RUNSECURE_KUBE_API_SERVER_PORT \
-  RUNSECURE_KUBE_DNS_CIDR; do
+  RUNSECURE_KUBE_API_SERVER_PEERS RUNSECURE_KUBE_DNS_SERVICE_CIDRS \
+  RUNSECURE_KUBE_DNS_NAMESPACE RUNSECURE_KUBE_DNS_POD_LABEL_KEY \
+  RUNSECURE_KUBE_DNS_POD_LABEL_VALUE; do
   if ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q -- "- name: ${name}"; then
     RUNTIME_WIRING_OK=0
   fi
 done
 if echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'DOCKER_HOST\|socket-proxy:2375'; then
   RUNTIME_WIRING_OK=0
+fi
+
+# 7d. Apply the chart-rendered policy to a Pod carrying the chart's actual
+# orchestrator selector labels. This is a live Calico proof, not a static YAML
+# assertion: DNS must survive Service DNAT and API traffic must survive either
+# pre-DNAT (Service :443) or post-DNAT (endpoint port) policy evaluation.
+log "7d. chart-selected orchestrator reaches exact cluster DNS and API peers..."
+HELM_NETWORK_POLICY=$(helm template rs-itest "${CHART_DIR}" \
+  -f "${MANIFESTS}/helm-test-values.yaml" \
+  --set scope.name=itest \
+  "${HELM_NETWORK_ARGS[@]}" \
+  -s templates/networkpolicy-default-deny.yaml 2>/dev/null || echo "")
+if [[ -z "${HELM_NETWORK_POLICY}" ]] ||
+   ! echo "${HELM_NETWORK_POLICY}" | kubectl apply -f - >/dev/null; then
+  fail "Helm: chart network policy could not be applied to live cluster"
+else
+  kubectl apply -f "${MANIFESTS}/orchestrator-network-pod.yaml" >/dev/null
+  if wait_for_pod_ready "${NS}" "rs-orchestrator-network-test" 120 &&
+     wait_for_pod_ready "${NS}" "rs-unlabelled-network-control" 120; then
+    sleep 5
+    if kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        getent hosts kubernetes.default.svc >/dev/null 2>&1; then
+      pass "Helm NetworkPolicy: chart-selected orchestrator resolves cluster DNS"
+    else
+      fail "Helm NetworkPolicy: chart-selected orchestrator cannot resolve cluster DNS"
+    fi
+    ORCH_DNS_SERVICE_RESULT=$(kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+      dig +time=5 +tries=1 +short @"${DNS_SERVICE_IP}" kubernetes.default.svc.cluster.local 2>/dev/null || echo "")
+    if [[ -n "${ORCH_DNS_SERVICE_RESULT}" ]]; then
+      pass "Helm NetworkPolicy: pre-DNAT DNS Service /32 is reachable"
+    else
+      fail "Helm NetworkPolicy: pre-DNAT DNS Service /32 is not reachable"
+    fi
+    ORCH_DNS_POD_RESULT=$(kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+      dig +time=5 +tries=1 +short @"${DNS_POD_IP}" kubernetes.default.svc.cluster.local 2>/dev/null || echo "")
+    if [[ -n "${ORCH_DNS_POD_RESULT}" ]]; then
+      pass "Helm NetworkPolicy: post-DNAT DNS Pod selector is reachable"
+    else
+      fail "Helm NetworkPolicy: post-DNAT DNS Pod selector is not reachable"
+    fi
+    if kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 10 kubernetes.default.svc 443 >/dev/null 2>&1; then
+      pass "Helm NetworkPolicy: chart-selected orchestrator reaches Kubernetes Service API"
+    else
+      fail "Helm NetworkPolicy: chart-selected orchestrator cannot reach Kubernetes Service API"
+    fi
+    if kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 10 "${APISERVER_ENDPOINT_IP}" "${APISERVER_ENDPOINT_PORT}" >/dev/null 2>&1; then
+      pass "Helm NetworkPolicy: chart-selected orchestrator reaches post-DNAT API endpoint"
+    else
+      fail "Helm NetworkPolicy: chart-selected orchestrator cannot reach post-DNAT API endpoint"
+    fi
+    if kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 10 "${API_PEER_ONE_IP}" 8443 >/dev/null 2>&1 &&
+       kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 10 "${API_PEER_TWO_IP}" 9443 >/dev/null 2>&1; then
+      pass "Helm NetworkPolicy: both configured exact API probe pairs are reachable"
+    else
+      fail "Helm NetworkPolicy: a configured exact API probe pair is not reachable"
+    fi
+    if kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 5 "${API_PEER_ONE_IP}" 9443 >/dev/null 2>&1 ||
+       kubectl exec rs-orchestrator-network-test -n "${NS}" -c network-test -- \
+        nc -z -w 5 "${API_PEER_TWO_IP}" 8443 >/dev/null 2>&1; then
+      fail "Helm NetworkPolicy VIOLATION: API CIDR/port cross-pair was reachable"
+    else
+      pass "Helm NetworkPolicy: API CIDR/port cross-pairs remain denied"
+    fi
+    if kubectl exec rs-unlabelled-network-control -n "${NS}" -c network-test -- \
+        nc -z -w 5 "${APISERVER_IP}" 443 >/dev/null 2>&1; then
+      fail "Helm NetworkPolicy VIOLATION: unlabelled control Pod reached Kubernetes API"
+    else
+      pass "Helm NetworkPolicy: unlabelled control Pod remains default-denied"
+    fi
+  else
+    fail "Helm NetworkPolicy: network probe Pods did not become ready"
+  fi
 fi
 if ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'path: /readyz' ||
    ! echo "${HELM_RUNTIME_MANIFEST}" | grep -Eq 'defaultMode: (288|0440)' ||
