@@ -151,6 +151,12 @@ else
     else
       fail "squid.conf delivered but api.github.com not in allowlist (content: $(echo "${SQUID_CONTENT}" | head -5))"
     fi
+    if echo "${SQUID_CONTENT}" | grep -Fq "dstdomain .pypi.org" \
+        && echo "${SQUID_CONTENT}" | grep -Fq "dstdomain .files.pythonhosted.org"; then
+      ok "squid.conf contains the built-in Python package registry baseline"
+    else
+      fail "squid.conf is missing the built-in Python package registry baseline"
+    fi
   fi
 fi
 
@@ -197,6 +203,16 @@ if docker exec "${SPAWNED_RUNNER}" \
   ok "runner reached api.github.com via spawned proxy (HTTP egress allowed)"
 else
   fail "runner could not reach api.github.com via spawned proxy (expected allow)"
+  echo "--- proxy logs ---"
+  docker logs "${SPAWNED_PROXY}" 2>&1 | tail -20 || true
+fi
+
+if docker exec "${SPAWNED_RUNNER}" \
+    sh -c 'curl -sfL --max-time 20 -x http://proxy:3128 https://pypi.org/simple/pyyaml/ -o /dev/null' \
+    >/dev/null 2>&1; then
+  ok "runner reached pypi.org via the built-in package registry baseline"
+else
+  fail "runner could not reach pypi.org via spawned proxy (expected built-in allow)"
   echo "--- proxy logs ---"
   docker logs "${SPAWNED_PROXY}" 2>&1 | tail -20 || true
 fi

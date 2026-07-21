@@ -463,6 +463,51 @@ func TestRenderSquid_GitHubCoreConstant_MatchesBaseConf(t *testing.T) {
 	}
 }
 
+func TestRenderSquid_BuiltInEgressBaseline_EmptyHTTPEgress(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+
+	out := string(RenderSquid(r, policy))
+	for _, domain := range BuiltInEgressDomains {
+		if !strings.Contains(out, "acl rs_builtin_egress dstdomain "+domain) {
+			t.Errorf("built-in egress domain %q missing from squid config:\n%s", domain, out)
+		}
+	}
+
+	allowIdx := strings.Index(out, "http_access allow rs_builtin_egress")
+	denyIdx := strings.Index(out, "http_access deny all")
+	if allowIdx < 0 || allowIdx >= denyIdx {
+		t.Fatalf("built-in egress allow (pos %d) must precede deny all (pos %d):\n%s",
+			allowIdx, denyIdx, out)
+	}
+}
+
+func TestRenderSquid_BuiltInEgressConstant_MatchesBaseConf(t *testing.T) {
+	baseConfPath := filepath.Join("..", "..", "..", "squid", "base.conf")
+	baseConf, err := os.ReadFile(baseConfPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", baseConfPath, err)
+	}
+
+	prefixes := []string{
+		"acl registries dstdomain ",
+		"acl ci_tools dstdomain ",
+	}
+	var baseDomains []string
+	for line := range strings.SplitSeq(string(baseConf), "\n") {
+		for _, prefix := range prefixes {
+			if domain, ok := strings.CutPrefix(line, prefix); ok {
+				baseDomains = append(baseDomains, domain)
+			}
+		}
+	}
+
+	if !slices.Equal(BuiltInEgressDomains, baseDomains) {
+		t.Fatalf("built-in egress baseline differs between Go renderer and base.conf:\nGo:   %v\nSquid: %v",
+			BuiltInEgressDomains, baseDomains)
+	}
+}
+
 // TestRenderSquid_AllowedPrivateCIDR_MalformedSkipped verifies that a
 // *net.IPNet whose String() returns a non-canonical value (e.g. "<nil>") is
 // silently skipped rather than injected into the squid config. This exercises
