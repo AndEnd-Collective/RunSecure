@@ -273,20 +273,26 @@ for step in weekly["jobs"]["bump"]["steps"]:
         assert "|| true" not in command
 
 promote_text = promote_path.read_text()
+promote = yaml.safe_load(promote_text)
 assert "workflow_run:" not in promote_text
 assert "workflow_dispatch:" in promote_text
-assert "Refuse to move an existing version tag" in promote_text
-assert "promote-stable-${{ inputs.image_version }}" in promote_text
+assert promote["concurrency"] == {
+    "group": "promote-stable",
+    "cancel-in-progress": False,
+}
 assert "--clobber" not in promote_text
 assert "publish_run_id:" in promote_text
+assert "acceptance_run_id:" in promote_text
 assert "run-id: ${{ inputs.publish_run_id }}" in promote_text
+assert "run-id: ${{ inputs.acceptance_run_id }}" in promote_text
+assert "verified-publish-manifest-${{ inputs.publish_run_id }}" in promote_text
 assert "verify-release-manifest.py" in promote_text
-assert '"$SOURCE_REF"' in promote_text
-assert '"${REPO}/${KIND}:${CANARY}"' in promote_text
+assert "cmp -s .publish-manifest/release-images.json" in promote_text
+assert 'run.get("event") != "workflow_run"' in promote_text
+assert "promote-release-images.py" in promote_text
+assert "strategy" not in promote["jobs"]["promote"]
 assert "gh release upload" in promote_text
 assert "runsecure-v${VERSION}-release-images.json" in promote_text
-for builder_kind in ("node-build", "python-build", "rust-build"):
-    assert f"kind: {builder_kind}" in promote_text
 
 accept_text = accept_path.read_text()
 assert "github.event.workflow_run.id || inputs.publish_run_id" in accept_text

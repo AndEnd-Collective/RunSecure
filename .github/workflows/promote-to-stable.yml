@@ -20,11 +20,16 @@ on:
         description: 'Successful Publish Images workflow run ID accepted by CI and live verification'
         required: true
         type: string
+      acceptance_run_id:
+        description: 'Successful post-publish-acceptance run for the exact Publish Images manifest'
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: promote-stable-${{ inputs.image_version }}
+  # Every release writes the same floating aliases, so versions must not race.
+  group: promote-stable
   cancel-in-progress: false
 
 jobs:
@@ -49,10 +54,20 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.publish_run_id }}
 
+      - name: Download manifest proven by the exact acceptance run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-publish-manifest-${{ inputs.publish_run_id }}
+          path: .accepted-manifest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.acceptance_run_id }}
+
       - name: Verify workflow-run and immutable manifest provenance
         id: verify
         env:
           EXPECTED_VERSION: ${{ inputs.image_version }}
+          ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
           REPOSITORY: ${{ github.repository }}
@@ -64,6 +79,10 @@ jobs:
           fi
           if [[ ! "$PUBLISH_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::publish_run_id must be a positive integer"
+            exit 1
+          fi
+          if [[ ! "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::acceptance_run_id must be a positive integer"
             exit 1
           fi
 
@@ -95,6 +114,35 @@ jobs:
             --expected-build-sha "$BUILD_SHA" \
             --expected-publish-run-id "$PUBLISH_RUN_ID"
 
+          gh api "/repos/${REPOSITORY}/actions/runs/${ACCEPTANCE_RUN_ID}" \
+            > .accepted-manifest/workflow-run.json
+          python3 - .accepted-manifest/workflow-run.json <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          run = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if run.get("name") != "post-publish-acceptance":
+              raise SystemExit("not a post-publish-acceptance workflow run")
+          if run.get("path") != ".github/workflows/post-publish-acceptance.yml":
+              raise SystemExit("workflow path does not match post-publish-acceptance.yml")
+          if run.get("event") != "workflow_run":
+              raise SystemExit("acceptance must be the automatic workflow_run gate")
+          if run.get("conclusion") != "success":
+              raise SystemExit("post-publish acceptance run did not succeed")
+          PY
+
+          python3 infra/scripts/verify-release-manifest.py \
+            .accepted-manifest/release-images.json \
+            --expected-release "$EXPECTED_VERSION" \
+            --expected-build-sha "$BUILD_SHA" \
+            --expected-publish-run-id "$PUBLISH_RUN_ID"
+          if ! cmp -s .publish-manifest/release-images.json \
+              .accepted-manifest/release-images.json; then
+            echo "::error::accepted manifest differs from the exact Publish Images manifest"
+            exit 1
+          fi
+
           {
             echo "version=$EXPECTED_VERSION"
             echo "build_sha=$BUILD_SHA"
@@ -112,103 +160,21 @@ jobs:
   promote:
     needs: resolve-manifest
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       actions: read
+      contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - manifest_key: base
-            kind: base
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
-            also_alias: latest
-          - manifest_key: proxy
-            kind: proxy
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
-            also_alias: latest
-          - manifest_key: orchestrator
-            kind: orchestrator
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
-            also_alias: latest
-          - manifest_key: socket-proxy
-            kind: socket-proxy
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}'
-            also_alias: latest
-          - manifest_key: node-build-24
-            kind: node-build
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-24'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-24'
-            also_alias: latest-24
-          - manifest_key: node-build-22
-            kind: node-build
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-22'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-22'
-            also_alias: latest-22
-          - manifest_key: python-build-3.12
-            kind: python-build
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-3.12'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-3.12'
-            also_alias: latest-3.12
-          - manifest_key: rust-build-stable
-            kind: rust-build
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-stable'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-stable'
-            also_alias: latest-stable
-          - manifest_key: node-24
-            kind: node
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-24'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-24'
-            also_alias: latest-24
-          - manifest_key: node-22
-            kind: node
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-22'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-22'
-            also_alias: latest-22
-          - manifest_key: python-3.12
-            kind: python
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-3.12'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-3.12'
-            also_alias: latest-3.12
-          - manifest_key: rust-stable
-            kind: rust
-            canary_tag: '${{ needs.resolve-manifest.outputs.version }}-canary-stable'
-            stable_tag: '${{ needs.resolve-manifest.outputs.version }}-stable'
-            also_alias: latest-stable
-    env:
-      ALIAS: ${{ matrix.also_alias }}
-      CANARY: ${{ matrix.canary_tag }}
-      KIND: ${{ matrix.kind }}
-      MANIFEST_KEY: ${{ matrix.manifest_key }}
-      REPO: ghcr.io/andend-collective/runsecure
-      STABLE: ${{ matrix.stable_tag }}
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.resolve-manifest.outputs.build_sha }}
+
       - name: Download verified immutable manifest
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: verified-release-image-manifest-${{ needs.resolve-manifest.outputs.version }}
           path: .verified-manifest
-
-      - name: Resolve exact immutable promotion source
-        id: source
-        run: |
-          set -euo pipefail
-          python3 - .verified-manifest/release-images.json "$MANIFEST_KEY" "$GITHUB_OUTPUT" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-          reference = manifest["images"][sys.argv[2]]
-          with pathlib.Path(sys.argv[3]).open("a", encoding="utf-8") as output:
-              output.write(f"reference={reference}\n")
-              output.write(f"digest={reference.rsplit('@', 1)[1]}\n")
-          PY
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -218,58 +184,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify canary still resolves to the accepted manifest
-        env:
-          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
-          SOURCE_REF: ${{ steps.source.outputs.reference }}
+      - name: Aggregate preflight, version promotion, and alias barrier
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "$SOURCE_REF" >/dev/null
-          canary_digest=$(docker buildx imagetools inspect \
-            "${REPO}/${KIND}:${CANARY}" --format '{{.Manifest.Digest}}')
-          if [ "$canary_digest" != "$EXPECTED_DIGEST" ]; then
-            echo "::error::canary tag moved after acceptance: expected $EXPECTED_DIGEST, got $canary_digest"
-            exit 1
-          fi
-
-      - name: Refuse to move an existing version tag
-        env:
-          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
-        run: |
-          set -euo pipefail
-          if existing_digest=$(docker buildx imagetools inspect \
-              "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}' 2>/dev/null); then
-            if [ "$existing_digest" != "$EXPECTED_DIGEST" ]; then
-              echo "::error::immutable version tag ${REPO}/${KIND}:${STABLE} already points at $existing_digest"
-              exit 1
-            fi
-            echo "Version tag already matches the verified manifest; promotion is idempotent."
-          fi
-
-      - name: Promote the immutable digest to stable and alias
-        env:
-          SOURCE_REF: ${{ steps.source.outputs.reference }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            --tag "${REPO}/${KIND}:${STABLE}" \
-            --tag "${REPO}/${KIND}:${ALIAS}" \
-            "$SOURCE_REF"
-
-      - name: Verify stable tags resolve to the manifest digest
-        env:
-          EXPECTED_DIGEST: ${{ steps.source.outputs.digest }}
-        run: |
-          set -euo pipefail
-          stable_digest=$(docker buildx imagetools inspect \
-            "${REPO}/${KIND}:${STABLE}" --format '{{.Manifest.Digest}}')
-          alias_digest=$(docker buildx imagetools inspect \
-            "${REPO}/${KIND}:${ALIAS}" --format '{{.Manifest.Digest}}')
-          if [ "$stable_digest" != "$EXPECTED_DIGEST" ] \
-              || [ "$alias_digest" != "$EXPECTED_DIGEST" ]; then
-            echo "::error::stable tags do not match the verified release manifest"
-            exit 1
-          fi
+          python3 infra/scripts/promote-release-images.py \
+            .verified-manifest/release-images.json \
+            --release '${{ needs.resolve-manifest.outputs.version }}'
 
   release:
     needs: [resolve-manifest, promote]

@@ -375,7 +375,25 @@ acceptance suite is fully green. Promotion is manual so an operator can also
 require the live multi-runner backlog acceptance before releasing stable tags.
 The promotion (`promote-to-stable.yml`) runs server-side via
 `docker buildx imagetools create` — no rebuild, no pull, the stable tag points
-at the exact same digest the acceptance suite validated.
+at the exact same digest the acceptance suite validated. The dispatch requires
+both the tag-push `Publish Images` run ID and its successful automatic
+`post-publish-acceptance` run ID. Promotion downloads the manifest artifact
+from each run and requires them to match byte-for-byte.
+
+Before changing a tag, the promotion command resolves all 12 immutable source
+digests, matching canary tags, version-tag conflicts, and current aliases. It
+creates and verifies the complete immutable version-tag set before moving any
+floating `latest*` alias. If an alias update fails, aliases that existed before
+the run are restored to their captured digests. A newly created alias cannot be
+safely deleted with Buildx without risking other tags that share its manifest;
+that rare residual is reported explicitly and requires operator repair.
+
+```bash
+gh workflow run promote-to-stable.yml --ref main \
+  -f image_version=2.1.8 \
+  -f publish_run_id=<publish-run-id> \
+  -f acceptance_run_id=<automatic-acceptance-run-id>
+```
 
 Each successful publish also uploads a 90-day
 `release-image-manifest-<version>` artifact. Its JSON maps the proxy,
