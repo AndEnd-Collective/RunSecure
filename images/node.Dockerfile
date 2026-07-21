@@ -18,6 +18,11 @@ ARG BASE_REF=${BASE_IMAGE}:${BASE_TAG}
 FROM ${BASE_REF} AS node-build
 
 ARG NODE_VERSION=24
+# Keep the workflow-facing npm independent from the version bundled by
+# NodeSource. npm 11.18.0 (2026-06-29, beyond the 48h freshness window) is
+# checksum-pinned and contains fixed tar, brace-expansion, and undici.
+ARG NPM_VERSION=11.18.0
+ARG NPM_SHA256=73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Node.js Composition Stage"
@@ -49,8 +54,29 @@ RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL \
+         "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" \
+         -o /tmp/npm.tgz \
+    && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && NPM_ROOT="$(npm root --global)" \
+    && rm -rf "${NPM_ROOT}/npm" \
+    && mkdir -p "${NPM_ROOT}/npm" \
+    && tar xzf /tmp/npm.tgz \
+         --strip-components=1 \
+         --no-same-owner \
+         -C "${NPM_ROOT}/npm" \
+    && rm /tmp/npm.tgz \
     && node --version \
-    && npm --version
+    && test "$(npm --version)" = "${NPM_VERSION}" \
+    && test "$(node -p \
+         "require('${NPM_ROOT}/npm/node_modules/tar/package.json').version")" \
+         = "7.5.19" \
+    && test "$(node -p \
+         "require('${NPM_ROOT}/npm/node_modules/brace-expansion/package.json').version")" \
+         = "5.0.7" \
+    && test "$(node -p \
+         "require('${NPM_ROOT}/npm/node_modules/undici/package.json').version")" \
+         = "6.27.0"
 
 # ---- BUILD-TIME ASSERTION ---------------------------------------------------
 # Fail the build if the installed Node major version does not match

@@ -34,6 +34,13 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 ARG RUNNER_VERSION=2.335.1
 ARG RUNNER_SHA256_ARM64=6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207
 ARG RUNNER_SHA256_AMD64=4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
+# The runner tarball vendors npm under both of its private Node runtimes.
+# Refresh that payload from a checksum-pinned npm release so newly disclosed
+# vulnerabilities do not remain trapped behind the actions/runner release
+# cadence. npm 11.18.0 (2026-06-29, beyond the 48h freshness window) supports
+# both bundled Node 20 and Node 24 runtimes.
+ARG NPM_VERSION=11.18.0
+ARG NPM_SHA256=73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e
 # GH_CLI_VERSION 2.96.0 (2026-07-02) — latest stable. Still built with
 #   go1.26.4 (verified: `go version` on the released binary reports go1.26.4),
 #   so it clears the older go-stdlib CVEs but NOT GO-2026-4970
@@ -118,7 +125,32 @@ RUN ARCH=$(dpkg --print-architecture) \
     && echo "${RUNNER_SHA256}  /tmp/runner.tar.gz" | sha256sum -c - \
     && mkdir -p /home/runner/actions-runner \
     && tar xzf /tmp/runner.tar.gz -C /home/runner/actions-runner \
-    && rm /tmp/runner.tar.gz \
+    && curl -fsSL \
+         "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" \
+         -o /tmp/npm.tgz \
+    && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && for NODE_RUNTIME in node20 node24; do \
+         NODE_PREFIX="/home/runner/actions-runner/externals/${NODE_RUNTIME}"; \
+         rm -rf "${NODE_PREFIX}/lib/node_modules/npm"; \
+         mkdir -p "${NODE_PREFIX}/lib/node_modules/npm"; \
+         tar xzf /tmp/npm.tgz \
+           --strip-components=1 \
+           --no-same-owner \
+           -C "${NODE_PREFIX}/lib/node_modules/npm"; \
+         test "$("${NODE_PREFIX}/bin/node" \
+           "${NODE_PREFIX}/lib/node_modules/npm/bin/npm-cli.js" --version)" \
+           = "${NPM_VERSION}"; \
+         test "$("${NODE_PREFIX}/bin/node" -p \
+           "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/tar/package.json').version")" \
+           = "7.5.19"; \
+         test "$("${NODE_PREFIX}/bin/node" -p \
+           "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" \
+           = "5.0.7"; \
+         test "$("${NODE_PREFIX}/bin/node" -p \
+           "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/undici/package.json').version")" \
+           = "6.27.0"; \
+       done \
+    && rm /tmp/runner.tar.gz /tmp/npm.tgz \
     && chown -R runner:0 /home/runner/actions-runner
 
 # ---- Install runner dependencies (.NET runtime libs) ------------------------

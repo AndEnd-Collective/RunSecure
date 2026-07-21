@@ -46,6 +46,25 @@ var GitHubCoreDomains = []string{
 	".blob.core.windows.net",
 }
 
+// BuiltInEgressDomains is the package-registry and CI-tool baseline shipped in
+// infra/squid/base.conf. The persistent orchestrator renders Squid from Go
+// rather than reading that file, so these domains must be carried explicitly
+// to keep the one-shot and persistent backends behaviorally identical.
+var BuiltInEgressDomains = []string{
+	".npmjs.org",
+	".pypi.org",
+	".files.pythonhosted.org",
+	".crates.io",
+	".nodejs.org",
+	".nodesource.com",
+	".playwright.azureedge.net",
+	".googleapis.com",
+	".google.com",
+	".semgrep.dev",
+	".rustup.rs",
+	".rust-lang.org",
+}
+
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
@@ -137,6 +156,17 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 		}
 	}
 	b.WriteString("http_access allow rs_github_core\n")
+
+	// Package registries and common CI tools are part of RunSecure's built-in
+	// egress contract. The legacy one-shot path gets these from base.conf; emit
+	// the same baseline here so persistent Compose/Kubernetes runners do not
+	// unexpectedly deny package downloads when runner.yml has no custom egress.
+	for _, d := range BuiltInEgressDomains {
+		if clean := sanitizeDomain(d); clean != "" {
+			fmt.Fprintf(&b, "acl rs_builtin_egress dstdomain %s\n", clean)
+		}
+	}
+	b.WriteString("http_access allow rs_builtin_egress\n")
 
 	// Collect all permitted domains first, then emit the ACL and allow rule
 	// only when there are entries. An empty "acl allowed_domains dstdomain"
