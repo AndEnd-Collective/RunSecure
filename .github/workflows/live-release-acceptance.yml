@@ -16,6 +16,18 @@ on:
         description: "Exact RunSecure build SHA injected into each runner"
         required: true
         type: string
+      expected_scope:
+        description: "Exact RunSecure scope whose owned runner label must service every job"
+        required: true
+        type: string
+      expected_runner_image_ref:
+        description: "Immutable node-24 runner image reference from the release manifest"
+        required: true
+        type: string
+      expected_proxy_image_ref:
+        description: "Immutable proxy image reference from the release manifest"
+        required: true
+        type: string
       expected_parallelism:
         description: "Expected simultaneous runner capacity"
         required: true
@@ -34,7 +46,7 @@ concurrency:
 jobs:
   runtime:
     name: runtime-${{ matrix.slot }}
-    runs-on: [self-hosted, Linux, ARM64, container]
+    runs-on: [self-hosted, Linux, ARM64, container, "runsecure-scope-${{ inputs.expected_scope }}"]
     timeout-minutes: 5
     permissions: {}
     strategy:
@@ -47,36 +59,57 @@ jobs:
         shell: bash
         env:
           EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha }}
+          EXPECTED_PROXY_IMAGE_REF: ${{ inputs.expected_proxy_image_ref }}
+          EXPECTED_RUNNER_IMAGE_REF: ${{ inputs.expected_runner_image_ref }}
+          EXPECTED_SCOPE: ${{ inputs.expected_scope }}
           EXPECTED_VERSION: ${{ inputs.expected_version }}
         run: |
           set -euo pipefail
 
           [[ "${RUNSECURE_VERSION:-}" == "$EXPECTED_VERSION" ]]
           [[ "${RUNSECURE_BUILD_SHA:-}" == "$EXPECTED_BUILD_SHA" ]]
-          [[ -n "${RUNSECURE_SCOPE:-}" ]]
+          [[ "${RUNSECURE_RUNNER_IMAGE_REF:-}" == "$EXPECTED_RUNNER_IMAGE_REF" ]]
+          [[ "${RUNSECURE_PROXY_IMAGE_REF:-}" == "$EXPECTED_PROXY_IMAGE_REF" ]]
+          [[ "${RUNSECURE_SCOPE:-}" == "$EXPECTED_SCOPE" ]]
           [[ -n "${RUNSECURE_SPAWN_ID:-}" ]]
           [[ -n "${RUNNER_NAME:-}" ]]
           [[ "${RUNNER_NAME}" == rs-*-runner ]]
           [[ "$(id -u)" == 1001 ]]
-          ! command -v sudo >/dev/null 2>&1
+          if command -v sudo >/dev/null 2>&1; then
+            echo "::error::released runner unexpectedly includes sudo" >&2
+            exit 1
+          fi
 
           [[ "${HTTP_PROXY:-}" == "${http_proxy:-}" ]]
           [[ "${HTTPS_PROXY:-}" == "${https_proxy:-}" ]]
           [[ "${NO_PROXY:-}" == "${no_proxy:-}" ]]
           [[ "${HTTP_PROXY:-}" == "http://proxy:3128" ]]
+          [[ "${HTTPS_PROXY:-}" == "http://proxy:3128" ]]
+          [[ "${NO_PROXY:-}" == "localhost,127.0.0.1" ]]
 
           [[ -n "${RUNNER_TEMP:-}" && -w "$RUNNER_TEMP" ]]
           probe=$(mktemp "$RUNNER_TEMP/runsecure-live.XXXXXX")
           printf 'slot=%s spawn=%s\n' '${{ matrix.slot }}' "$RUNSECURE_SPAWN_ID" > "$probe"
           rm -f "$probe"
 
-          curl -fsS --connect-timeout 10 --max-time 20 \
+          curl --disable --proxy "$HTTPS_PROXY" --noproxy "" \
+            -fsS --connect-timeout 10 --max-time 20 \
             -o /dev/null https://api.github.com/meta
+          if env \
+              -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY \
+              -u http_proxy -u https_proxy -u no_proxy \
+              -u ALL_PROXY -u all_proxy \
+              curl --disable --noproxy "*" -fsS \
+                --connect-timeout 3 --max-time 5 \
+                -o /dev/null https://api.github.com/meta; then
+            echo "::error::runner reached GitHub directly with every proxy variable removed" >&2
+            exit 1
+          fi
 
           # Keep all four jobs eligible long enough to prove a three-runner
           # wave and the fourth-job replacement after one slot is released.
           sleep 30
-          echo "RUNSECURE_LIVE_COMPLETE slot=${{ matrix.slot }} spawn=${RUNSECURE_SPAWN_ID}"
+          echo "RUNSECURE_LIVE_COMPLETE scope=${RUNSECURE_SCOPE} slot=${{ matrix.slot }} spawn=${RUNSECURE_SPAWN_ID}"
 
   verify:
     name: verify-runtime-delivery-and-logs
@@ -91,6 +124,9 @@ jobs:
         env:
           EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha }}
           EXPECTED_PARALLELISM: ${{ inputs.expected_parallelism }}
+          EXPECTED_PROXY_IMAGE_REF: ${{ inputs.expected_proxy_image_ref }}
+          EXPECTED_RUNNER_IMAGE_REF: ${{ inputs.expected_runner_image_ref }}
+          EXPECTED_SCOPE: ${{ inputs.expected_scope }}
           EXPECTED_VERSION: ${{ inputs.expected_version }}
           GH_TOKEN: ${{ github.token }}
           RECEIPT_PATH: .live-acceptance/receipt.json
@@ -113,6 +149,9 @@ jobs:
           run_attempt = int(os.environ["RUN_ATTEMPT"])
           expected_version = os.environ["EXPECTED_VERSION"]
           expected_build_sha = os.environ["EXPECTED_BUILD_SHA"]
+          expected_runner_image_ref = os.environ["EXPECTED_RUNNER_IMAGE_REF"]
+          expected_proxy_image_ref = os.environ["EXPECTED_PROXY_IMAGE_REF"]
+          expected_scope = os.environ["EXPECTED_SCOPE"]
           expected_parallelism = int(os.environ["EXPECTED_PARALLELISM"])
           receipt_path = pathlib.Path(os.environ["RECEIPT_PATH"])
           if not 1 <= expected_parallelism <= 4:
@@ -121,6 +160,14 @@ jobs:
               raise SystemExit("expected_version must be an exact semver")
           if re.fullmatch(r"[0-9a-f]{40,64}", expected_build_sha) is None:
               raise SystemExit("expected_build_sha must be a full hexadecimal commit SHA")
+          if not expected_scope or len(expected_scope) > 100:
+              raise SystemExit("expected_scope must contain between 1 and 100 characters")
+          image_prefix = "ghcr.io/andend-collective/runsecure/"
+          digest_suffix = r"@sha256:[0-9a-f]{64}"
+          if re.fullmatch(image_prefix + r"node" + digest_suffix, expected_runner_image_ref) is None:
+              raise SystemExit("expected_runner_image_ref must be an immutable node image")
+          if re.fullmatch(image_prefix + r"proxy" + digest_suffix, expected_proxy_image_ref) is None:
+              raise SystemExit("expected_proxy_image_ref must be an immutable proxy image")
           endpoint = f"repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
 
           response = subprocess.run(
@@ -184,7 +231,8 @@ jobs:
                   slot = int(slot_match.group(1))
                   spawn_id = runner_match.group(1)
                   expected_marker = (
-                      f"RUNSECURE_LIVE_COMPLETE slot={slot} spawn={spawn_id}"
+                      f"RUNSECURE_LIVE_COMPLETE scope={expected_scope} "
+                      f"slot={slot} spawn={spawn_id}"
                   ).encode()
                   result = subprocess.run(
                       [
@@ -235,6 +283,9 @@ jobs:
               "all_runtime_jobs_successful": True,
               "expected_build_sha": expected_build_sha,
               "expected_parallelism": expected_parallelism,
+              "expected_proxy_image_ref": expected_proxy_image_ref,
+              "expected_runner_image_ref": expected_runner_image_ref,
+              "expected_scope": expected_scope,
               "expected_version": expected_version,
               "jobs": receipt_jobs,
               "observed_max_parallelism": maximum,

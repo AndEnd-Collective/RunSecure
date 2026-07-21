@@ -185,6 +185,8 @@ func TestSpawn_RunnerReceivesNonSecretProvenance(t *testing.T) {
 		"RUNSECURE_VERSION=v2.1.8",
 		"RUNSECURE_BUILD_SHA=abc123",
 		"RUNSECURE_SPAWN_ID=spawn-123",
+		"RUNSECURE_RUNNER_IMAGE_REF=r@sha256:x",
+		"RUNSECURE_PROXY_IMAGE_REF=p@sha256:y",
 	} {
 		require.True(t, hasEnv(runner.Env, kv), "runner env missing %q", kv)
 	}

@@ -28,6 +28,10 @@ on:
         description: 'Successful live-release-acceptance run dispatched at the exact v<version> tag'
         required: true
         type: string
+      expected_scope:
+        description: 'Exact RunSecure scope proven by the live-acceptance receipt'
+        required: true
+        type: string
 
 permissions: {}
 
@@ -110,6 +114,7 @@ jobs:
         id: verify
         env:
           EXPECTED_VERSION: ${{ inputs.image_version }}
+          EXPECTED_SCOPE: ${{ inputs.expected_scope }}
           ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LIVE_ACCEPTANCE_RUN_ID: ${{ inputs.live_acceptance_run_id }}
@@ -203,18 +208,20 @@ jobs:
           python3 - \
             .live-acceptance/workflow-run.json \
             .live-acceptance/receipt/receipt.json \
+            .publish-manifest/release-images.json \
             "$EXPECTED_VERSION" "$BUILD_SHA" "$LIVE_ACCEPTANCE_RUN_ID" \
-            "$REPOSITORY" <<'PY'
+            "$EXPECTED_SCOPE" "$REPOSITORY" <<'PY'
           import json
           import pathlib
           import re
           import sys
 
-          run_path, receipt_path = map(pathlib.Path, sys.argv[1:3])
-          expected_version, build_sha, live_run_id_text, repository = sys.argv[3:7]
+          run_path, receipt_path, manifest_path = map(pathlib.Path, sys.argv[1:4])
+          expected_version, build_sha, live_run_id_text, expected_scope, repository = sys.argv[4:9]
           live_run_id = int(live_run_id_text)
           run = json.loads(run_path.read_text(encoding="utf-8"))
           receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
           if run.get("id") != live_run_id:
               raise SystemExit("live acceptance API response has the wrong run ID")
@@ -248,6 +255,13 @@ jobs:
               raise SystemExit("live acceptance receipt version mismatch")
           if receipt.get("expected_build_sha") != build_sha:
               raise SystemExit("live acceptance receipt build SHA mismatch")
+          if not expected_scope or receipt.get("expected_scope") != expected_scope:
+              raise SystemExit("live acceptance receipt scope mismatch")
+          images = manifest.get("images", {})
+          if receipt.get("expected_runner_image_ref") != images.get("node-24"):
+              raise SystemExit("live acceptance runner image differs from release manifest")
+          if receipt.get("expected_proxy_image_ref") != images.get("proxy"):
+              raise SystemExit("live acceptance proxy image differs from release manifest")
 
           expected_parallelism = receipt.get("expected_parallelism")
           observed_parallelism = receipt.get("observed_max_parallelism")
@@ -288,7 +302,8 @@ jobs:
               if name_match is None or runner_match is None or not isinstance(log, dict):
                   raise SystemExit("live acceptance receipt has malformed runner evidence")
               expected_marker = (
-                  f"RUNSECURE_LIVE_COMPLETE slot={name_match.group(1)} "
+                  f"RUNSECURE_LIVE_COMPLETE scope={expected_scope} "
+                  f"slot={name_match.group(1)} "
                   f"spawn={runner_match.group(1)}"
               )
               if (

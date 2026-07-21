@@ -21,6 +21,8 @@
 #   RUNNER_JIT_CONFIG               — Base64-encoded JIT config
 #   RUNNER_NAME                     — (optional) Override runner name
 #   HTTP_PROXY / HTTPS_PROXY        — (optional) Squid proxy address
+#   RUNSECURE_RUNNER_IMAGE_REF      — Immutable runner image reference
+#   RUNSECURE_PROXY_IMAGE_REF       — Immutable proxy image reference
 #   RUNSECURE_LOG_UPLOAD_MARKER     — Substring to wait for in Worker_*.log
 #   RUNSECURE_LOG_UPLOAD_TIMEOUT    — Max seconds to wait (default 30)
 # ============================================================================

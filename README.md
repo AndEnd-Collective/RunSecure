@@ -305,8 +305,12 @@ immediately.
 
 The base allowlist (built into `infra/squid/base.conf`) covers
 `github.com`, `*.npmjs.org`, `*.pypi.org`, `crates.io`, `docker.io`,
-GHCR, and a few CI-essential tools. Project-specific entries from
-`http_egress:` are added on top.
+GHCR, GitHub's required `*.blob.core.windows.net` log/artifact transport,
+and a few CI-essential tools. The Azure Blob suffix covers every storage
+account, including attacker-owned accounts; this is an
+[accepted egress risk](./SECURITY.md#accepted-risks), not a data-loss
+prevention boundary. Project-specific entries from `http_egress:` are added
+on top.
 
 ---
 
@@ -382,24 +386,31 @@ capacity, then dispatch the dependency-free live gate at the release tag:
 gh workflow run live-release-acceptance.yml --ref v<release-version> \
   -f expected_version=<release-version> \
   -f expected_build_sha=<tag-commit-sha> \
+  -f expected_scope=<orchestrator-scope> \
+  -f expected_runner_image_ref=<node-24-repository@manifest-digest> \
+  -f expected_proxy_image_ref=<proxy-repository@manifest-digest> \
   -f expected_parallelism=3
 ```
 
-The gate submits four matching jobs. It requires four distinct JIT runners,
+The gate submits four jobs carrying the intended scope's owned runner label. It
+requires all four runners to report that exact scope, four distinct JIT runners,
 exactly three jobs in progress at once, the fourth job to consume the released
-slot, injected release provenance, writable runner state, proxy parity, and a
-successful GitHub job-log API response for every job. The local runner queue
-drain marker is not accepted as proof that GitHub persisted a log. The hosted
-verifier uploads a receipt bound to the release version, commit, run attempt,
-jobs, runners, observed parallelism, and log evidence.
+slot, injected release provenance, writable runner state, exact proxy settings,
+failed direct-egress probes, and a successful GitHub job-log API response for
+every job. The local runner queue drain marker is not accepted as proof that
+GitHub persisted a log. The hosted verifier uploads a receipt bound to the
+scope, release version, commit, run attempt, actual runner/proxy image
+references, jobs, runners, observed parallelism, and log evidence. Promotion
+compares those references with the immutable release manifest.
 
 The promotion (`promote-to-stable.yml`) runs server-side via
 `docker buildx imagetools create` — no rebuild, no pull, the stable tag points
 at the exact same digest the acceptance suite validated. The dispatch requires
 the tag-push `Publish Images` run ID, its successful automatic
 `post-publish-acceptance` run ID, and the successful live-acceptance run ID.
-Promotion downloads the manifest and live receipt artifacts and requires their
-version and build provenance to match exactly.
+Promotion also requires the intended scope name, downloads the manifest and
+live receipt artifacts, and requires their scope, version, build, and image
+provenance to match exactly.
 
 Before changing a tag, the promotion command resolves all 12 immutable source
 digests, matching canary tags, version-tag conflicts, and current aliases. It
@@ -414,7 +425,8 @@ gh workflow run promote-to-stable.yml --ref main \
   -f image_version=<release-version> \
   -f publish_run_id=<publish-run-id> \
   -f acceptance_run_id=<automatic-acceptance-run-id> \
-  -f live_acceptance_run_id=<live-acceptance-run-id>
+  -f live_acceptance_run_id=<live-acceptance-run-id> \
+  -f expected_scope=<orchestrator-scope>
 ```
 
 Each successful publish also uploads a 90-day
@@ -626,8 +638,11 @@ disk):
 RUNSECURE_DIAG_RETENTION=0 ./infra/scripts/run.sh ...
 ```
 
-The synchronous log-upload-wait still ensures `gh api .../jobs/<id>/logs`
-returns the actual log instead of `BlobNotFound`.
+The synchronous wait proves only that the runner's local upload queues drained;
+it does not prove GitHub persisted the remote job log. Keep `_diag/` enabled
+unless the job-log API or the live release gate independently confirms remote
+availability. With retention disabled, a failed remote upload has no local
+recovery copy.
 
 ### JIT token exposure
 

@@ -87,6 +87,9 @@ if grep -q 'live_acceptance_run_id:' "$PROMOTE_WF" \
     && grep -Fq 'run.get("head_branch") != f"v{expected_version}"' "$PROMOTE_WF" \
     && grep -Fq 'run.get("head_sha") != build_sha' "$PROMOTE_WF" \
     && grep -Fq 'receipt.get("all_logs_verified") is not True' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_runner_image_ref") != images.get("node-24")' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_proxy_image_ref") != images.get("proxy")' "$PROMOTE_WF" \
+    && grep -Fq 'receipt.get("expected_scope") != expected_scope' "$PROMOTE_WF" \
     && grep -Fq 'expected_parallelism != 3 or observed_parallelism != 3' "$PROMOTE_WF"; then
     pass "promotion requires exact-tag live multi-runner and job-log evidence"
 else

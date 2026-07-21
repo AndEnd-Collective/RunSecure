@@ -323,6 +323,7 @@ assert "--clobber" not in promote_text
 assert "publish_run_id:" in promote_text
 assert "acceptance_run_id:" in promote_text
 assert "live_acceptance_run_id:" in promote_text
+assert "expected_scope:" in promote_text
 assert "run-id: ${{ inputs.publish_run_id }}" in promote_text
 assert "run-id: ${{ inputs.acceptance_run_id }}" in promote_text
 assert "run-id: ${{ inputs.live_acceptance_run_id }}" in promote_text
@@ -337,6 +338,9 @@ assert 'run.get("event") != "workflow_dispatch"' in promote_text
 assert 'run.get("head_sha") != build_sha' in promote_text
 assert 'receipt.get("expected_version") != expected_version' in promote_text
 assert 'receipt.get("expected_build_sha") != build_sha' in promote_text
+assert 'receipt.get("expected_runner_image_ref") != images.get("node-24")' in promote_text
+assert 'receipt.get("expected_proxy_image_ref") != images.get("proxy")' in promote_text
+assert 'receipt.get("expected_scope") != expected_scope' in promote_text
 assert 'receipt.get("all_logs_verified") is not True' in promote_text
 assert 'expected_parallelism != 3 or observed_parallelism != 3' in promote_text
 assert 'log.get("completion_marker") != expected_marker' in promote_text
@@ -369,7 +373,8 @@ python3 - \
   "$PROMOTE_WORKFLOW" \
   "${tmp}/verify-live-receipt.py" \
   "${tmp}/live-run.json" \
-  "${tmp}/live-receipt.json" <<'PY'
+  "${tmp}/live-receipt.json" \
+  "${tmp}/release-images.json" <<'PY'
 from __future__ import annotations
 
 import json
@@ -382,17 +387,19 @@ workflow_path = pathlib.Path(sys.argv[1])
 validator_path = pathlib.Path(sys.argv[2])
 run_path = pathlib.Path(sys.argv[3])
 receipt_path = pathlib.Path(sys.argv[4])
+manifest_path = pathlib.Path(sys.argv[5])
 workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
 script = next(
     step["run"]
     for step in workflow["jobs"]["resolve-manifest"]["steps"]
     if step.get("id") == "verify"
 )
-start = '  "$REPOSITORY" <<\'PY\'\n'
+start = '  "$EXPECTED_SCOPE" "$REPOSITORY" <<\'PY\'\n'
 validator = script.split(start, 1)[1].split("\nPY\n", 1)[0]
 validator_path.write_text(validator + "\n", encoding="utf-8")
 
 build_sha = "a" * 40
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 run = {
     "conclusion": "success",
     "event": "workflow_dispatch",
@@ -416,7 +423,8 @@ for slot in range(1, 5):
             "log": {
                 "bytes": 1000 + slot,
                 "completion_marker": (
-                    f"RUNSECURE_LIVE_COMPLETE slot={slot} spawn={spawn_id}"
+                    f"RUNSECURE_LIVE_COMPLETE scope=release-v2-1-9 "
+                    f"slot={slot} spawn={spawn_id}"
                 ),
                 "verified": True,
             },
@@ -430,6 +438,9 @@ receipt = {
     "all_runtime_jobs_successful": True,
     "expected_build_sha": build_sha,
     "expected_parallelism": 3,
+    "expected_proxy_image_ref": manifest["images"]["proxy"],
+    "expected_runner_image_ref": manifest["images"]["node-24"],
+    "expected_scope": "release-v2-1-9",
     "expected_version": "2.1.9",
     "jobs": jobs,
     "observed_max_parallelism": 3,
@@ -446,8 +457,8 @@ PY
 
 build_sha=$(printf 'a%.0s' {1..40})
 python3 "${tmp}/verify-live-receipt.py" \
-  "${tmp}/live-run.json" "${tmp}/live-receipt.json" \
-  2.1.9 "$build_sha" 777 AndEnd-Collective/RunSecure
+  "${tmp}/live-run.json" "${tmp}/live-receipt.json" "${tmp}/release-images.json" \
+  2.1.9 "$build_sha" 777 release-v2-1-9 AndEnd-Collective/RunSecure
 
 python3 - "${tmp}/live-run.json" "${tmp}/wrong-sha-run.json" <<'PY'
 import json
@@ -459,8 +470,8 @@ run["head_sha"] = "b" * 40
 pathlib.Path(sys.argv[2]).write_text(json.dumps(run), encoding="utf-8")
 PY
 if python3 "${tmp}/verify-live-receipt.py" \
-    "${tmp}/wrong-sha-run.json" "${tmp}/live-receipt.json" \
-    2.1.9 "$build_sha" 777 AndEnd-Collective/RunSecure 2>/dev/null; then
+    "${tmp}/wrong-sha-run.json" "${tmp}/live-receipt.json" "${tmp}/release-images.json" \
+    2.1.9 "$build_sha" 777 release-v2-1-9 AndEnd-Collective/RunSecure 2>/dev/null; then
   echo "FAIL: promotion accepted live evidence from a different build SHA" >&2
   exit 1
 fi
@@ -472,13 +483,14 @@ import sys
 
 receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 receipt["jobs"][0]["log"]["completion_marker"] = (
-    "RUNSECURE_LIVE_COMPLETE slot=1 spawn=${RUNSECURE_SPAWN_ID}"
+    "RUNSECURE_LIVE_COMPLETE scope=release-v2-1-9 "
+    "slot=1 spawn=${RUNSECURE_SPAWN_ID}"
 )
 pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt), encoding="utf-8")
 PY
 if python3 "${tmp}/verify-live-receipt.py" \
-    "${tmp}/live-run.json" "${tmp}/source-marker-receipt.json" \
-    2.1.9 "$build_sha" 777 AndEnd-Collective/RunSecure 2>/dev/null; then
+    "${tmp}/live-run.json" "${tmp}/source-marker-receipt.json" "${tmp}/release-images.json" \
+    2.1.9 "$build_sha" 777 release-v2-1-9 AndEnd-Collective/RunSecure 2>/dev/null; then
   echo "FAIL: promotion accepted an unrendered workflow-source log marker" >&2
   exit 1
 fi
@@ -494,9 +506,34 @@ receipt["observed_max_parallelism"] = 1
 pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt), encoding="utf-8")
 PY
 if python3 "${tmp}/verify-live-receipt.py" \
-    "${tmp}/live-run.json" "${tmp}/serial-receipt.json" \
-    2.1.9 "$build_sha" 777 AndEnd-Collective/RunSecure 2>/dev/null; then
+    "${tmp}/live-run.json" "${tmp}/serial-receipt.json" "${tmp}/release-images.json" \
+    2.1.9 "$build_sha" 777 release-v2-1-9 AndEnd-Collective/RunSecure 2>/dev/null; then
   echo "FAIL: promotion accepted a serial live-acceptance run" >&2
+  exit 1
+fi
+
+python3 - "${tmp}/live-receipt.json" "${tmp}/stale-image-receipt.json" <<'PY'
+import json
+import pathlib
+import sys
+
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+receipt["expected_runner_image_ref"] = (
+    "ghcr.io/andend-collective/runsecure/node@sha256:" + "f" * 64
+)
+pathlib.Path(sys.argv[2]).write_text(json.dumps(receipt), encoding="utf-8")
+PY
+if python3 "${tmp}/verify-live-receipt.py" \
+    "${tmp}/live-run.json" "${tmp}/stale-image-receipt.json" "${tmp}/release-images.json" \
+    2.1.9 "$build_sha" 777 release-v2-1-9 AndEnd-Collective/RunSecure 2>/dev/null; then
+  echo "FAIL: promotion accepted a runner image outside the release manifest" >&2
+  exit 1
+fi
+
+if python3 "${tmp}/verify-live-receipt.py" \
+    "${tmp}/live-run.json" "${tmp}/live-receipt.json" "${tmp}/release-images.json" \
+    2.1.9 "$build_sha" 777 another-scope AndEnd-Collective/RunSecure 2>/dev/null; then
+  echo "FAIL: promotion accepted live evidence from a different scope" >&2
   exit 1
 fi
 

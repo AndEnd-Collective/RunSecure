@@ -204,6 +204,8 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 		"RUNSECURE_VERSION=" + in.Version,
 		"RUNSECURE_BUILD_SHA=" + in.BuildSHA,
 		"RUNSECURE_SPAWN_ID=" + in.SpawnID,
+		"RUNSECURE_RUNNER_IMAGE_REF=" + in.RunnerImage,
+		"RUNSECURE_PROXY_IMAGE_REF=" + in.ProxyImage,
 		"HTTP_PROXY=http://proxy:3128",
 		"HTTPS_PROXY=http://proxy:3128",
 		"NO_PROXY=localhost,127.0.0.1",

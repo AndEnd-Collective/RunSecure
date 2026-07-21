@@ -4,8 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT/.github/workflows/live-release-acceptance.yml"
+README="$ROOT/README.md"
+SECURITY="$ROOT/SECURITY.md"
 
-python3 - "$WORKFLOW" <<'PY'
+python3 - "$WORKFLOW" "$README" "$SECURITY" <<'PY'
 from __future__ import annotations
 
 import pathlib
@@ -15,16 +17,30 @@ import yaml
 
 path = pathlib.Path(sys.argv[1])
 workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+readme = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+security = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 jobs = workflow["jobs"]
 runtime = jobs["runtime"]
 verify = jobs["verify"]
+
+trigger = workflow.get("on", workflow.get(True))
+inputs = trigger["workflow_dispatch"]["inputs"]
+assert inputs["expected_runner_image_ref"]["required"] is True
+assert inputs["expected_proxy_image_ref"]["required"] is True
+assert inputs["expected_scope"]["required"] is True
 
 assert workflow["permissions"] == {}
 assert workflow["concurrency"] == {
     "group": "live-release-acceptance",
     "cancel-in-progress": False,
 }
-assert runtime["runs-on"] == ["self-hosted", "Linux", "ARM64", "container"]
+assert runtime["runs-on"] == [
+    "self-hosted",
+    "Linux",
+    "ARM64",
+    "container",
+    "runsecure-scope-${{ inputs.expected_scope }}",
+]
 assert runtime["permissions"] == {}
 assert runtime["strategy"]["fail-fast"] is False
 assert runtime["strategy"]["max-parallel"] == 4
@@ -36,13 +52,20 @@ runtime_script = runtime["steps"][0]["run"]
 for required in (
     "RUNSECURE_VERSION",
     "RUNSECURE_BUILD_SHA",
+    "RUNSECURE_RUNNER_IMAGE_REF",
+    "RUNSECURE_PROXY_IMAGE_REF",
     "RUNSECURE_SCOPE",
     "RUNSECURE_SPAWN_ID",
     "HTTP_PROXY",
     "http_proxy",
+    '[[ "${HTTPS_PROXY:-}" == "http://proxy:3128" ]]',
+    '[[ "${NO_PROXY:-}" == "localhost,127.0.0.1" ]]',
+    "-u ALL_PROXY -u all_proxy",
+    'curl --disable --noproxy "*"',
+    "runner reached GitHub directly",
     "RUNNER_TEMP",
     "sleep 30",
-    "RUNSECURE_LIVE_COMPLETE slot=",
+    "RUNSECURE_LIVE_COMPLETE scope=${RUNSECURE_SCOPE} slot=",
     "spawn=${RUNSECURE_SPAWN_ID}",
 ):
     assert required in runtime_script, required
@@ -61,11 +84,14 @@ for required in (
     "maximum parallelism",
     "/actions/jobs/{job_id}/logs",
     "len(result.stdout) > 0",
-    "RUNSECURE_LIVE_COMPLETE slot={slot} spawn={spawn_id}",
+    "RUNSECURE_LIVE_COMPLETE scope={expected_scope}",
     "never contained their exact runtime completion",
     '"schema_version": 1',
     '"expected_version": expected_version',
     '"expected_build_sha": expected_build_sha',
+    '"expected_runner_image_ref": expected_runner_image_ref',
+    '"expected_proxy_image_ref": expected_proxy_image_ref',
+    '"expected_scope": expected_scope',
     '"observed_max_parallelism": maximum',
     '"run_attempt": run_attempt',
 ):
@@ -79,6 +105,12 @@ assert upload["with"]["name"] == (
 )
 assert upload["with"]["path"] == ".live-acceptance/receipt.json"
 assert upload["with"]["if-no-files-found"] == "error"
+
+disproven_claim = "synchronous log upload wait still ensures"
+assert disproven_claim not in readme.lower().replace("-", " ")
+assert disproven_claim not in security.lower().replace("-", " ")
+assert "*.blob.core.windows.net" in readme
+assert "attacker-owned Azure account" in security
 
 print("PASS: live release acceptance contract is complete and dependency-free")
 PY
@@ -132,7 +164,8 @@ for slot, (started, completed) in enumerate(intervals, start=1):
     )
     (logs_dir / f"{job_id}.log").write_text(
         "workflow source: spawn=${RUNSECURE_SPAWN_ID}\n"
-        f"RUNSECURE_LIVE_COMPLETE slot={slot} spawn={spawn_id}\n",
+        f"RUNSECURE_LIVE_COMPLETE scope=release-v2-1-9 "
+        f"slot={slot} spawn={spawn_id}\n",
         encoding="utf-8",
     )
 jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
@@ -159,6 +192,9 @@ receipt="$tmp/receipt.json"
 env \
   EXPECTED_BUILD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   EXPECTED_PARALLELISM=3 \
+  EXPECTED_PROXY_IMAGE_REF=ghcr.io/andend-collective/runsecure/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  EXPECTED_RUNNER_IMAGE_REF=ghcr.io/andend-collective/runsecure/node@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  EXPECTED_SCOPE=release-v2-1-9 \
   EXPECTED_VERSION=2.1.9 \
   GH_STUB_JOBS="$tmp/jobs.json" \
   GH_STUB_LOG_DIR="$tmp/logs" \
@@ -179,6 +215,9 @@ assert receipt["schema_version"] == 1
 assert receipt["run_id"] == 12345
 assert receipt["run_attempt"] == 2
 assert receipt["expected_version"] == "2.1.9"
+assert receipt["expected_proxy_image_ref"].endswith("@sha256:" + "b" * 64)
+assert receipt["expected_runner_image_ref"].endswith("@sha256:" + "c" * 64)
+assert receipt["expected_scope"] == "release-v2-1-9"
 assert receipt["observed_max_parallelism"] == 3
 assert receipt["runtime_job_count"] == 4
 assert len({job["runner_id"] for job in receipt["jobs"]}) == 4
@@ -190,6 +229,9 @@ invalid_output="$tmp/invalid-parallelism.txt"
 if env \
   EXPECTED_BUILD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   EXPECTED_PARALLELISM=0 \
+  EXPECTED_PROXY_IMAGE_REF=ghcr.io/andend-collective/runsecure/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  EXPECTED_RUNNER_IMAGE_REF=ghcr.io/andend-collective/runsecure/node@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  EXPECTED_SCOPE=release-v2-1-9 \
   EXPECTED_VERSION=2.1.9 \
   PATH="$tmp/bin:$PATH" \
   RECEIPT_PATH="$tmp/invalid.json" \
