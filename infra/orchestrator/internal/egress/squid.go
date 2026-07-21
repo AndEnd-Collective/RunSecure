@@ -46,6 +46,25 @@ var GitHubCoreDomains = []string{
 	".blob.core.windows.net",
 }
 
+// BuiltInEgressDomains is the package-registry and CI-tool baseline shipped in
+// infra/squid/base.conf. The persistent orchestrator renders Squid from Go
+// rather than reading that file, so these domains must be carried explicitly
+// to keep the one-shot and persistent backends behaviorally identical.
+var BuiltInEgressDomains = []string{
+	".npmjs.org",
+	".pypi.org",
+	".files.pythonhosted.org",
+	".crates.io",
+	".nodejs.org",
+	".nodesource.com",
+	".playwright.azureedge.net",
+	".googleapis.com",
+	".google.com",
+	".semgrep.dev",
+	".rustup.rs",
+	".rust-lang.org",
+}
+
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
@@ -79,6 +98,10 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	var b bytes.Buffer
 	b.WriteString("# RunSecure squid.conf — generated per-spawn. Do not edit.\n")
 	b.WriteString("http_port 3128\n")
+	b.WriteString("acl SSL_ports port 443\n")
+	b.WriteString("acl Safe_ports port 80\n")
+	b.WriteString("acl Safe_ports port 443\n")
+	b.WriteString("acl CONNECT method CONNECT\n")
 
 	// Explicit deny ACL for private/special-use IP ranges. Placed before the
 	// domain allowlist so that an allowed hostname that DNS-resolves to a
@@ -115,6 +138,14 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 		b.WriteString("http_access allow rs_allowed_private\n")
 	}
 
+	// Keep public-domain handling aligned with base.conf: an allowlisted
+	// hostname never authorizes HTTP or CONNECT on an arbitrary port. The
+	// operator-approved private CIDR exemption intentionally precedes these
+	// denies so exact local services such as Vladislav's Proxpi gateway on
+	// port 3141 remain reachable. Every public-domain allow remains below.
+	b.WriteString("http_access deny !Safe_ports\n")
+	b.WriteString("http_access deny CONNECT !SSL_ports\n")
+
 	b.WriteString("http_access deny rs_private_dst\n")
 
 	// GitHub Actions control-plane baseline (unconditional — every runner
@@ -137,6 +168,17 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 		}
 	}
 	b.WriteString("http_access allow rs_github_core\n")
+
+	// Package registries and common CI tools are part of RunSecure's built-in
+	// egress contract. The legacy one-shot path gets these from base.conf; emit
+	// the same baseline here so persistent Compose/Kubernetes runners do not
+	// unexpectedly deny package downloads when runner.yml has no custom egress.
+	for _, d := range BuiltInEgressDomains {
+		if clean := sanitizeDomain(d); clean != "" {
+			fmt.Fprintf(&b, "acl rs_builtin_egress dstdomain %s\n", clean)
+		}
+	}
+	b.WriteString("http_access allow rs_builtin_egress\n")
 
 	// Collect all permitted domains first, then emit the ACL and allow rule
 	// only when there are entries. An empty "acl allowed_domains dstdomain"

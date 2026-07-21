@@ -130,19 +130,29 @@ func (p *Poll) tick(ctx context.Context) {
 		repoAvail := repo.MaxConcurrent - p.deps.InFlight(repo.Repo)
 		globalAvail := p.scope.GlobalMaxRunners - p.deps.GlobalInFlight()
 		avail := max(min(repoAvail, globalAvail), 0)
-		// GitHub continues to report a job as queued while a reserved JIT
-		// runner is registering or online but not yet assigned. Subtract that
-		// repo-specific delivered capacity before reserving again; otherwise a
-		// slow registration can create one runner per poll for one job.
-		uncoveredDemand := max(queued-p.deps.DemandCoverage(repo.Repo), 0)
+		// GitHub can continue reporting a job as queued while its JIT runner is
+		// registering, or return a stale queued snapshot while that exact job is
+		// being assigned. Reconcile exact job IDs with generic pending/online
+		// capacity before reserving. This avoids both duplicate runners and the
+		// under-spawn caused by subtracting an unrelated concurrent assignment.
+		queuedJobIDs := make([]int64, 0, len(demand.Jobs))
+		for _, job := range demand.Jobs {
+			queuedJobIDs = append(queuedJobIDs, job.ID)
+		}
+		coverage := p.deps.ReconcileDemand(repo.Repo, queuedJobIDs)
+		uncoveredDemand := max(queued-coverage, 0)
 		toSpawn := min(uncoveredDemand, avail)
 
 		for i := 0; i < toSpawn; i++ {
+			candidateJobs := make([]github.WorkflowJob, 0, len(demand.Jobs))
+			candidateOffset := i % len(demand.Jobs)
+			candidateJobs = append(candidateJobs, demand.Jobs[candidateOffset:]...)
+			candidateJobs = append(candidateJobs, demand.Jobs[:candidateOffset]...)
 			intent := SpawnIntent{
 				Scope:         p.scope.Name,
 				Repo:          repo.Repo,
 				SpawnID:       p.deps.NewSpawnID(),
-				CandidateJobs: append([]github.WorkflowJob(nil), demand.Jobs...),
+				CandidateJobs: candidateJobs,
 			}
 			if !p.deps.TryReserve(intent.SpawnID, intent.Repo, repo.MaxConcurrent, p.scope.GlobalMaxRunners) {
 				break

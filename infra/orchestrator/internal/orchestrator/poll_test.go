@@ -39,10 +39,12 @@ func newPollDeps(t *testing.T) *pollDeps {
 
 func (d *pollDeps) IntentChannel() chan<- SpawnIntent { return d.intents }
 func (d *pollDeps) InFlight(repo string) int          { return d.st.InFlight(repo) }
-func (d *pollDeps) DemandCoverage(repo string) int    { return d.st.DemandCoverage(repo) }
-func (d *pollDeps) GlobalInFlight() int               { return d.st.GlobalInFlight() }
-func (d *pollDeps) SchedulingBlocked() bool           { return d.st.SchedulingBlocked() }
-func (d *pollDeps) BreakerIsOpen(repo string) bool    { return d.breakers.IsOpen(repo) }
+func (d *pollDeps) ReconcileDemand(repo string, queuedJobIDs []int64) int {
+	return d.st.ReconcileDemand(repo, queuedJobIDs)
+}
+func (d *pollDeps) GlobalInFlight() int            { return d.st.GlobalInFlight() }
+func (d *pollDeps) SchedulingBlocked() bool        { return d.st.SchedulingBlocked() }
+func (d *pollDeps) BreakerIsOpen(repo string) bool { return d.breakers.IsOpen(repo) }
 func (d *pollDeps) BreakerMaybeHalfOpen(repo string) bool {
 	return d.breakers.MaybeHalfOpen(repo)
 }
@@ -216,7 +218,7 @@ func TestPoll_OneQueuedJobCannotReserveDuplicateSlowRunner(t *testing.T) {
 
 	require.Len(t, d.intents, 1,
 		"pending capacity already covers the still-queued GitHub job")
-	require.Equal(t, 1, d.st.DemandCoverage("o/r"))
+	require.Equal(t, 1, d.st.ReconcileDemand("o/r", []int64{1}))
 }
 
 func TestPoll_AssignedRunnerDoesNotCoverAnotherQueuedJob(t *testing.T) {
@@ -228,7 +230,8 @@ func TestPoll_AssignedRunnerDoesNotCoverAnotherQueuedJob(t *testing.T) {
 		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
 	}, d)
 	require.True(t, d.st.TryReserve("assigned", "o/r", 3, 3, d.clk.Now()))
-	require.True(t, d.st.MarkAssigned("assigned", d.clk.Now()))
+	require.True(t, d.st.MarkAssigned("assigned", 99, d.clk.Now()))
+	d.clk.Advance(time.Second)
 	srv.mu.Lock()
 	srv.queuedFor["o/r"] = 2
 	srv.mu.Unlock()
@@ -238,6 +241,85 @@ func TestPoll_AssignedRunnerDoesNotCoverAnotherQueuedJob(t *testing.T) {
 	require.Len(t, d.intents, 2,
 		"assigned work has left GitHub's queued set and must not be subtracted")
 	require.Equal(t, 3, d.st.GlobalInFlight())
+}
+
+func TestPoll_AssignmentDuringDemandRefreshCoversStaleQueuedJob(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+	require.True(t, d.st.TryReserve("racing", "o/r", 3, 3, d.clk.Now()))
+	require.True(t, d.st.MarkOnline("racing", d.clk.Now()))
+
+	var assigned atomic.Bool
+	srv.mu.Lock()
+	srv.queuedJobIDs["o/r"] = []int64{1}
+	srv.beforeJobsResponse = func() {
+		d.clk.Advance(time.Second)
+		assigned.Store(d.st.MarkAssigned("racing", 1, d.clk.Now()))
+	}
+	srv.mu.Unlock()
+
+	p.tick(context.Background())
+
+	require.True(t, assigned.Load())
+	require.Empty(t, d.intents,
+		"an assignment concurrent with demand refresh must cover its stale queued job")
+	require.Equal(t, 1, d.st.Snapshot().PerRepo["o/r"].Assigned)
+}
+
+func TestPoll_AssignmentDuringDemandRefreshDoesNotCoverDifferentFreshJob(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+	require.True(t, d.st.TryReserve("racing", "o/r", 3, 3, d.clk.Now()))
+	require.True(t, d.st.MarkOnline("racing", d.clk.Now()))
+
+	srv.mu.Lock()
+	srv.queuedJobIDs["o/r"] = []int64{1}
+	srv.beforeJobsResponse = func() {
+		require.True(t, d.st.MarkAssigned("racing", 1, d.clk.Now()))
+		srv.queuedJobIDs["o/r"] = []int64{2}
+	}
+	srv.mu.Unlock()
+
+	p.tick(context.Background())
+
+	require.Len(t, d.intents, 1,
+		"an unrelated fresh queued job must not be hidden by the concurrent assignment")
+	require.Equal(t, int64(2), (<-d.intents).CandidateJobs[0].ID)
+}
+
+func TestPoll_CompletedAssignmentCoversStaleJobAfterReservationRelease(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+	require.True(t, d.st.TryReserve("fast", "o/r", 3, 3, d.clk.Now()))
+	require.True(t, d.st.MarkOnline("fast", d.clk.Now()))
+
+	srv.mu.Lock()
+	srv.queuedJobIDs["o/r"] = []int64{1}
+	srv.beforeJobsResponse = func() {
+		require.True(t, d.st.MarkAssigned("fast", 1, d.clk.Now()))
+		d.st.ReleaseReservation("fast")
+	}
+	srv.mu.Unlock()
+
+	p.tick(context.Background())
+
+	require.Empty(t, d.intents,
+		"a completed runner's tombstone must cover the same stale queued job")
 }
 
 func TestPoll_TeardownDebtBlocksScopeWideAdmission(t *testing.T) {

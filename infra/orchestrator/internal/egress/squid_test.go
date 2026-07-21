@@ -93,6 +93,55 @@ func TestRenderSquid_DenyAllIsLast(t *testing.T) {
 	}
 }
 
+func TestRenderSquid_NonStandardConnectDenyPrecedesDomainAllows(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"example.com"}}
+	policy := security.Defaults("standard")
+
+	out := string(RenderSquid(r, policy))
+	required := []string{
+		"acl SSL_ports port 443",
+		"acl Safe_ports port 80",
+		"acl Safe_ports port 443",
+		"acl CONNECT method CONNECT",
+		"http_access deny !Safe_ports",
+		"http_access deny CONNECT !SSL_ports",
+	}
+	for _, line := range required {
+		if !strings.Contains(out, line) {
+			t.Errorf("required port control %q missing from squid config:\n%s", line, out)
+		}
+	}
+
+	portDenyIdx := strings.Index(out, "http_access deny !Safe_ports")
+	connectDenyIdx := strings.Index(out, "http_access deny CONNECT !SSL_ports")
+	for _, allow := range []string{
+		"http_access allow rs_github_core",
+		"http_access allow rs_builtin_egress",
+		"http_access allow allowed_domains",
+	} {
+		allowIdx := strings.Index(out, allow)
+		if allowIdx >= 0 && (portDenyIdx >= allowIdx || connectDenyIdx >= allowIdx) {
+			t.Errorf("port denies (positions %d/%d) must precede %q (pos %d):\n%s",
+				portDenyIdx, connectDenyIdx, allow, allowIdx, out)
+		}
+	}
+}
+
+func TestRenderSquid_ApprovedPrivateCachePrecedesPublicPortDenies(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+	policy.AllowedPrivateCIDRs = []*net.IPNet{mustParseCIDR("192.168.64.1/32")}
+
+	out := string(RenderSquid(r, policy))
+	privateAllowIdx := strings.Index(out, "http_access allow rs_allowed_private")
+	portDenyIdx := strings.Index(out, "http_access deny !Safe_ports")
+	connectDenyIdx := strings.Index(out, "http_access deny CONNECT !SSL_ports")
+	if privateAllowIdx < 0 || privateAllowIdx >= portDenyIdx || privateAllowIdx >= connectDenyIdx {
+		t.Fatalf("approved private /32 must bypass public port denies for cache port 3141; positions allow=%d deny=%d/%d:\n%s",
+			privateAllowIdx, portDenyIdx, connectDenyIdx, out)
+	}
+}
+
 // TestRenderSquid_PrivateIPDenyPrecedesAllow verifies that an explicit
 // "http_access deny rs_private_dst" line is emitted BEFORE the
 // "http_access allow allowed_domains" line. This gives defense-in-depth
@@ -460,6 +509,51 @@ func TestRenderSquid_GitHubCoreConstant_MatchesBaseConf(t *testing.T) {
 	const blobSuffix = ".blob.core.windows.net"
 	if !slices.Contains(GitHubCoreDomains, blobSuffix) {
 		t.Fatalf("GitHub Actions log/artifact host suffix %q missing from core baseline", blobSuffix)
+	}
+}
+
+func TestRenderSquid_BuiltInEgressBaseline_EmptyHTTPEgress(t *testing.T) {
+	r := &runneryml.Runner{}
+	policy := security.Defaults("strict")
+
+	out := string(RenderSquid(r, policy))
+	for _, domain := range BuiltInEgressDomains {
+		if !strings.Contains(out, "acl rs_builtin_egress dstdomain "+domain) {
+			t.Errorf("built-in egress domain %q missing from squid config:\n%s", domain, out)
+		}
+	}
+
+	allowIdx := strings.Index(out, "http_access allow rs_builtin_egress")
+	denyIdx := strings.Index(out, "http_access deny all")
+	if allowIdx < 0 || allowIdx >= denyIdx {
+		t.Fatalf("built-in egress allow (pos %d) must precede deny all (pos %d):\n%s",
+			allowIdx, denyIdx, out)
+	}
+}
+
+func TestRenderSquid_BuiltInEgressConstant_MatchesBaseConf(t *testing.T) {
+	baseConfPath := filepath.Join("..", "..", "..", "squid", "base.conf")
+	baseConf, err := os.ReadFile(baseConfPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", baseConfPath, err)
+	}
+
+	prefixes := []string{
+		"acl registries dstdomain ",
+		"acl ci_tools dstdomain ",
+	}
+	var baseDomains []string
+	for line := range strings.SplitSeq(string(baseConf), "\n") {
+		for _, prefix := range prefixes {
+			if domain, ok := strings.CutPrefix(line, prefix); ok {
+				baseDomains = append(baseDomains, domain)
+			}
+		}
+	}
+
+	if !slices.Equal(BuiltInEgressDomains, baseDomains) {
+		t.Fatalf("built-in egress baseline differs between Go renderer and base.conf:\nGo:   %v\nSquid: %v",
+			BuiltInEgressDomains, baseDomains)
 	}
 }
 

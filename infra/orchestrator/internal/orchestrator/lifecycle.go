@@ -20,6 +20,7 @@ const (
 	defaultJobCorrelationLookback  = 7 * 24 * time.Hour
 	defaultJobCorrelationMaxRuns   = 50
 	defaultJobCorrelationMaxCalls  = 64
+	defaultExactCandidateProbes    = 1
 )
 
 // DefaultLifecycleTiming is the production registration and assignment
@@ -42,6 +43,7 @@ type lifecycleResult struct {
 	exitCode      int
 	timedOut      bool
 	err           error
+	delivered     bool
 	unassigned    bool
 	failureReason string
 }
@@ -69,6 +71,7 @@ func (w *SpawnWorker) waitForLifecycle(
 
 	online := false
 	assigned := false
+	busyObserved := false
 	lastObservationErr := error(nil)
 	correlationSince := w.deps.Clock().Now().Add(-defaultJobCorrelationLookback)
 
@@ -77,6 +80,13 @@ func (w *SpawnWorker) waitForLifecycle(
 		w.recordRunnerOperation(intent.Repo, runnerOperationGetRunner, err)
 		if err != nil {
 			lastObservationErr = err
+			w.pauseForRateLimit(intent.Scope, err)
+			if busyObserved {
+				// Busy is durable delivery evidence. A later observation failure
+				// must degrade readiness and pause scheduling when rate-limited,
+				// but it must never tear down the active job.
+				return lifecycleResult{}
+			}
 			if errors.Is(err, github.ErrAuthFailed) {
 				return lifecycleFailure("github_runner_observation_failed", err)
 			}
@@ -98,18 +108,45 @@ func (w *SpawnWorker) waitForLifecycle(
 			}
 		}
 		if runner.Busy && !assigned {
-			assigned = true
-			if w.deps.State().MarkAssigned(intent.SpawnID, w.deps.Clock().Now()) {
-				_ = w.deps.Emit().EmitJobAssigned(cornerstone.JobAssignedFields{
-					Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-					ContainerName: containerName, GitHubRunnerID: runnerID,
-				})
+			busyObserved = true
+			// Busy alone proves that some job was assigned, but not which one.
+			// Resolve the exact Actions job before moving state from online to
+			// assigned so scheduler coverage can atomically exchange generic
+			// online capacity for a durable consumed-job tombstone.
+			// Once Busy proves delivery, the absolute assignment deadline no
+			// longer authorizes teardown. Give each instrumentation attempt a
+			// fresh, bounded window so a long-running job can recover exact job
+			// correlation after that original deadline has elapsed.
+			correlationDeadline := time.Now().Add(timing.AssignmentTimeout)
+			assignmentCtx, cancelAssignment := context.WithDeadline(observationCtx, correlationDeadline)
+			job, correlated, correlationErr := w.findAssignedJob(
+				assignmentCtx, intent, containerName, runnerID, correlationSince,
+			)
+			cancelAssignment()
+			if correlationErr != nil {
+				lastObservationErr = correlationErr
+				w.pauseForRateLimit(intent.Scope, correlationErr)
+				// Busy is direct evidence that GitHub delivered a job. Correlation
+				// is instrumentation, so an API/permission/bound failure must not
+				// tear down the active runner. Keep observing and expose the
+				// operation error through readiness until the same call recovers.
+				return lifecycleResult{}
+			}
+			lastObservationErr = nil
+			if correlated {
+				if markErr := w.markCorrelatedAssignment(intent, containerName, runnerID, job.ID); markErr != nil {
+					return lifecycleFailure("github_job_correlation_failed", markErr)
+				}
+				assigned = true
 			}
 		}
 		return lifecycleResult{}
 	}
 
 	observationDeadline := func() time.Time {
+		if busyObserved {
+			return time.Now().Add(timing.AssignmentTimeout)
+		}
 		if !online && onlineDeadlineAt.Before(assignmentDeadlineAt) {
 			return onlineDeadlineAt
 		}
@@ -147,10 +184,12 @@ func (w *SpawnWorker) waitForLifecycle(
 		stopTimer(onlineFinalTimer)
 		onlineFinalC = nil
 	}
-	if assigned {
+	if busyObserved {
 		stopTimer(assignmentTimer)
 		stopTimer(assignmentFinalTimer)
 		assignmentFinalC = nil
+	}
+	if assigned {
 		poll.Stop()
 		pollC = nil
 	}
@@ -170,7 +209,7 @@ func (w *SpawnWorker) waitForLifecycle(
 			// A short job can be assigned and finish between two lifecycle
 			// samples. Re-query GitHub after process exit before classifying the
 			// zero-exit container as unassigned.
-			if !assigned {
+			if !assigned && !busyObserved {
 				if failure := observeBeforeDeadline(); failure.err != nil {
 					return failure
 				}
@@ -178,24 +217,47 @@ func (w *SpawnWorker) waitForLifecycle(
 			if !online && !time.Now().Before(onlineDeadlineAt) {
 				return runnerDeadlineFailure(runnerID, "online", timing.OnlineTimeout, lastObservationErr)
 			}
-			if !assigned && !time.Now().Before(assignmentDeadlineAt) {
-				return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, lastObservationErr)
-			}
 			if !assigned {
-				correlationCtx, cancelCorrelation := context.WithDeadline(ctx, assignmentDeadlineAt)
-				correlated, err := w.correlateCompletedJob(
-					correlationCtx, intent, containerName, runnerID, correlationSince,
-				)
-				cancelCorrelation()
-				if err != nil {
-					if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-						return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, err)
-					}
-					return lifecycleFailure("github_job_correlation_failed", err)
+				correlationDeadline := assignmentDeadlineAt
+				if !online {
+					correlationDeadline = onlineDeadlineAt
 				}
-				assigned = correlated
+				if busyObserved {
+					// The runner can exit before the next live poll while Actions job
+					// metadata is still converging. Preserve enough fresh, bounded
+					// grace for at least two post-exit correlation attempts even when
+					// PollInterval exceeds the original assignment timeout.
+					correlationDeadline = time.Now().Add(postBusyCorrelationGrace(timing))
+				}
+				job, correlated, err := w.waitForAssignedJobEvidence(
+					ctx, intent, containerName, runnerID, correlationSince,
+					correlationDeadline, timing.PollInterval,
+				)
+				if err != nil {
+					lastObservationErr = err
+				}
+				if correlated {
+					if markErr := w.markCorrelatedAssignment(intent, containerName, runnerID, job.ID); markErr != nil {
+						return lifecycleFailure("github_job_correlation_failed", markErr)
+					}
+					assigned = true
+				}
+			}
+			if !online && !time.Now().Before(onlineDeadlineAt) {
+				return runnerDeadlineFailure(runnerID, "online", timing.OnlineTimeout, lastObservationErr)
 			}
 			if !assigned {
+				if busyObserved {
+					failure := fmt.Errorf("runner %d received a job but its exact GitHub job id could not be correlated", runnerID)
+					if lastObservationErr != nil {
+						failure = fmt.Errorf("%v: last correlation error: %w", failure, lastObservationErr)
+					}
+					out := lifecycleFailure("github_job_correlation_failed", failure)
+					out.exitCode = result.exitCode
+					out.timedOut = result.timedOut
+					out.delivered = true
+					return out
+				}
 				failure := fmt.Errorf("runner %d exited with code %d before GitHub reported a job assignment", runnerID, result.exitCode)
 				_ = w.deps.Emit().EmitRunnerExitedUnassigned(cornerstone.RunnerExitedUnassignedFields{
 					Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
@@ -232,7 +294,7 @@ func (w *SpawnWorker) waitForLifecycle(
 				return runnerDeadlineFailure(runnerID, "online", timing.OnlineTimeout, lastObservationErr)
 			}
 		case <-assignmentTimer.C:
-			if !assigned {
+			if !assigned && !busyObserved {
 				return runnerDeadlineFailure(runnerID, "assignment", timing.AssignmentTimeout, lastObservationErr)
 			}
 		}
@@ -244,14 +306,63 @@ func (w *SpawnWorker) waitForLifecycle(
 			stopTimer(onlineFinalTimer)
 			onlineFinalC = nil
 		}
-		if assigned {
+		if busyObserved {
 			stopTimer(assignmentTimer)
 			stopTimer(assignmentFinalTimer)
 			assignmentFinalC = nil
+		}
+		if assigned {
 			if pollC != nil {
 				poll.Stop()
 				pollC = nil
 			}
+		}
+	}
+}
+
+func (w *SpawnWorker) waitForAssignedJobEvidence(
+	ctx context.Context,
+	intent SpawnIntent,
+	containerName string,
+	runnerID int64,
+	since time.Time,
+	deadline time.Time,
+	retryInterval time.Duration,
+) (github.WorkflowJob, bool, error) {
+	var lastErr error
+	attempted := false
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return github.WorkflowJob{}, false, lastErr
+		}
+		minimumAttemptWindow := min(retryInterval, 50*time.Millisecond)
+		if attempted && remaining <= minimumAttemptWindow {
+			return github.WorkflowJob{}, false, lastErr
+		}
+		attemptCtx, cancelAttempt := context.WithDeadline(ctx, deadline)
+		job, found, err := w.findAssignedJob(
+			attemptCtx, intent, containerName, runnerID, since,
+		)
+		attempted = true
+		cancelAttempt()
+		if found {
+			return job, true, nil
+		}
+		if err != nil && !(errors.Is(err, context.DeadlineExceeded) && lastErr != nil) {
+			lastErr = err
+		}
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return github.WorkflowJob{}, false, lastErr
+		}
+		delay := min(retryInterval, remaining)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return github.WorkflowJob{}, false, ctx.Err()
+		case <-timer.C:
 		}
 	}
 }
@@ -262,6 +373,10 @@ func finalObservationLead(timeout time.Duration) time.Duration {
 		return time.Second
 	}
 	return lead
+}
+
+func postBusyCorrelationGrace(timing LifecycleTiming) time.Duration {
+	return max(timing.AssignmentTimeout, 3*timing.PollInterval)
 }
 
 func runnerDeadlineFailure(
@@ -277,27 +392,23 @@ func runnerDeadlineFailure(
 		reason = "runner_assignment_timeout"
 	}
 	if lastObservationErr != nil {
-		detail = fmt.Sprintf("%s: last observation: %v", detail, lastObservationErr)
+		return lifecycleFailure(
+			reason,
+			fmt.Errorf("%s: last observation: %w", detail, lastObservationErr),
+		)
 	}
 	return lifecycleFailure(reason, errors.New(detail))
 }
 
-func (w *SpawnWorker) correlateCompletedJob(
+func (w *SpawnWorker) findAssignedJob(
 	ctx context.Context,
 	intent SpawnIntent,
 	containerName string,
 	runnerID int64,
 	since time.Time,
-) (bool, error) {
+) (github.WorkflowJob, bool, error) {
 	candidateAPICalls := 0
-	for _, candidate := range intent.CandidateJobs {
-		if candidateAPICalls >= defaultJobCorrelationMaxCalls {
-			err := fmt.Errorf(
-				"%w: exact candidate API call limit reached",
-				github.ErrRecentJobSearchIndeterminate,
-			)
-			return false, err
-		}
+	for _, candidate := range intent.CandidateJobs[:min(len(intent.CandidateJobs), defaultExactCandidateProbes)] {
 		candidateAPICalls++
 		job, lim, err := w.deps.GitHub().GetWorkflowJob(ctx, intent.Repo, candidate.ID)
 		w.deps.RecordRateLimit(intent.Scope, lim)
@@ -306,54 +417,56 @@ func (w *SpawnWorker) correlateCompletedJob(
 			if github.ErrorStatus(err) == http.StatusNotFound {
 				continue
 			}
-			return false, err
+			return github.WorkflowJob{}, false, err
 		}
 		if !jobMatchesRunner(job, runnerID, containerName) {
 			continue
 		}
-		w.markCorrelatedAssignment(intent, containerName, runnerID)
-		return true, nil
+		if job.ID <= 0 {
+			return github.WorkflowJob{}, false, errors.New("github job correlation returned an invalid job id")
+		}
+		return job, true, nil
 	}
-	remainingAPICalls := defaultJobCorrelationMaxCalls - candidateAPICalls
-	if remainingAPICalls <= 0 {
-		err := fmt.Errorf(
-			"%w: exact candidate checks consumed the API call limit",
-			github.ErrRecentJobSearchIndeterminate,
-		)
-		return false, err
-	}
-
 	priorityRunIDs := make([]int64, 0, len(intent.CandidateJobs))
+	seenRunIDs := make(map[int64]bool, len(intent.CandidateJobs))
 	for _, candidate := range intent.CandidateJobs {
-		if candidate.RunID > 0 {
+		if candidate.RunID > 0 && !seenRunIDs[candidate.RunID] {
+			seenRunIDs[candidate.RunID] = true
 			priorityRunIDs = append(priorityRunIDs, candidate.RunID)
 		}
 	}
+	remainingAPICalls := defaultJobCorrelationMaxCalls - candidateAPICalls
 	result, err := w.deps.GitHub().FindRecentWorkflowJobByRunner(
 		ctx, intent.Repo, runnerID, containerName,
 		github.RecentJobSearchBounds{
 			Since: since, PriorityRunIDs: priorityRunIDs,
-			MaxRuns:     defaultJobCorrelationMaxRuns,
+			MaxRuns:     max(defaultJobCorrelationMaxRuns, len(priorityRunIDs)),
 			MaxAPICalls: remainingAPICalls,
 		},
 	)
 	w.deps.RecordRateLimit(intent.Scope, result.RateLimit)
 	w.recordRunnerOperation(intent.Repo, runnerOperationFindRecentJob, err)
 	if err != nil {
-		return false, err
+		return github.WorkflowJob{}, false, err
 	}
 	if !result.Found {
-		return false, nil
+		return github.WorkflowJob{}, false, nil
 	}
-	w.markCorrelatedAssignment(intent, containerName, runnerID)
-	return true, nil
+	if result.Job.ID <= 0 {
+		return github.WorkflowJob{}, false, errors.New("github recent job correlation returned an invalid job id")
+	}
+	return result.Job, true, nil
 }
 
 func (w *SpawnWorker) markCorrelatedAssignment(
 	intent SpawnIntent,
 	containerName string,
 	runnerID int64,
-) {
+	jobID int64,
+) error {
+	if jobID <= 0 {
+		return errors.New("cannot mark assignment without a positive GitHub job id")
+	}
 	now := w.deps.Clock().Now()
 	if w.deps.State().MarkOnline(intent.SpawnID, now) {
 		_ = w.deps.Emit().EmitRunnerOnline(cornerstone.RunnerOnlineFields{
@@ -361,12 +474,14 @@ func (w *SpawnWorker) markCorrelatedAssignment(
 			ContainerName: containerName, GitHubRunnerID: runnerID,
 		})
 	}
-	if w.deps.State().MarkAssigned(intent.SpawnID, now) {
+	if w.deps.State().MarkAssigned(intent.SpawnID, jobID, now) {
 		_ = w.deps.Emit().EmitJobAssigned(cornerstone.JobAssignedFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-			ContainerName: containerName, GitHubRunnerID: runnerID,
+			ContainerName: containerName, GitHubRunnerID: runnerID, GitHubJobID: jobID,
 		})
+		return nil
 	}
+	return fmt.Errorf("state rejected correlated job %d for spawn %s", jobID, intent.SpawnID)
 }
 
 func jobMatchesRunner(job github.WorkflowJob, runnerID int64, runnerName string) bool {

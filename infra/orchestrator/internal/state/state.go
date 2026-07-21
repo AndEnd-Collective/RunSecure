@@ -28,6 +28,7 @@ type SpawnState struct {
 	Phase             SpawnPhase `json:"phase"`
 	RunnerID          int64      `json:"runner_id,omitempty"`
 	RunnerName        string     `json:"runner_name,omitempty"`
+	AssignedJobID     int64      `json:"assigned_job_id,omitempty"`
 	ReservedAt        time.Time  `json:"reserved_at"`
 	OnlineAt          time.Time  `json:"online_at,omitempty"`
 	AssignedAt        time.Time  `json:"assigned_at,omitempty"`
@@ -39,6 +40,7 @@ type State struct {
 	mu           sync.RWMutex
 	perRepo      map[string]*RepoState
 	reservations map[string]*SpawnState
+	consumedJobs map[string]map[int64]struct{}
 	rlRemaining  int
 	rlLimit      int
 	rlReset      time.Time
@@ -85,7 +87,11 @@ type OperationError struct {
 }
 
 func New() *State {
-	return &State{perRepo: map[string]*RepoState{}, reservations: map[string]*SpawnState{}}
+	return &State{
+		perRepo:      map[string]*RepoState{},
+		reservations: map[string]*SpawnState{},
+		consumedJobs: map[string]map[int64]struct{}{},
+	}
 }
 
 // Configure records immutable runtime metadata and ensures every configured
@@ -125,16 +131,51 @@ func (s *State) InFlight(repo string) int {
 	return 0
 }
 
-// DemandCoverage reports capacity already promised to jobs that GitHub still
-// reports as queued. Pending and online-but-unassigned runners cover queued
-// demand; assigned runners do not, because their jobs have left the queue.
-func (s *State) DemandCoverage(repo string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if r, ok := s.perRepo[repo]; ok {
-		return r.Pending + r.Online
+// ReconcileDemand reports capacity already promised to the exact queued job
+// IDs in a successful GitHub refresh. Pending and online runners are generic
+// capacity and cover any queued job. Active assignments and consumed-job
+// tombstones cover a job only while GitHub still reports that same ID as
+// queued. Tombstones survive runner teardown and are cleared when a successful
+// refresh omits that ID because Actions job status cannot move back to queued.
+//
+// MarkAssigned and ReconcileDemand use the same lock. Therefore an online
+// runner can never disappear from coverage between the demand snapshot and
+// admission: it is observed either as generic online capacity or as the exact
+// consumed job ID, without a timing-based guess.
+func (s *State) ReconcileDemand(repo string, queuedJobIDs []int64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.perRepo[repo]
+	if !ok {
+		return 0
 	}
-	return 0
+	coverage := r.Pending + r.Online
+	queued := make(map[int64]struct{}, len(queuedJobIDs))
+	for _, jobID := range queuedJobIDs {
+		if jobID > 0 {
+			queued[jobID] = struct{}{}
+		}
+	}
+	coveredJobs := make(map[int64]struct{})
+	for _, spawn := range s.reservations {
+		if spawn.Repo != repo || spawn.Phase != PhaseAssigned || spawn.AssignedJobID <= 0 {
+			continue
+		}
+		if _, stillQueued := queued[spawn.AssignedJobID]; stillQueued {
+			coveredJobs[spawn.AssignedJobID] = struct{}{}
+		}
+	}
+	for jobID := range s.consumedJobs[repo] {
+		if _, stillQueued := queued[jobID]; stillQueued {
+			coveredJobs[jobID] = struct{}{}
+			continue
+		}
+		delete(s.consumedJobs[repo], jobID)
+	}
+	if len(s.consumedJobs[repo]) == 0 {
+		delete(s.consumedJobs, repo)
+	}
+	return coverage + len(coveredJobs)
 }
 
 func (s *State) GlobalInFlight() int {
@@ -208,11 +249,11 @@ func (s *State) MarkOnline(spawnID string, now time.Time) bool {
 	return true
 }
 
-func (s *State) MarkAssigned(spawnID string, now time.Time) bool {
+func (s *State) MarkAssigned(spawnID string, jobID int64, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spawn, ok := s.reservations[spawnID]
-	if !ok || (spawn.Phase != PhasePending && spawn.Phase != PhaseOnline) {
+	if !ok || jobID <= 0 || (spawn.Phase != PhasePending && spawn.Phase != PhaseOnline) {
 		return false
 	}
 	r := s.ensure(spawn.Repo)
@@ -224,6 +265,7 @@ func (s *State) MarkAssigned(spawnID string, now time.Time) bool {
 	}
 	r.Assigned++
 	spawn.Phase = PhaseAssigned
+	spawn.AssignedJobID = jobID
 	spawn.AssignedAt = now
 	s.assignmentsTotal++
 	return true
@@ -316,6 +358,12 @@ func (s *State) ReleaseReservation(spawnID string) {
 func (s *State) releaseReservationLocked(spawnID string) {
 	spawn := s.reservations[spawnID]
 	r := s.ensure(spawn.Repo)
+	if spawn.AssignedJobID > 0 {
+		if s.consumedJobs[spawn.Repo] == nil {
+			s.consumedJobs[spawn.Repo] = map[int64]struct{}{}
+		}
+		s.consumedJobs[spawn.Repo][spawn.AssignedJobID] = struct{}{}
+	}
 	if r.InFlight > 0 {
 		r.InFlight--
 	}

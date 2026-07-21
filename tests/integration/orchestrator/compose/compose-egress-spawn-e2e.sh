@@ -247,6 +247,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Step 10: non-standard CONNECT port on an allowed domain must be blocked.
+# This exercises the actual Go-rendered squid.conf mounted into the spawned
+# proxy, rather than the hand-written integration fixture used by attacker.sh.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Step 10: non-standard CONNECT port must be blocked ==="
+
+NONSTANDARD_RESPONSE=$(docker exec "${SPAWNED_RUNNER}" \
+  sh -c "printf 'CONNECT api.github.com:8443 HTTP/1.1\r\nHost: api.github.com:8443\r\n\r\n' | nc -w 5 proxy 3128" \
+  2>&1 || true)
+if echo "${NONSTANDARD_RESPONSE}" | grep -Eq '^HTTP/1\.[01] 403'; then
+  ok "api.github.com:8443 returned Squid 403 (443-only CONNECT enforced)"
+else
+  fail "api.github.com:8443 did not return Squid 403 (response: $(echo "${NONSTANDARD_RESPONSE}" | head -1))"
+fi
+
+NONSTANDARD_HTTP_RESPONSE=$(docker exec "${SPAWNED_RUNNER}" \
+  sh -c "printf 'GET http://api.github.com:8443/ HTTP/1.1\r\nHost: api.github.com:8443\r\nConnection: close\r\n\r\n' | nc -w 5 proxy 3128" \
+  2>&1 || true)
+if echo "${NONSTANDARD_HTTP_RESPONSE}" | grep -Eq '^HTTP/1\.[01] 403'; then
+  ok "plain HTTP api.github.com:8443 returned Squid 403 (Safe_ports enforced)"
+else
+  fail "plain HTTP api.github.com:8443 did not return Squid 403 (response: $(echo "${NONSTANDARD_HTTP_RESPONSE}" | head -1))"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

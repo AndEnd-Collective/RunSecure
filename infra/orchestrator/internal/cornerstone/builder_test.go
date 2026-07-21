@@ -126,7 +126,8 @@ func TestBuilder_RunnerLifecycleEventsCarryRunnerIdentity(t *testing.T) {
 		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
 	}))
 	require.NoError(t, em.EmitJobAssigned(JobAssignedFields{
-		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
+		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n",
+		GitHubRunnerID: 42, GitHubJobID: 9001,
 	}))
 	require.NoError(t, em.EmitRunnerCompleted(RunnerCompletedFields{
 		Scope: "s", Repo: "o/r", SpawnID: "i", ContainerName: "n", GitHubRunnerID: 42,
@@ -144,6 +145,7 @@ func TestBuilder_RunnerLifecycleEventsCarryRunnerIdentity(t *testing.T) {
 	}
 	require.Contains(t, out, `"audit.resource.id":"42"`)
 	require.Contains(t, out, `"github_runner_id":42`)
+	require.Contains(t, out, `"github_job_id":9001`)
 	require.Contains(t, out, `"failure.reason":"runner_exited_unassigned"`)
 }
 

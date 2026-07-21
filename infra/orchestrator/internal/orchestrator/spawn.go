@@ -261,7 +261,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	exitCode, timedOut := lifecycle.exitCode, lifecycle.timedOut
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	runnerContainerID := h.Refs["runner"]
-	if lifecycle.err == nil && !timedOut {
+	if (lifecycle.err == nil || lifecycle.delivered) && !timedOut {
 		// Runner delivery completed when the assigned runner process exited.
 		// Record that fact before backend/GitHub cleanup so teardown latency or
 		// failure cannot rewrite the job-delivery outcome or its duration.

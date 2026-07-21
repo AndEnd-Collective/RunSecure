@@ -150,8 +150,8 @@ func TestReservationLifecycleAndSnapshot(t *testing.T) {
 	s.RecordJIT("spawn-1", 42, "rs-spawn-1-runner")
 	require.True(t, s.MarkOnline("spawn-1", now.Add(time.Second)))
 	require.False(t, s.MarkOnline("spawn-1", now.Add(2*time.Second)))
-	require.True(t, s.MarkAssigned("spawn-1", now.Add(3*time.Second)))
-	require.False(t, s.MarkAssigned("spawn-1", now.Add(4*time.Second)))
+	require.True(t, s.MarkAssigned("spawn-1", 9001, now.Add(3*time.Second)))
+	require.False(t, s.MarkAssigned("spawn-1", 9001, now.Add(4*time.Second)))
 	s.RecordCompleted()
 	s.RecordDeregistered()
 
@@ -169,8 +169,9 @@ func TestReservationLifecycleAndSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), snap.CompletedTotal)
 	require.Equal(t, int64(1), snap.DeregistrationsTotal)
 	require.Equal(t, int64(42), snap.Reservations["spawn-1"].RunnerID)
-	require.Zero(t, s.DemandCoverage("o/r"),
-		"assigned runners no longer cover jobs in GitHub's queued set")
+	require.Equal(t, int64(9001), snap.Reservations["spawn-1"].AssignedJobID)
+	require.Zero(t, s.ReconcileDemand("o/r", nil),
+		"a fresh snapshot without the assigned job clears its consumed tombstone")
 
 	s.ReleaseReservation("spawn-1")
 	s.ReleaseReservation("spawn-1")
@@ -178,16 +179,48 @@ func TestReservationLifecycleAndSnapshot(t *testing.T) {
 	require.Empty(t, s.Snapshot().Reservations)
 }
 
-func TestDemandCoverageCountsOnlyUnassignedDeliveredCapacity(t *testing.T) {
+func TestReconcileDemandCountsGenericCapacityAndExactConsumedJobs(t *testing.T) {
 	s := New()
 	now := time.Now()
-	require.Zero(t, s.DemandCoverage("unknown/repo"))
+	require.Zero(t, s.ReconcileDemand("unknown/repo", []int64{1}))
 	require.True(t, s.TryReserve("pending", "o/r", 3, 3, now))
 	require.True(t, s.TryReserve("online", "o/r", 3, 3, now))
 	require.True(t, s.MarkOnline("online", now))
 	require.True(t, s.TryReserve("assigned", "o/r", 3, 3, now))
-	require.True(t, s.MarkAssigned("assigned", now))
-	require.Equal(t, 2, s.DemandCoverage("o/r"))
+	require.True(t, s.MarkAssigned("assigned", 11, now))
+	require.Equal(t, 3, s.ReconcileDemand("o/r", []int64{11, 12, 13}))
+}
+
+func TestReconcileDemandRetainsConsumedJobAcrossCompletionUntilFreshOmission(t *testing.T) {
+	s := New()
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	require.True(t, s.TryReserve("completed", "o/r", 3, 3, now))
+	require.True(t, s.MarkAssigned("completed", 101, now.Add(time.Second)))
+	s.ReleaseReservation("completed")
+
+	require.Equal(t, 1, s.ReconcileDemand("o/r", []int64{101, 202}),
+		"a stale queued response for the exact consumed job remains covered after teardown")
+	require.Equal(t, 1, s.ReconcileDemand("o/r", []int64{101, 303}),
+		"the tombstone must survive repeated stale successful refreshes")
+	require.Zero(t, s.ReconcileDemand("o/r", []int64{202}),
+		"a successful fresh response clears the absent consumed job")
+	require.Zero(t, s.ReconcileDemand("o/r", []int64{101}),
+		"a cleared tombstone cannot reappear without a new assignment")
+}
+
+func TestReconcileDemandCannotClearActiveAssignmentProtection(t *testing.T) {
+	s := New()
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	require.True(t, s.TryReserve("active", "o/r", 3, 3, now))
+	require.True(t, s.MarkAssigned("active", 101, now.Add(time.Second)))
+
+	require.Zero(t, s.ReconcileDemand("o/r", nil),
+		"a fresh response may omit the active job once it is in progress")
+	require.Equal(t, 1, s.ReconcileDemand("o/r", []int64{101}),
+		"active assignment identity remains protected from a later stale response")
+	s.ReleaseReservation("active")
+	require.Equal(t, 1, s.ReconcileDemand("o/r", []int64{101}),
+		"release atomically transfers the active identity to a tombstone")
 }
 
 func TestReservationCapsAndDirectAssignment(t *testing.T) {
@@ -198,8 +231,9 @@ func TestReservationCapsAndDirectAssignment(t *testing.T) {
 	require.False(t, s.TryReserve("b", "o/a", 1, 2, now))
 	require.True(t, s.TryReserve("c", "o/b", 2, 2, now))
 	require.False(t, s.TryReserve("d", "o/c", 2, 2, now))
-	require.True(t, s.MarkAssigned("a", now), "busy may be observed before a separate online poll")
-	require.False(t, s.MarkAssigned("missing", now))
+	require.True(t, s.MarkAssigned("a", 101, now), "assignment may be observed before a separate online poll")
+	require.False(t, s.MarkAssigned("missing", 102, now))
+	require.False(t, s.MarkAssigned("c", 0, now), "assignment requires an exact GitHub job ID")
 	require.False(t, s.MarkOnline("missing", now))
 	require.Equal(t, 1, s.Snapshot().PerRepo["o/a"].Assigned)
 	s.ReleaseReservation("a")
@@ -220,7 +254,7 @@ func TestTeardownBlockedRetainsCapacityUntilExactResolution(t *testing.T) {
 				require.True(t, s.MarkOnline("spawn-1", now.Add(time.Second)))
 			}
 			if phase == PhaseAssigned {
-				require.True(t, s.MarkAssigned("spawn-1", now.Add(2*time.Second)))
+				require.True(t, s.MarkAssigned("spawn-1", 9001, now.Add(2*time.Second)))
 			}
 
 			require.True(t, s.MarkTeardownBlocked(

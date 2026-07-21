@@ -661,8 +661,8 @@ func (p *productionDeps) TryReserve(spawnID, repo string, repoCap, globalCap int
 	return p.st.TryReserve(spawnID, repo, repoCap, globalCap, p.clk.Now())
 }
 
-func (p *productionDeps) DemandCoverage(repo string) int {
-	return p.st.DemandCoverage(repo)
+func (p *productionDeps) ReconcileDemand(repo string, queuedJobIDs []int64) int {
+	return p.st.ReconcileDemand(repo, queuedJobIDs)
 }
 
 func (p *productionDeps) ReleaseReservation(spawnID string) {

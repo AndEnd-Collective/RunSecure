@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -29,6 +28,7 @@ func TestLifecycleStopsRunnerPollingAfterAssignment(t *testing.T) {
 
 	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "assigned-no-more-polls",
+		CandidateJobs: assignedCandidate(),
 	}))
 
 	fake.mu.Lock()
@@ -65,6 +65,38 @@ func TestLifecycleFastCompletedJobUsesPostExitJobCorrelation(t *testing.T) {
 	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 	require.Equal(t, int64(1), d.st.Snapshot().AssignmentsTotal)
+}
+
+func TestLifecycleFastCompletedJobWaitsForLaggingJobEvidence(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerErrCode = http.StatusNotFound
+	fake.jobStatus = "queued"
+	fake.jobRunnerID = 0
+	fake.jobRunnerName = ""
+	fake.jobChangeAfter = 2
+	fake.jobStatusAfter = "completed"
+	fake.jobRunnerIDAfter = fake.jitOnRunnerID
+	fake.jobRunnerNameAfter = "runner"
+	fake.mu.Unlock()
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 50 * time.Millisecond, AssignmentTimeout: 100 * time.Millisecond,
+		PollInterval: 5 * time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "lagging-fast-complete",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.GreaterOrEqual(t, fake.jobGetCalled, 2)
+	fake.mu.Unlock()
+	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 }
 
 func TestLifecycleFastLaterDependentJobUsesCandidateRunCorrelation(t *testing.T) {
@@ -115,32 +147,41 @@ func TestLifecycleRecentJobSearchBoundIsFailureNotUnassigned(t *testing.T) {
 	})
 
 	require.ErrorIs(t, err, github.ErrRecentJobSearchIndeterminate)
-	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_job_correlation_failed"`)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_online_timeout"`)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 	require.Zero(t, d.st.Snapshot().UnassignedExitsTotal)
 }
 
-func TestCorrelateCompletedJob_BoundsExactCandidateAPICalls(t *testing.T) {
-	for _, count := range []int{defaultJobCorrelationMaxCalls, defaultJobCorrelationMaxCalls + 1} {
-		t.Run(fmt.Sprintf("candidates_%d", count), func(t *testing.T) {
-			d := newSpawnDeps(t)
-			gh, _ := newFakeGitHubClient(t)
-			d.gh = gh
-			candidates := make([]github.WorkflowJob, count)
-			for i := range candidates {
-				candidates[i] = github.WorkflowJob{ID: int64(i + 1)}
-			}
-
-			matched, err := NewSpawnWorker(d).correlateCompletedJob(
-				context.Background(), SpawnIntent{
-					Scope: "s", Repo: "o/r", CandidateJobs: candidates,
-				}, "runner", 42, d.clk.Now().Add(-time.Hour),
-			)
-
-			require.False(t, matched)
-			require.ErrorIs(t, err, github.ErrRecentJobSearchIndeterminate)
-		})
+func TestFindAssignedJob_BatchesLargeBacklogByWorkflowRun(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobRunnerID = 99
+	fake.jobRunnerName = "different-runner"
+	fake.recentRunID = 6001
+	fake.recentJobRunnerID = fake.jitOnRunnerID
+	fake.recentJobName = "runner"
+	fake.recentJobStatus = "in_progress"
+	fake.mu.Unlock()
+	candidates := make([]github.WorkflowJob, defaultJobCorrelationMaxCalls+1)
+	for i := range candidates {
+		candidates[i] = github.WorkflowJob{ID: int64(i + 1), RunID: 6001}
 	}
+
+	job, matched, err := NewSpawnWorker(d).findAssignedJob(
+		context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", CandidateJobs: candidates,
+		}, "runner", fake.jitOnRunnerID, d.clk.Now().Add(-time.Hour),
+	)
+
+	require.NoError(t, err)
+	require.True(t, matched)
+	require.Equal(t, fake.recentJobID, job.ID)
+	fake.mu.Lock()
+	require.Equal(t, 1, fake.jobGetCalled,
+		"only the rotated primary candidate should use the per-job endpoint")
+	fake.mu.Unlock()
 }
 
 func TestLifecycleRecentJobSearchRateLimitPreservesReadinessState(t *testing.T) {
@@ -159,7 +200,7 @@ func TestLifecycleRecentJobSearchRateLimitPreservesReadinessState(t *testing.T) 
 	})
 
 	require.ErrorIs(t, err, github.ErrRateLimited)
-	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_job_correlation_failed"`)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_online_timeout"`)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 	require.True(t, d.ratePaused.Load())
 	d.rlMu.Lock()
@@ -185,6 +226,7 @@ func TestLifecycleFastAssignmentUsesFinalRunnerObservation(t *testing.T) {
 
 	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "fast-final-observation",
+		CandidateJobs: assignedCandidate(),
 	})
 
 	require.NoError(t, err)
@@ -215,6 +257,7 @@ func TestLifecycleDeadlineMakesFinalRunnerObservation(t *testing.T) {
 
 	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "deadline-final-observation",
+		CandidateJobs: assignedCandidate(),
 	})
 
 	require.NoError(t, err)
@@ -223,6 +266,323 @@ func TestLifecycleDeadlineMakesFinalRunnerObservation(t *testing.T) {
 	fake.mu.Unlock()
 	require.Equal(t, 2, getCalls)
 	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned)
+}
+
+func TestLifecycleBusyCorrelationUsesAssignmentDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.runnerStatus = "offline"
+	fake.runnerBusy = false
+	fake.runnerChangeAfter = 2
+	fake.runnerStatusAfter = "online"
+	fake.runnerBusyAfter = true
+	fake.jobResponseDelay = 10 * time.Millisecond
+	fake.mu.Unlock()
+	d.be.waitDelay = 20 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 50 * time.Millisecond,
+		PollInterval: 100 * time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "assignment-deadline-context",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned)
+}
+
+func TestLifecycleRetriesTransientBusyCorrelationFailure(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobErrCode = http.StatusInternalServerError
+	fake.jobErrUntil = 1
+	fake.mu.Unlock()
+	d.be.waitDelay = 20 * time.Millisecond
+	d.lifecycle.PollInterval = time.Millisecond
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "transient-correlation",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.GreaterOrEqual(t, fake.jobGetCalled, 2)
+	fake.mu.Unlock()
+	require.NotContains(t,
+		d.st.Snapshot().PerRepo["o/r"].RunnerOperationError, runnerOperationGetJob)
+	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleBusyCorrelationAuthFailureDoesNotInterruptJob(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobErrCode = http.StatusForbidden
+	fake.mu.Unlock()
+	d.be.waitDelay = 30 * time.Millisecond
+	d.lifecycle.AssignmentTimeout = 20 * time.Millisecond
+	started := time.Now()
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "busy-correlation-auth",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.ErrorIs(t, err, github.ErrAuthFailed)
+	require.GreaterOrEqual(t, time.Since(started), d.be.waitDelay,
+		"a known-busy runner must be allowed to exit before correlation failure returns")
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_job_correlation_failed"`)
+	d.requireEmitted(t, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleBusyRunnerObservationAuthFailureDoesNotInterruptJob(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobStatus = "queued"
+	fake.jobRunnerID = 0
+	fake.jobRunnerName = ""
+	fake.jobChangeAfter = 2
+	fake.jobStatusAfter = "completed"
+	fake.jobRunnerIDAfter = fake.jitOnRunnerID
+	fake.jobRunnerNameAfter = "runner"
+	fake.runnerErrCode = http.StatusForbidden
+	fake.runnerErrAfter = 2
+	fake.runnerErrUntil = 2
+	fake.mu.Unlock()
+	d.be.waitDelay = 30 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 100 * time.Millisecond, AssignmentTimeout: 100 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "busy-runner-auth",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.GreaterOrEqual(t, fake.runnerGetCalled, 3)
+	fake.mu.Unlock()
+	require.NotContains(t,
+		d.st.Snapshot().PerRepo["o/r"].RunnerOperationError, runnerOperationGetRunner)
+	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleBusyRunnerRateLimitPausesWithoutInterruptingJob(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobStatus = "queued"
+	fake.jobRunnerID = 0
+	fake.jobRunnerName = ""
+	fake.jobChangeAfter = 2
+	fake.jobStatusAfter = "completed"
+	fake.jobRunnerIDAfter = fake.jitOnRunnerID
+	fake.jobRunnerNameAfter = "runner"
+	fake.runnerErrCode = http.StatusTooManyRequests
+	fake.runnerErrAfter = 2
+	fake.runnerErrUntil = 2
+	fake.mu.Unlock()
+	d.be.waitDelay = 30 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 100 * time.Millisecond, AssignmentTimeout: 100 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "busy-runner-rate-limit",
+			CandidateJobs: assignedCandidate(),
+		})
+	}()
+	require.Eventually(t, d.ratePaused.Load, 20*time.Millisecond, time.Millisecond,
+		"rate-limit pause must be visible while the assigned runner is still active")
+
+	require.NoError(t, <-errCh)
+	d.requireEmitted(t, cornerstone.EventRatelimitPaused, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleBusyCorrelationRecoversAfterOriginalAssignmentDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobErrCode = http.StatusInternalServerError
+	fake.jobErrUntil = 1
+	fake.mu.Unlock()
+	d.be.waitDelay = 30 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 50 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "busy-correlation-after-deadline",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.GreaterOrEqual(t, fake.runnerGetCalled, 2,
+		"a known-busy runner must remain observable after the original assignment deadline")
+	fake.mu.Unlock()
+	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleBusyFastExitRetriesCorrelationAfterAssignmentDeadline(t *testing.T) {
+	d := newSpawnDeps(t)
+	gh, fake := newFakeGitHubClient(t)
+	d.gh = gh
+	fake.mu.Lock()
+	fake.jobStatus = "queued"
+	fake.jobRunnerID = 0
+	fake.jobRunnerName = ""
+	fake.jobChangeAfter = 3
+	fake.jobStatusAfter = "completed"
+	fake.jobRunnerIDAfter = fake.jitOnRunnerID
+	fake.jobRunnerNameAfter = "runner"
+	fake.mu.Unlock()
+	d.be.waitDelay = 7 * time.Millisecond
+	d.lifecycle = LifecycleTiming{
+		OnlineTimeout: 50 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+	}
+
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
+		Scope: "s", Repo: "o/r", SpawnID: "busy-fast-exit-correlation-lag",
+		CandidateJobs: assignedCandidate(),
+	})
+
+	require.NoError(t, err)
+	fake.mu.Lock()
+	require.GreaterOrEqual(t, fake.jobGetCalled, 3,
+		"post-exit correlation must retry eventual-consistency lag")
+	fake.mu.Unlock()
+	d.requireEmitted(t, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
+}
+
+func TestLifecycleCorrelatedAssignmentRequiresReservation(t *testing.T) {
+	t.Run("busy observation", func(t *testing.T) {
+		d := newSpawnDeps(t)
+		gh, fake := newFakeGitHubClient(t)
+		d.gh = gh
+
+		result := NewSpawnWorker(d).waitForLifecycle(
+			context.Background(), SpawnIntent{
+				Scope: "s", Repo: "o/r", SpawnID: "missing-busy-reservation",
+				CandidateJobs: assignedCandidate(),
+			}, "runner", fake.jitOnRunnerID,
+			backend.Handle{SpawnID: "missing-busy-reservation", Backend: "fake"}, time.Minute,
+		)
+
+		require.ErrorContains(t, result.err, "state rejected correlated job")
+		require.Equal(t, "github_job_correlation_failed", result.failureReason)
+	})
+
+	t.Run("post-exit correlation", func(t *testing.T) {
+		d := newSpawnDeps(t)
+		gh, fake := newFakeGitHubClient(t)
+		d.gh = gh
+		fake.mu.Lock()
+		fake.runnerErrCode = http.StatusNotFound
+		fake.jobStatus = "completed"
+		fake.mu.Unlock()
+
+		result := NewSpawnWorker(d).waitForLifecycle(
+			context.Background(), SpawnIntent{
+				Scope: "s", Repo: "o/r", SpawnID: "missing-exit-reservation",
+				CandidateJobs: assignedCandidate(),
+			}, "runner", fake.jitOnRunnerID,
+			backend.Handle{SpawnID: "missing-exit-reservation", Backend: "fake"}, time.Minute,
+		)
+
+		require.ErrorContains(t, result.err, "state rejected correlated job")
+		require.Equal(t, "github_job_correlation_failed", result.failureReason)
+	})
+}
+
+func TestFindAssignedJobRejectsInvalidJobIDs(t *testing.T) {
+	t.Run("exact candidate", func(t *testing.T) {
+		d := newSpawnDeps(t)
+		gh, _ := newFakeGitHubClient(t)
+		d.gh = gh
+
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
+			context.Background(), SpawnIntent{
+				Scope: "s", Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 0}},
+			}, "runner", 100, d.clk.Now().Add(-time.Hour),
+		)
+
+		require.False(t, matched)
+		require.ErrorContains(t, err, "invalid job id")
+	})
+
+	t.Run("recent search", func(t *testing.T) {
+		d := newSpawnDeps(t)
+		gh, fake := newFakeGitHubClient(t)
+		d.gh = gh
+		fake.mu.Lock()
+		fake.recentRunID = 7001
+		fake.recentRunCount = 1
+		fake.recentJobID = 0
+		fake.recentJobRunnerID = fake.jitOnRunnerID
+		fake.recentJobName = "runner"
+		fake.recentJobStatus = "in_progress"
+		fake.mu.Unlock()
+
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
+			context.Background(), SpawnIntent{Scope: "s", Repo: "o/r"},
+			"runner", fake.jitOnRunnerID, d.clk.Now().Add(-time.Hour),
+		)
+
+		require.False(t, matched)
+		require.ErrorContains(t, err, "invalid job id")
+	})
+}
+
+func TestFinalObservationLeadCapsAtOneSecond(t *testing.T) {
+	require.Equal(t, time.Second, finalObservationLead(10*time.Second))
+}
+
+func TestPostBusyCorrelationGraceAllowsTwoPolls(t *testing.T) {
+	timing := LifecycleTiming{AssignmentTimeout: 5 * time.Millisecond, PollInterval: 10 * time.Millisecond}
+	require.Equal(t, 30*time.Millisecond, postBusyCorrelationGrace(timing))
+}
+
+func TestMarkCorrelatedAssignmentRejectsInvalidJobID(t *testing.T) {
+	d := newSpawnDeps(t)
+	err := NewSpawnWorker(d).markCorrelatedAssignment(
+		SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "invalid-job"},
+		"runner", 42, 0,
+	)
+	require.ErrorContains(t, err, "positive GitHub job id")
+}
+
+func TestWaitForAssignedJobEvidenceHonorsCancellation(t *testing.T) {
+	d := newSpawnDeps(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, found, err := NewSpawnWorker(d).waitForAssignedJobEvidence(
+		ctx, SpawnIntent{Scope: "s", Repo: "o/r"}, "runner", 42,
+		d.clk.Now().Add(-time.Hour), time.Now().Add(time.Second), time.Second,
+	)
+
+	require.False(t, found)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestLifecycleOnlineDeadlineFinalObservationAuthFailure(t *testing.T) {
@@ -348,7 +708,7 @@ func TestLifecyclePostExitJobCorrelationAuthFailureStopsClassification(t *testin
 	})
 
 	require.ErrorIs(t, err, github.ErrAuthFailed)
-	require.Contains(t, d.emBuf.String(), `"failure.reason":"github_job_correlation_failed"`)
+	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_online_timeout"`)
 	require.NotContains(t, d.emBuf.String(), cornerstone.EventRunnerExitedUnassigned)
 }
 
@@ -360,7 +720,7 @@ func TestCorrelateCompletedJob_FailsClosedAndAcceptsExactRunnerName(t *testing.T
 		fake.mu.Lock()
 		fake.jobErrCode = http.StatusNotFound
 		fake.mu.Unlock()
-		matched, err := NewSpawnWorker(d).correlateCompletedJob(
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
 			context.Background(), SpawnIntent{
 				Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 1}},
 			}, "runner", 42, d.clk.Now().Add(-time.Hour),
@@ -376,7 +736,7 @@ func TestCorrelateCompletedJob_FailsClosedAndAcceptsExactRunnerName(t *testing.T
 		fake.mu.Lock()
 		fake.jobErrCode = http.StatusForbidden
 		fake.mu.Unlock()
-		matched, err := NewSpawnWorker(d).correlateCompletedJob(
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
 			context.Background(), SpawnIntent{
 				Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 1}},
 			}, "runner", 42, d.clk.Now().Add(-time.Hour),
@@ -395,7 +755,7 @@ func TestCorrelateCompletedJob_FailsClosedAndAcceptsExactRunnerName(t *testing.T
 		fake.jobRunnerID = 99
 		fake.jobRunnerName = "different"
 		fake.mu.Unlock()
-		matched, err := NewSpawnWorker(d).correlateCompletedJob(
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
 			context.Background(), SpawnIntent{
 				Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 1}},
 			}, "runner", 42, d.clk.Now().Add(-time.Hour),
@@ -413,7 +773,7 @@ func TestCorrelateCompletedJob_FailsClosedAndAcceptsExactRunnerName(t *testing.T
 		fake.jobRunnerName = "runner"
 		fake.jobStatus = "completed"
 		fake.mu.Unlock()
-		matched, err := NewSpawnWorker(d).correlateCompletedJob(
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
 			context.Background(), SpawnIntent{
 				Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 1}},
 			}, "runner", 42, d.clk.Now().Add(-time.Hour),
@@ -430,7 +790,7 @@ func TestCorrelateCompletedJob_FailsClosedAndAcceptsExactRunnerName(t *testing.T
 		fake.jobRunnerID = 42
 		fake.jobStatus = "queued"
 		fake.mu.Unlock()
-		matched, err := NewSpawnWorker(d).correlateCompletedJob(
+		_, matched, err := NewSpawnWorker(d).findAssignedJob(
 			context.Background(), SpawnIntent{
 				Repo: "o/r", CandidateJobs: []github.WorkflowJob{{ID: 1}},
 			}, "runner", 42, d.clk.Now().Add(-time.Hour),

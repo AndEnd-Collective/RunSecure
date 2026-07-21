@@ -31,6 +31,7 @@ import (
 type fakeGitHubBackend struct {
 	mu                 sync.Mutex
 	queuedFor          map[string]int
+	queuedJobIDs       map[string][]int64
 	inProgressFor      map[string]int
 	queueErrCode       map[string]int // map repo → HTTP status to return
 	jitOnRunnerID      int64
@@ -52,6 +53,7 @@ type fakeGitHubBackend struct {
 	runnerErrCode      int
 	runnerGetCalled    int
 	runnerErrAfter     int
+	runnerErrUntil     int
 	runnerBlock        bool
 	runnerStatusAfter  string
 	runnerBusyAfter    bool
@@ -61,25 +63,43 @@ type fakeGitHubBackend struct {
 	jobStatus          string
 	jobConclusion      string
 	jobErrCode         int
+	jobErrUntil        int
+	jobGetCalled       int
+	jobResponseDelay   time.Duration
+	jobChangeAfter     int
+	jobStatusAfter     string
+	jobRunnerIDAfter   int64
+	jobRunnerNameAfter string
 	recentRunID        int64
 	recentRunCount     int
+	recentJobID        int64
 	recentJobRunnerID  int64
 	recentJobName      string
 	recentJobStatus    string
+	beforeJobsResponse func()
 }
 
 func newFakeGH() *fakeGitHubBackend {
 	return &fakeGitHubBackend{
 		queuedFor:      map[string]int{},
+		queuedJobIDs:   map[string][]int64{},
 		inProgressFor:  map[string]int{},
 		queueErrCode:   map[string]int{},
 		deletedRunners: map[int64]bool{},
 		jitOnRunnerID:  100,
+		jobRunnerID:    100,
+		jobRunnerName:  "runner",
+		jobStatus:      "in_progress",
 		rlLimit:        5000,
 		rlRemaining:    4999,
 		runnerStatus:   "online",
 		runnerBusy:     true,
+		recentJobID:    99001,
 	}
+}
+
+func assignedCandidate() []github.WorkflowJob {
+	return []github.WorkflowJob{{ID: 9001, RunID: 7001}}
 }
 
 func (g *fakeGitHubBackend) handler() http.HandlerFunc {
@@ -109,24 +129,36 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				w.WriteHeader(code)
 				return
 			}
+			if g.beforeJobsResponse != nil {
+				g.beforeJobsResponse()
+				g.beforeJobsResponse = nil
+			}
 			runID := parts[len(parts)-2]
 			if g.recentRunID > 0 && runID == fmt.Sprint(g.recentRunID) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{{
-					"id": 99001, "name": "later-dependent", "status": g.recentJobStatus,
+					"id": g.recentJobID, "name": "later-dependent", "status": g.recentJobStatus,
 					"runner_id": g.recentJobRunnerID, "runner_name": g.recentJobName,
 				}}})
 				return
 			}
 			count := g.queuedFor[repo]
+			explicitIDs, hasExplicitIDs := g.queuedJobIDs[repo]
+			if hasExplicitIDs {
+				count = len(explicitIDs)
+			}
 			if runID == "2" {
 				count = g.inProgressFor[repo]
+				hasExplicitIDs = false
 			}
 			if r.URL.Query().Get("page") != "1" {
 				count = 0
 			}
 			jobs := make([]map[string]any, 0, count)
 			for i := 0; i < count; i++ {
-				id := i + 1
+				id := int64(i + 1)
+				if hasExplicitIDs {
+					id = explicitIDs[i]
+				}
 				if runID == "2" {
 					id += 100000
 				}
@@ -155,6 +187,9 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				return
 			}
 			count := g.queuedFor[repo]
+			if explicitIDs, ok := g.queuedJobIDs[repo]; ok {
+				count = len(explicitIDs)
+			}
 			runID := 1
 			if r.URL.Query().Get("status") == "in_progress" {
 				count = g.inProgressFor[repo]
@@ -228,16 +263,35 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 		}
 		// GET /repos/o/r/actions/jobs/<id>
 		if strings.Contains(r.URL.Path, "/actions/jobs/") && r.Method == http.MethodGet {
-			if g.jobErrCode != 0 {
+			g.jobGetCalled++
+			if g.jobResponseDelay > 0 {
+				delay := g.jobResponseDelay
+				g.mu.Unlock()
+				select {
+				case <-time.After(delay):
+				case <-r.Context().Done():
+				}
+				g.mu.Lock()
+				if r.Context().Err() != nil {
+					return
+				}
+			}
+			if g.jobErrCode != 0 && (g.jobErrUntil == 0 || g.jobGetCalled <= g.jobErrUntil) {
 				w.WriteHeader(g.jobErrCode)
 				return
 			}
 			parts := strings.Split(r.URL.Path, "/")
 			var jobID int64
 			_, _ = fmt.Sscanf(parts[len(parts)-1], "%d", &jobID)
+			status, runnerID, runnerName := g.jobStatus, g.jobRunnerID, g.jobRunnerName
+			if g.jobChangeAfter > 0 && g.jobGetCalled >= g.jobChangeAfter {
+				status = g.jobStatusAfter
+				runnerID = g.jobRunnerIDAfter
+				runnerName = g.jobRunnerNameAfter
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": jobID, "status": g.jobStatus, "conclusion": g.jobConclusion,
-				"runner_id": g.jobRunnerID, "runner_name": g.jobRunnerName,
+				"id": jobID, "status": status, "conclusion": g.jobConclusion,
+				"runner_id": runnerID, "runner_name": runnerName,
 			})
 			return
 		}
@@ -266,7 +320,9 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				g.mu.Lock()
 				return
 			}
-			if g.runnerErrCode != 0 && (g.runnerErrAfter == 0 || g.runnerGetCalled >= g.runnerErrAfter) {
+			if g.runnerErrCode != 0 &&
+				(g.runnerErrAfter == 0 || g.runnerGetCalled >= g.runnerErrAfter) &&
+				(g.runnerErrUntil == 0 || g.runnerGetCalled <= g.runnerErrUntil) {
 				w.WriteHeader(g.runnerErrCode)
 				return
 			}
@@ -646,7 +702,9 @@ func (d *spawnDeps) BuildSHA() string                 { return d.buildSHA }
 func newSpawnDeps(t *testing.T) *spawnDeps {
 	t.Helper()
 	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// default: JIT happy-path, queued=0, runner id 42.
+		// Default: JIT happy-path with one exact in-progress job on runner 42.
+		// Lifecycle assignment is deliberately job-ID correlated, so the fixture
+		// must expose the same runner through the workflow-jobs API.
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/generate-jitconfig"):
 			w.WriteHeader(201)
@@ -664,10 +722,14 @@ func newSpawnDeps(t *testing.T) *spawnDeps {
 			})
 		case strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs"):
 			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"jobs":[]}`))
+			_, _ = w.Write([]byte(`{"jobs":[{"id":9001,"status":"in_progress","runner_id":42,"runner_name":"runner"}]}`))
 		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
 			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+			if r.URL.Query().Get("status") == "in_progress" {
+				_, _ = w.Write([]byte(`{"workflow_runs":[{"id":7001}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"workflow_runs":[]}`))
+			}
 		case strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodGet:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"id":42,"name":"runner","status":"online","busy":true}`))

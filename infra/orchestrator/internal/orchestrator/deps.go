@@ -37,7 +37,7 @@ type ClockLike interface {
 // abstracted for testability.
 type StateLike interface {
 	InFlight(repo string) int
-	DemandCoverage(repo string) int
+	ReconcileDemand(repo string, queuedJobIDs []int64) int
 	GlobalInFlight() int
 	IncrementInFlight(repo string)
 	DecrementInFlight(repo string)
@@ -47,7 +47,7 @@ type StateLike interface {
 	HasReservation(spawnID, repo string) bool
 	RecordJIT(spawnID string, runnerID int64, runnerName string)
 	MarkOnline(spawnID string, now time.Time) bool
-	MarkAssigned(spawnID string, now time.Time) bool
+	MarkAssigned(spawnID string, jobID int64, now time.Time) bool
 	MarkTeardownBlocked(spawnID, repo, detail string, at time.Time) bool
 	UpdateTeardownFailure(spawnID, detail string)
 	ResolveTeardown(spawnID string) bool
@@ -88,7 +88,7 @@ type PollDeps interface {
 	Clock() ClockLike
 
 	InFlight(repo string) int
-	DemandCoverage(repo string) int
+	ReconcileDemand(repo string, queuedJobIDs []int64) int
 	GlobalInFlight() int
 	BreakerIsOpen(repo string) bool
 	BreakerMaybeHalfOpen(repo string) bool

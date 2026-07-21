@@ -82,6 +82,7 @@ func TestSpawn_JITRegistrationCarriesRestartDiscoveryLabels(t *testing.T) {
 
 	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "vladislav", Repo: "o/r", SpawnID: "owned-labels",
+		CandidateJobs: assignedCandidate(),
 	}))
 
 	fake.mu.Lock()
@@ -184,6 +185,7 @@ func TestSpawn_RunnerBecomesBusyOnLifecyclePoll(t *testing.T) {
 	d.be.waitDelay = 5 * time.Millisecond
 	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "poll-transition",
+		CandidateJobs: assignedCandidate(),
 	}))
 	d.requireEmitted(t, cornerstone.EventRunnerOnline, cornerstone.EventJobAssigned, cornerstone.EventRunnerCompleted)
 }
@@ -262,11 +264,19 @@ func TestSpawn_ContextCancellationWhileObservingRunner(t *testing.T) {
 	fake.mu.Unlock()
 	d.be.inspectExitDelay = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
 	go func() {
-		time.Sleep(time.Millisecond)
-		cancel()
+		errCh <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
+			Scope: "s", Repo: "o/r", SpawnID: "cancelled",
+		})
 	}()
-	err := NewSpawnWorker(d).Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "cancelled"})
+	require.Eventually(t, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return fake.runnerGetCalled > 0
+	}, time.Second, time.Millisecond, "runner observation never started")
+	cancel()
+	err := <-errCh
 	require.ErrorIs(t, err, context.Canceled)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_observation_cancelled"`)
 }
@@ -299,6 +309,7 @@ func TestSpawn_DeregistrationFailureFailsRuntimeCleanup(t *testing.T) {
 	go func() {
 		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{
 			Scope: "s", Repo: "o/r", SpawnID: "deregister-failure",
+			CandidateJobs: assignedCandidate(),
 		})
 	}()
 	require.Eventually(t, func() bool {

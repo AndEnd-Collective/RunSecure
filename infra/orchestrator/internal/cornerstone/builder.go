@@ -219,13 +219,16 @@ type JobAssignedFields struct {
 	Scope, Repo, SpawnID string
 	ContainerName        string
 	GitHubRunnerID       int64
+	GitHubJobID          int64
 }
 
 func (e *Emitter) EmitJobAssigned(f JobAssignedFields) error {
-	return e.Emit(runnerLifecycleEvent(
+	event := runnerLifecycleEvent(
 		EventJobAssigned, f.Scope, f.Repo, f.SpawnID, f.ContainerName,
 		f.GitHubRunnerID, "GitHub assigned a job to the JIT runner", StatusInProgress,
-	))
+	)
+	event.EventDetails.ErrorData["github_job_id"] = f.GitHubJobID
+	return e.Emit(event)
 }
 
 type RunnerCompletedFields struct {

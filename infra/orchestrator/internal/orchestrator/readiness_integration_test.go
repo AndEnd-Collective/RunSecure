@@ -99,6 +99,7 @@ func TestRunnerManagementRateLimitFailsReadinessUntilSameOperationRecovers(t *te
 	fake.mu.Unlock()
 	require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 		Scope: "s", Repo: "o/r", SpawnID: "jit-rate-recovered",
+		CandidateJobs: assignedCandidate(),
 	}))
 	// The production poll loop clears the separate scheduler pause only after
 	// the advertised reset. This focused worker test has no poll loop, so model
@@ -169,6 +170,7 @@ func TestRunnerManagementRuntimeFailuresFailReadinessUntilSameOperationRecovers(
 			fake.mu.Unlock()
 			require.NoError(t, NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
 				Scope: "s", Repo: "o/r", SpawnID: "jit-runtime-recovered",
+				CandidateJobs: assignedCandidate(),
 			}))
 
 			recovered := httptest.NewRecorder()
