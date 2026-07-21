@@ -95,11 +95,14 @@ jobs:
       - name: Run validation lints
         run: |
           set -uo pipefail
+          # Validation scripts create executable fake tools. /tmp is
+          # intentionally noexec, so use GitHub's per-job workspace instead.
+          export TMPDIR="$RUNNER_TEMP"
           FAIL=0
           for t in tests/validation/test-*.sh; do
             [ -f "$t" ] || continue
             case "$(basename "$t")" in
-              test-tool-recipes.sh|test-hardening-idempotency.sh)
+              test-tool-recipes.sh|test-hardening-idempotency.sh|test-scanner-package-inventory.sh)
                 echo "SKIP $t (Docker-only)"
                 continue ;;
               test-go-coverage.sh)

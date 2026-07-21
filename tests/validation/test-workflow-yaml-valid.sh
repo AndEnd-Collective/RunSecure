@@ -73,6 +73,29 @@ PY
     fi
 done
 
+DOGFOOD_WORKFLOW="${WORKFLOWS_DIR}/dogfood.yml"
+if python3 - "$DOGFOOD_WORKFLOW" <<'PY' 2>/dev/null; then
+import sys, yaml
+data = yaml.safe_load(open(sys.argv[1])) or {}
+steps = ((data.get("jobs") or {}).get("lints-on-self") or {}).get("steps") or []
+matches = [step for step in steps if step.get("name") == "Run validation lints"]
+if len(matches) != 1:
+    sys.exit(2)
+script = matches[0].get("run") or ""
+export_pos = script.find('export TMPDIR="$RUNNER_TEMP"')
+loop_pos = script.find("for t in tests/validation/test-*.sh")
+case_pos = script.find('case "$(basename "$t")" in', loop_pos)
+esac_pos = script.find("esac", case_pos)
+scanner_pos = script.find("test-scanner-package-inventory.sh", case_pos, esac_pos)
+continue_pos = script.find("continue", scanner_pos, esac_pos)
+if not (0 <= export_pos < loop_pos <= case_pos < scanner_pos < continue_pos < esac_pos):
+    sys.exit(3)
+PY
+    pass "dogfood.yml: validation uses RUNNER_TEMP and skips Docker-only scanner inventory"
+else
+    fail "dogfood.yml: validation must set RUNNER_TEMP before its loop and skip scanner inventory in its case arm"
+fi
+
 # --- Print results -----------------------------------------------------------
 echo ""
 echo "=== Workflow YAML Validity ==="
