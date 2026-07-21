@@ -265,8 +265,19 @@ assert "--publish-run-id '${{ github.run_id }}'" in manifest_steps
 assert "release-image-manifest-" in manifest_steps
 assert set(jobs["grype-scan-languages"]["needs"]) == {"gate", "languages"}
 assert len(jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]) == 4
+rust_scan = next(
+    row
+    for row in jobs["grype-scan-languages"]["strategy"]["matrix"]["include"]
+    if row["name"] == "rust"
+)
+assert rust_scan["expected_presence_cataloger"] == "binary-classifier-cataloger"
+assert rust_scan["expected_presence_package"] == "rust"
 
 assert "Refresh socket-proxy allowed-images.txt" not in weekly_path.read_text()
+weekly_text = weekly_path.read_text()
+assert "secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN" not in weekly_text
+assert "token: ${{ secrets.RELEASE_TOKEN }}" in weekly_text
+assert weekly_text.index("Require the release cascade token") < weekly_text.index("Create and push tag")
 for step in weekly["jobs"]["bump"]["steps"]:
     command = step.get("run", "")
     if "gh pr create" in command:
@@ -289,8 +300,13 @@ assert "verified-publish-manifest-${{ inputs.publish_run_id }}" in promote_text
 assert "verify-release-manifest.py" in promote_text
 assert "cmp -s .publish-manifest/release-images.json" in promote_text
 assert 'run.get("event") != "workflow_run"' in promote_text
+assert 'run.get("head_branch") != f"v{expected_version}"' in promote_text
 assert "promote-release-images.py" in promote_text
+assert promote_text.count("verify-remote-release-tag.sh") >= 4
 assert "strategy" not in promote["jobs"]["promote"]
+release_checkout = promote["jobs"]["release"]["steps"][0]
+assert release_checkout["with"]["ref"] == "${{ needs.resolve-manifest.outputs.build_sha }}"
+assert "--verify-tag" in promote_text
 assert "gh release upload" in promote_text
 assert "runsecure-v${VERSION}-release-images.json" in promote_text
 
@@ -300,6 +316,12 @@ assert "git tag -l" not in accept_text
 assert "verify-release-manifest.py" in accept_text
 assert "PROXY_IMAGE_REF=" in accept_text
 assert "RUNNER_IMAGE_REF=" in accept_text
+assert '[[ ! "$RUNNER_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]' in accept_text
+assert "--entrypoint node" in accept_text
+assert "--entrypoint python3" in accept_text
+assert "rustc --version" in accept_text
+assert "cargo --version" in accept_text
+assert 'rustc "$work/main.rs"' in accept_text
 PY
 
 echo "PASS: release allowlist is digest-derived, complete, and built before socket-proxy"

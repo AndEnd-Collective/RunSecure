@@ -61,7 +61,7 @@ func (c *Client) GenerateJITConfig(ctx context.Context, repo string, req JITConf
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnprocessableEntity {
-		return JITConfigResponse{}, errors.New("github: 422 no JIT slot available")
+		return JITConfigResponse{}, responseError(resp, "generate JIT config")
 	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return JITConfigResponse{}, responseError(resp, "generate JIT config")
@@ -69,8 +69,12 @@ func (c *Client) GenerateJITConfig(ctx context.Context, repo string, req JITConf
 
 	var raw rawJITResponse
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return JITConfigResponse{}, fmt.Errorf("github: decode jit response: %w", err)
+		// json.Decoder can populate fields that precede malformed trailing
+		// content. Preserve any runner identity GitHub already created so the
+		// caller can deregister it instead of leaking an orphan registration.
+		return jitConfigResponse(raw), fmt.Errorf("github: decode jit response: %w", err)
 	}
+	result := jitConfigResponse(raw)
 
 	// B3 sanity check: if the response carries labels, they must include
 	// each label we requested. If the labels field is empty, GitHub didn't
@@ -82,15 +86,19 @@ func (c *Client) GenerateJITConfig(ctx context.Context, repo string, req JITConf
 		}
 		for _, want := range req.Labels {
 			if !gotLabels[want] {
-				return JITConfigResponse{}, fmt.Errorf("%w: requested %q, response missing it", ErrJITLabelMismatch, want)
+				return result, fmt.Errorf("%w: requested %q, response missing it", ErrJITLabelMismatch, want)
 			}
 		}
 	}
 
+	return result, nil
+}
+
+func jitConfigResponse(raw rawJITResponse) JITConfigResponse {
 	return JITConfigResponse{
 		RunnerID:         raw.Runner.ID,
 		EncodedJITConfig: raw.EncodedJITConfig,
-	}, nil
+	}
 }
 
 // DeleteRunner removes a runner registration from GitHub. Used by A1 leak

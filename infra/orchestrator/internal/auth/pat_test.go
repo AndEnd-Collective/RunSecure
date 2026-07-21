@@ -59,6 +59,26 @@ func TestPATProvider_RejectsWrongMode(t *testing.T) {
 	}
 }
 
+func TestKubernetesPATProviderRequiresProjectedSecretMode(t *testing.T) {
+	path := writeTokenFile(t, "ghp_projected", 0o440)
+	provider, err := auth.NewKubernetesPATProvider(path)
+	if err != nil {
+		t.Fatalf("NewKubernetesPATProvider: %v", err)
+	}
+	token, err := provider.Token(context.Background())
+	if err != nil || token != "ghp_projected" {
+		t.Fatalf("Token = %q, %v", token, err)
+	}
+
+	hostPath := writeTokenFile(t, "ghp_host", 0o400)
+	if _, err := auth.NewKubernetesPATProvider(hostPath); err == nil || !strings.Contains(err.Error(), "0440") {
+		t.Fatalf("expected projected-secret 0440 error, got %v", err)
+	}
+	if _, err := auth.NewPATProvider(path); err == nil || !strings.Contains(err.Error(), "0400") {
+		t.Fatalf("host constructor must continue rejecting 0440, got %v", err)
+	}
+}
+
 // TestPATProvider_MissingFile verifies that a non-existent file path returns
 // an error at construction time.
 func TestPATProvider_MissingFile(t *testing.T) {

@@ -29,30 +29,42 @@ import (
 // ------------- fake github wired to a real httptest.Server ----------------
 
 type fakeGitHubBackend struct {
-	mu                sync.Mutex
-	queuedFor         map[string]int
-	inProgressFor     map[string]int
-	queueErrCode      map[string]int // map repo → HTTP status to return
-	jitOnRunnerID     int64
-	jitLabels         []string
-	jitMismatch       bool
-	jitErrCode        int
-	deletedRunners    map[int64]bool
-	createCalled      int
-	deleteCalled      int
-	deleteErrCode     int
-	rlLimit           int
-	rlRemaining       int
-	rlReset           string
-	rlAfterResponse   bool // include X-RateLimit-Remaining=0 in 403 response
-	runnerStatus      string
-	runnerBusy        bool
-	runnerErrCode     int
-	runnerGetCalled   int
-	runnerErrAfter    int
-	runnerStatusAfter string
-	runnerBusyAfter   bool
-	runnerChangeAfter int
+	mu                 sync.Mutex
+	queuedFor          map[string]int
+	inProgressFor      map[string]int
+	queueErrCode       map[string]int // map repo → HTTP status to return
+	jitOnRunnerID      int64
+	jitLabels          []string
+	jitRequestedLabels []string
+	jitMismatch        bool
+	jitErrCode         int
+	deletedRunners     map[int64]bool
+	createCalled       int
+	deleteCalled       int
+	deleteErrCode      int
+	deleteErrUntil     int
+	rlLimit            int
+	rlRemaining        int
+	rlReset            string
+	rlAfterResponse    bool // include X-RateLimit-Remaining=0 in 403 response
+	runnerStatus       string
+	runnerBusy         bool
+	runnerErrCode      int
+	runnerGetCalled    int
+	runnerErrAfter     int
+	runnerStatusAfter  string
+	runnerBusyAfter    bool
+	runnerChangeAfter  int
+	jobRunnerID        int64
+	jobRunnerName      string
+	jobStatus          string
+	jobConclusion      string
+	jobErrCode         int
+	recentRunID        int64
+	recentRunCount     int
+	recentJobRunnerID  int64
+	recentJobName      string
+	recentJobStatus    string
 }
 
 func newFakeGH() *fakeGitHubBackend {
@@ -97,6 +109,13 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				return
 			}
 			runID := parts[len(parts)-2]
+			if g.recentRunID > 0 && runID == fmt.Sprint(g.recentRunID) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{{
+					"id": 99001, "name": "later-dependent", "status": g.recentJobStatus,
+					"runner_id": g.recentJobRunnerID, "runner_name": g.recentJobName,
+				}}})
+				return
+			}
 			count := g.queuedFor[repo]
 			if runID == "2" {
 				count = g.inProgressFor[repo]
@@ -141,6 +160,17 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				runID = 2
 			}
 			runs := []map[string]any{}
+			if r.URL.Query().Get("status") == "completed" && g.recentRunCount > 0 {
+				for i := 0; i < g.recentRunCount; i++ {
+					id := int64(7000 + i)
+					if i == 0 && g.recentRunID > 0 {
+						id = g.recentRunID
+					}
+					runs = append(runs, map[string]any{"id": id})
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
+				return
+			}
 			if count > 0 {
 				runs = append(runs, map[string]any{"id": runID})
 			}
@@ -158,12 +188,20 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 				w.WriteHeader(g.jitErrCode)
 				return
 			}
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			g.jitRequestedLabels = nil
+			if reqLabels, ok := body["labels"].([]any); ok {
+				for _, label := range reqLabels {
+					if value, ok := label.(string); ok {
+						g.jitRequestedLabels = append(g.jitRequestedLabels, value)
+					}
+				}
+			}
 			labels := []map[string]any{}
 			labelSet := g.jitLabels
 			if labelSet == nil {
 				// Echo back what was requested unless explicitly told to mismatch.
-				var body map[string]any
-				_ = json.NewDecoder(r.Body).Decode(&body)
 				if reqLabels, ok := body["labels"].([]any); ok && !g.jitMismatch {
 					for _, l := range reqLabels {
 						labels = append(labels, map[string]any{"name": l})
@@ -187,10 +225,25 @@ func (g *fakeGitHubBackend) handler() http.HandlerFunc {
 			})
 			return
 		}
+		// GET /repos/o/r/actions/jobs/<id>
+		if strings.Contains(r.URL.Path, "/actions/jobs/") && r.Method == http.MethodGet {
+			if g.jobErrCode != 0 {
+				w.WriteHeader(g.jobErrCode)
+				return
+			}
+			parts := strings.Split(r.URL.Path, "/")
+			var jobID int64
+			_, _ = fmt.Sscanf(parts[len(parts)-1], "%d", &jobID)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": jobID, "status": g.jobStatus, "conclusion": g.jobConclusion,
+				"runner_id": g.jobRunnerID, "runner_name": g.jobRunnerName,
+			})
+			return
+		}
 		// DELETE /repos/o/r/actions/runners/<id>
 		if strings.Contains(r.URL.Path, "/actions/runners/") && r.Method == http.MethodDelete {
 			g.deleteCalled++
-			if g.deleteErrCode != 0 {
+			if g.deleteErrCode != 0 && (g.deleteErrUntil == 0 || g.deleteCalled <= g.deleteErrUntil) {
 				w.WriteHeader(g.deleteErrCode)
 				return
 			}
@@ -397,9 +450,10 @@ type fakeBackend struct {
 	mu sync.Mutex
 
 	// Spawn controls.
-	spawnErr     error // if non-nil, Spawn returns this error
-	spawnCalls   []backend.SpawnInput
-	spawnHandles []backend.Handle // handles returned by Spawn (one per call)
+	spawnErr           error // if non-nil, Spawn returns this error
+	spawnPartialHandle bool  // return an owned handle alongside spawnErr
+	spawnCalls         []backend.SpawnInput
+	spawnHandles       []backend.Handle // handles returned by Spawn (one per call)
 
 	// WaitForExit controls.
 	waitCalls    []backend.Handle
@@ -428,9 +482,6 @@ func (f *fakeBackend) Spawn(_ context.Context, in backend.SpawnInput) (backend.H
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.spawnCalls = append(f.spawnCalls, in)
-	if f.spawnErr != nil {
-		return backend.Handle{}, f.spawnErr
-	}
 	h := backend.Handle{
 		SpawnID: in.SpawnID,
 		Backend: "fake",
@@ -439,6 +490,12 @@ func (f *fakeBackend) Spawn(_ context.Context, in backend.SpawnInput) (backend.H
 			"proxy":   "id-proxy",
 			"network": "net-fake",
 		},
+	}
+	if f.spawnErr != nil {
+		if f.spawnPartialHandle {
+			return h, f.spawnErr
+		}
+		return backend.Handle{}, f.spawnErr
 	}
 	f.spawnHandles = append(f.spawnHandles, h)
 	return h, nil

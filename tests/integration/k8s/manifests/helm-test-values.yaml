@@ -11,6 +11,27 @@ image:
     tag: "2.1.0"
     digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
     pullPolicy: IfNotPresent
+  runners:
+    default:
+      repository: ghcr.io/andend-collective/runsecure/node
+      tag: "2.1.0-24"
+      digest: "sha256:0000000000000000000000000000000000000000000000000000000000000004"
+      pullPolicy: IfNotPresent
+    node:
+      repository: ghcr.io/andend-collective/runsecure/node
+      tag: "2.1.0-24"
+      digest: "sha256:0000000000000000000000000000000000000000000000000000000000000005"
+      pullPolicy: IfNotPresent
+    python:
+      repository: ghcr.io/andend-collective/runsecure/python
+      tag: "2.1.0-3.12"
+      digest: "sha256:0000000000000000000000000000000000000000000000000000000000000006"
+      pullPolicy: IfNotPresent
+    rust:
+      repository: ghcr.io/andend-collective/runsecure/rust
+      tag: "2.1.0-stable"
+      digest: "sha256:0000000000000000000000000000000000000000000000000000000000000007"
+      pullPolicy: IfNotPresent
   socketProxy:
     repository: ghcr.io/andend-collective/runsecure/socket-proxy
     tag: "2.1.0"

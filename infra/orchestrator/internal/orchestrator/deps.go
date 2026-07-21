@@ -23,6 +23,7 @@ import (
 // SpawnIntent is what the poll loop enqueues; spawn workers consume.
 type SpawnIntent struct {
 	Scope, Repo, SpawnID string
+	CandidateJobs        []github.WorkflowJob
 }
 
 // ClockLike is the minimal time abstraction the orchestrator uses; the
@@ -36,6 +37,7 @@ type ClockLike interface {
 // abstracted for testability.
 type StateLike interface {
 	InFlight(repo string) int
+	DemandCoverage(repo string) int
 	GlobalInFlight() int
 	IncrementInFlight(repo string)
 	DecrementInFlight(repo string)
@@ -54,6 +56,8 @@ type StateLike interface {
 	RecordCompleted()
 	RecordUnassignedExit()
 	RecordDeregistered()
+	RecordRunnerOperationFailure(repo, operation, class, detail string)
+	RecordRunnerOperationSuccess(repo, operation string)
 }
 
 // TokenBucket is the B1 rate limiter.
@@ -84,6 +88,7 @@ type PollDeps interface {
 	Clock() ClockLike
 
 	InFlight(repo string) int
+	DemandCoverage(repo string) int
 	GlobalInFlight() int
 	BreakerIsOpen(repo string) bool
 	BreakerMaybeHalfOpen(repo string) bool

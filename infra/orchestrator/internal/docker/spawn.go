@@ -2,10 +2,32 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 )
+
+// SpawnRollbackError means the primary create/start failure was followed by
+// at least one failed container rollback. Callers must retain the returned
+// container IDs and retry exact teardown before releasing capacity.
+type SpawnRollbackError struct {
+	Cause   error
+	Cleanup error
+}
+
+func (e *SpawnRollbackError) Error() string {
+	return fmt.Sprintf("%v; container rollback incomplete: %v", e.Cause, e.Cleanup)
+}
+
+func (e *SpawnRollbackError) Unwrap() []error { return []error{e.Cause, e.Cleanup} }
+
+// HasIncompleteRollback reports whether Spawn returned owned containers that
+// were not proven deleted.
+func HasIncompleteRollback(err error) bool {
+	var rollbackErr *SpawnRollbackError
+	return errors.As(err, &rollbackErr)
+}
 
 // RunnerEntrypoint is the path to the JIT-launcher script baked into every
 // RunSecure runner image. Spawn sets it explicitly on the runner container's
@@ -51,10 +73,21 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 	created := map[string]string{}
 
 	// Defensive rollback: on any error, delete every container we created.
-	rollback := func() {
+	rollback := func() error {
+		var cleanupErrors []error
 		for _, id := range created {
-			_ = c.DeleteContainer(ctx, id, true)
+			if err := c.DeleteContainer(ctx, id, true); err != nil {
+				cleanupErrors = append(cleanupErrors,
+					fmt.Errorf("delete container %s: %w", id, err))
+			}
 		}
+		return errors.Join(cleanupErrors...)
+	}
+	fail := func(cause error) (map[string]string, error) {
+		if cleanupErr := rollback(); cleanupErr != nil {
+			return created, &SpawnRollbackError{Cause: cause, Cleanup: cleanupErr}
+		}
+		return created, cause
 	}
 
 	// Common labels every container in this spawn carries.
@@ -133,8 +166,7 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 		NetworkingConfig: &NetworkingConfig{EndpointsConfig: proxyEndpoints},
 	})
 	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("docker: create proxy: %w", err)
+		return fail(fmt.Errorf("docker: create proxy: %w", err))
 	}
 	created["proxy"] = proxyID
 
@@ -193,16 +225,14 @@ func Spawn(ctx context.Context, c Client, in SpawnInputs) (map[string]string, er
 		},
 	})
 	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("docker: create runner: %w", err)
+		return fail(fmt.Errorf("docker: create runner: %w", err))
 	}
 	created["runner"] = runnerID
 
 	// Start order: proxy first (must be ready before runner registers with GitHub).
 	for _, role := range []string{"proxy", "runner"} {
 		if err := c.StartContainer(ctx, created[role]); err != nil {
-			rollback()
-			return nil, fmt.Errorf("docker: start %s: %w", role, err)
+			return fail(fmt.Errorf("docker: start %s: %w", role, err))
 		}
 	}
 	return created, nil

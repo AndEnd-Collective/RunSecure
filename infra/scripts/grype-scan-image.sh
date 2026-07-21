@@ -9,17 +9,19 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 IMAGE_REF SARIF_FILE [EXPECTED_DPKG_PACKAGE] [EXPECTED_CATALOGER] [EXPECTED_CATALOGER_PACKAGE]" >&2
+    echo "Usage: $0 IMAGE_REF SARIF_FILE [EXPECTED_DPKG_PACKAGE] [EXPECTED_CATALOGER] [EXPECTED_CATALOGER_PACKAGE] [EXPECTED_PRESENCE_CATALOGER] [EXPECTED_PRESENCE_PACKAGE]" >&2
     exit 2
 }
 
-[[ $# -ge 2 && $# -le 5 ]] || usage
+[[ $# -ge 2 && $# -le 7 ]] || usage
 
 IMAGE_REF="$1"
 SARIF_FILE="$2"
 EXPECTED_DPKG_PACKAGE="${3:-}"
 EXPECTED_CATALOGER="${4:-}"
 EXPECTED_CATALOGER_PACKAGE="${5:-}"
+EXPECTED_PRESENCE_CATALOGER="${6:-}"
+EXPECTED_PRESENCE_PACKAGE="${7:-}"
 
 command -v jq >/dev/null 2>&1 || {
     echo "ERROR: jq is required" >&2
@@ -36,8 +38,9 @@ command -v grype >/dev/null 2>&1 || {
 
 SCAN_TMP=$(mktemp -d)
 SBOM_FILE="${SCAN_TMP}/packages.syft.json"
+PRESENCE_SBOM_FILE="${SCAN_TMP}/presence.syft.json"
 cleanup() {
-    rm -f "$SBOM_FILE"
+    rm -f "$SBOM_FILE" "$PRESENCE_SBOM_FILE"
     rmdir "$SCAN_TMP" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -108,6 +111,32 @@ if [[ -n "$EXPECTED_CATALOGER" ]]; then
         )
     ' "$SBOM_FILE" >/dev/null || {
         echo "ERROR: expected ecosystem package inventory is missing: ${EXPECTED_CATALOGER}:${EXPECTED_CATALOGER_PACKAGE}" >&2
+        exit 1
+    }
+fi
+
+# Some toolchains are shipped as upstream binaries rather than an ecosystem
+# package database. Prove those binaries separately with one explicitly required
+# Syft cataloger, but never feed this generic presence inventory to Grype. The
+# policy SBOM above remains free of raw-binary heuristic artifacts.
+if [[ -n "$EXPECTED_PRESENCE_CATALOGER" ]]; then
+    [[ -n "$EXPECTED_PRESENCE_PACKAGE" ]] || {
+        echo "ERROR: presence cataloger requires an expected package" >&2
+        exit 1
+    }
+    syft "$IMAGE_REF" \
+        --select-catalogers="+${EXPECTED_PRESENCE_CATALOGER}" \
+        --output "syft-json=${PRESENCE_SBOM_FILE}"
+    jq -e \
+        --arg cataloger "$EXPECTED_PRESENCE_CATALOGER" \
+        --arg package "$EXPECTED_PRESENCE_PACKAGE" '
+        any(.descriptor.configuration.catalogers.used[]?; . == $cataloger)
+        and any(.artifacts[];
+            .foundBy == $cataloger
+            and .name == $package
+        )
+    ' "$PRESENCE_SBOM_FILE" >/dev/null || {
+        echo "ERROR: expected runtime presence inventory is missing: ${EXPECTED_PRESENCE_CATALOGER}:${EXPECTED_PRESENCE_PACKAGE}" >&2
         exit 1
     }
 fi

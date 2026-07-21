@@ -9,6 +9,7 @@
 #    - selector: role=runner, spawn-id=spawn01
 #    - PolicyType: Egress only
 #    - Egress: to role=proxy, spawn-id=spawn01 on 3128/TCP
+#              to kube-dns 10.96.0.10/32 on 53/UDP+TCP
 #
 # 3. ProxyIngressNetworkPolicy for spawn01 (matches ProxyIngressNetworkPolicy builder):
 #    - name: rs-proxy-ingress-spawn01, namespace: runsecure-itest
@@ -66,6 +67,14 @@ spec:
       ports:
         - protocol: TCP
           port: 3128
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 ---
 # Proxy ingress — matches ProxyIngressNetworkPolicy(SpawnInput{Scope:"itest", SpawnID:"spawn01"})
 # Allows the runner pod (spawn01) to send traffic to the proxy pod on port 3128.

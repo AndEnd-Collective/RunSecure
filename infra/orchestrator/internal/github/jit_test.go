@@ -112,11 +112,13 @@ func TestGenerateJITConfig_LabelMismatch_Rejected(t *testing.T) {
 		})
 	})
 
-	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
+	response, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{
 		Name:   "rs-r-spawn1",
 		Labels: []string{"requested-label"},
 	})
 	require.ErrorIs(t, err, ErrJITLabelMismatch)
+	require.Equal(t, int64(1), response.RunnerID,
+		"validation failure must preserve the registration identity for cleanup")
 }
 
 func TestGenerateJITConfig_AuthFailed(t *testing.T) {
@@ -156,6 +158,7 @@ func TestGenerateJITConfig_422NoSlot(t *testing.T) {
 	})
 	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
 	require.ErrorContains(t, err, "422")
+	require.Equal(t, http.StatusUnprocessableEntity, ErrorStatus(err))
 }
 
 func TestGenerateJITConfig_UnexpectedStatus(t *testing.T) {
@@ -173,6 +176,18 @@ func TestGenerateJITConfig_MalformedJSON(t *testing.T) {
 	})
 	_, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n", Labels: []string{"l"}})
 	require.Error(t, err)
+}
+
+func TestGenerateJITConfig_MalformedTailPreservesDecodedRunnerID(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"runner":{"id":73},"encoded_jit_config":123}`))
+	})
+
+	response, err := c.GenerateJITConfig(context.Background(), "o/r", JITConfigRequest{Name: "n"})
+
+	require.ErrorContains(t, err, "decode jit response")
+	require.Equal(t, int64(73), response.RunnerID)
 }
 
 func TestDeleteRunner_HappyPath(t *testing.T) {

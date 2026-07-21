@@ -7,6 +7,7 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/orchestrator"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +33,7 @@ func (f *fakeColdStartDocker) DeleteContainer(_ context.Context, id string, forc
 type fakeColdStartGitHub struct {
 	runners     map[string][]github.Runner
 	listErr     error
+	listErrs    map[string]error
 	deleteErr   error
 	listedRepos []string
 	deletedIDs  []int64
@@ -39,6 +41,9 @@ type fakeColdStartGitHub struct {
 
 func (f *fakeColdStartGitHub) ListRunners(_ context.Context, repo string) ([]github.Runner, github.RateLimit, error) {
 	f.listedRepos = append(f.listedRepos, repo)
+	if err := f.listErrs[repo]; err != nil {
+		return nil, github.RateLimit{}, err
+	}
 	return f.runners[repo], github.RateLimit{}, f.listErr
 }
 
@@ -54,6 +59,16 @@ func recoveredContainer(id, role, repo, spawnID string) docker.Container {
 	}}
 }
 
+func ownedRecoveredRunner(id int64, name, scope string) github.Runner {
+	runner := github.Runner{ID: id, Name: name, Status: "offline", Busy: false}
+	for _, label := range []string{orchestrator.JITOwnerLabel, orchestrator.JITScopeLabelPrefix + scope} {
+		runner.Labels = append(runner.Labels, struct {
+			Name string `json:"name"`
+		}{Name: label})
+	}
+	return runner
+}
+
 func TestCleanupRecoveredSpawns_RemovesExactRegistrationBeforeContainers(t *testing.T) {
 	dc := &fakeColdStartDocker{containers: []docker.Container{
 		recoveredContainer("proxy-b", "proxy", "owner/repo", "spawn-1"),
@@ -62,7 +77,7 @@ func TestCleanupRecoveredSpawns_RemovesExactRegistrationBeforeContainers(t *test
 	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{
 		"owner/repo": {
 			{ID: 41, Name: "unrelated"},
-			{ID: 42, Name: "rs-spawn-1-runner", Status: "online", Busy: true},
+			ownedRecoveredRunner(42, "rs-spawn-1-runner", "scope"),
 		},
 	}}
 
@@ -90,7 +105,9 @@ func TestCleanupRecoveredSpawns_DeregistrationFailureLeavesContainersForRetry(t 
 		recoveredContainer("runner", "runner", "owner/repo", "spawn-1"),
 	}}
 	gh := &fakeColdStartGitHub{
-		runners:   map[string][]github.Runner{"owner/repo": {{ID: 42, Name: "rs-spawn-1-runner"}}},
+		runners: map[string][]github.Runner{
+			"owner/repo": {ownedRecoveredRunner(42, "rs-spawn-1-runner", "scope")},
+		},
 		deleteErr: errors.New("delete unavailable"),
 	}
 
@@ -135,11 +152,67 @@ func TestCleanupRecoveredSpawns_PropagatesDockerErrors(t *testing.T) {
 	require.ErrorContains(t, err, "delete recovered container")
 }
 
-func TestCleanupRecoveredSpawns_NoContainersIsNoOp(t *testing.T) {
+func TestCleanupRecoveredSpawns_NoContainersStillAuditsRegistrations(t *testing.T) {
 	dc := &fakeColdStartDocker{containers: []docker.Container{{
 		ID: "control-plane", Name: "orchestrator", Labels: map[string]string{"runsecure.scope": "scope"},
 	}}}
-	gh := &fakeColdStartGitHub{listErr: errors.New("must not be called")}
+	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{
+		"owner/repo": {ownedRecoveredRunner(42, "rs-registration-only-runner", "scope")},
+	}}
 	require.NoError(t, cleanupRecoveredSpawns(context.Background(), "scope", []string{"owner/repo"}, dc, gh))
-	require.Empty(t, gh.listedRepos)
+	require.Equal(t, []string{"owner/repo"}, gh.listedRepos)
+	require.Equal(t, []int64{42}, gh.deletedIDs)
+	require.Empty(t, dc.deleted)
+}
+
+func TestCleanupRecoveredSpawns_ActiveOwnedRegistrationFailsWithoutMutation(t *testing.T) {
+	dc := &fakeColdStartDocker{containers: []docker.Container{
+		recoveredContainer("runner", "runner", "owner/repo", "spawn-1"),
+	}}
+	runner := ownedRecoveredRunner(42, "rs-spawn-1-runner", "scope")
+	runner.Status = "online"
+	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{
+		"owner/repo": {runner},
+	}}
+
+	err := cleanupRecoveredSpawns(
+		context.Background(), "scope", []string{"owner/repo"}, dc, gh,
+	)
+	require.ErrorContains(t, err, "is active")
+	require.Empty(t, gh.deletedIDs)
+	require.Empty(t, dc.deleted)
+}
+
+func TestCleanupRecoveredSpawns_MatchingNameWithoutLabelsFailsClosed(t *testing.T) {
+	dc := &fakeColdStartDocker{containers: []docker.Container{
+		recoveredContainer("runner", "runner", "owner/repo", "spawn-1"),
+	}}
+	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{
+		"owner/repo": {{ID: 42, Name: "rs-spawn-1-runner", Status: "offline"}},
+	}}
+
+	err := cleanupRecoveredSpawns(
+		context.Background(), "scope", []string{"owner/repo"}, dc, gh,
+	)
+	require.ErrorContains(t, err, "lacks exact ownership labels")
+	require.Empty(t, gh.deletedIDs)
+	require.Empty(t, dc.deleted)
+}
+
+func TestCleanupRecoveredSpawns_ListsEveryRepoBeforeMutation(t *testing.T) {
+	dc := &fakeColdStartDocker{}
+	gh := &fakeColdStartGitHub{
+		runners: map[string][]github.Runner{
+			"a/repo": {ownedRecoveredRunner(42, "rs-debt-runner", "scope")},
+		},
+		listErrs: map[string]error{"b/repo": errors.New("second repo unavailable")},
+	}
+
+	err := cleanupRecoveredSpawns(
+		context.Background(), "scope", []string{"a/repo", "b/repo"}, dc, gh,
+	)
+	require.ErrorContains(t, err, "list runners")
+	require.Equal(t, []string{"a/repo", "b/repo"}, gh.listedRepos)
+	require.Empty(t, gh.deletedIDs)
+	require.Empty(t, dc.deleted)
 }

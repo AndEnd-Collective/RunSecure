@@ -188,6 +188,46 @@ jobs:
           docker pull "$PROXY_IMAGE_REF"
           docker pull "$RUNNER_IMAGE_REF"
 
+      - name: Execute the published language runtime by exact digest
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUNNER_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::runner acceptance ref is not immutable: $RUNNER_IMAGE_REF"
+            exit 1
+          fi
+          case "$LANG" in
+            node)
+              runtime_version=$(docker run --rm --entrypoint node \
+                "$RUNNER_IMAGE_REF" --version)
+              [[ "$runtime_version" == "v${LANG_VERSION}."* ]]
+              docker run --rm --entrypoint node "$RUNNER_IMAGE_REF" \
+                -e 'if (2 + 2 !== 4) process.exit(1); console.log("runsecure-node-ok")'
+              ;;
+            python)
+              runtime_version=$(docker run --rm --entrypoint python3 \
+                "$RUNNER_IMAGE_REF" --version 2>&1)
+              [[ "$runtime_version" == "Python ${LANG_VERSION}."* ]]
+              docker run --rm --entrypoint python3 "$RUNNER_IMAGE_REF" \
+                -c 'assert 2 + 2 == 4; print("runsecure-python-ok")'
+              ;;
+            rust)
+              docker run --rm --entrypoint bash "$RUNNER_IMAGE_REF" -lc '
+                set -euo pipefail
+                rustc --version
+                cargo --version
+                work=$(mktemp -d)
+                trap '\''rm -rf "$work"'\'' EXIT
+                printf '\''fn main() { println!("runsecure-rust-ok"); }\n'\'' > "$work/main.rs"
+                rustc "$work/main.rs" -o "$work/smoke"
+                [[ $("$work/smoke") == runsecure-rust-ok ]]
+              '
+              ;;
+            *)
+              echo "::error::unsupported acceptance language: $LANG"
+              exit 1
+              ;;
+          esac
+
       - name: Run acceptance suite (capture output for SARIF)
         id: acceptance
         working-directory: tests/acceptance

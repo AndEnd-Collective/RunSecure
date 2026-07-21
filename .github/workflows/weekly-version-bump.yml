@@ -61,6 +61,16 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Require the release cascade token
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is required; GITHUB_TOKEN tag pushes do not start the release cascade"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Need full history + tags to find the latest semver tag.
@@ -71,10 +81,9 @@ jobs:
           # via the default GITHUB_TOKEN are deliberately suppressed by
           # GitHub to prevent recursion — which silently breaks our
           # bump → publish → acceptance → promote cascade.
-          # Falls back to GITHUB_TOKEN if RELEASE_TOKEN isn't configured;
-          # in that case the cascade must be kicked off manually by
-          # re-pushing the tag from a local terminal.
-          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # Failing closed is essential: GITHUB_TOKEN can push a tag, but
+          # GitHub suppresses the downstream publish workflow for that push.
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Compute next version
         id: next_version

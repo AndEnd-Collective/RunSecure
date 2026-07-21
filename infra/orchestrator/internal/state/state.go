@@ -59,18 +59,28 @@ type State struct {
 }
 
 type RepoState struct {
-	InFlight        int       `json:"in_flight"`
-	QueuedJobs      int       `json:"queued_jobs"`
-	Pending         int       `json:"pending"`
-	Online          int       `json:"online"`
-	Assigned        int       `json:"assigned"`
-	TeardownBlocked int       `json:"teardown_blocked"`
-	BreakerOpen     bool      `json:"breaker_open"`
-	LastPollAt      time.Time `json:"last_poll_at,omitempty"`
-	LastPollSuccess time.Time `json:"last_poll_success,omitempty"`
-	LastPollError   string    `json:"last_poll_error,omitempty"`
-	LastErrorDetail string    `json:"last_error_detail,omitempty"`
-	LastETag        string    `json:"last_etag,omitempty"`
+	InFlight             int                       `json:"in_flight"`
+	QueuedJobs           int                       `json:"queued_jobs"`
+	Pending              int                       `json:"pending"`
+	Online               int                       `json:"online"`
+	Assigned             int                       `json:"assigned"`
+	TeardownBlocked      int                       `json:"teardown_blocked"`
+	BreakerOpen          bool                      `json:"breaker_open"`
+	LastPollAt           time.Time                 `json:"last_poll_at,omitempty"`
+	LastPollSuccess      time.Time                 `json:"last_poll_success,omitempty"`
+	LastPollError        string                    `json:"last_poll_error,omitempty"`
+	LastErrorDetail      string                    `json:"last_error_detail,omitempty"`
+	RunnerOperationError map[string]OperationError `json:"runner_operation_errors,omitempty"`
+	LastETag             string                    `json:"last_etag,omitempty"`
+}
+
+// OperationError is an unresolved runner-management capability failure.
+// Demand polling is deliberately tracked separately: a successful read-only
+// queue refresh cannot prove that JIT creation, runner observation, or runner
+// deletion is authorized.
+type OperationError struct {
+	Class  string `json:"class"`
+	Detail string `json:"detail"`
 }
 
 func New() *State {
@@ -95,9 +105,12 @@ func (s *State) Configure(repos []string, configuredCapacity, workerCapacity int
 
 func (s *State) ensure(repo string) *RepoState {
 	if r, ok := s.perRepo[repo]; ok {
+		if r.RunnerOperationError == nil {
+			r.RunnerOperationError = map[string]OperationError{}
+		}
 		return r
 	}
-	r := &RepoState{}
+	r := &RepoState{RunnerOperationError: map[string]OperationError{}}
 	s.perRepo[repo] = r
 	return r
 }
@@ -107,6 +120,18 @@ func (s *State) InFlight(repo string) int {
 	defer s.mu.RUnlock()
 	if r, ok := s.perRepo[repo]; ok {
 		return r.InFlight
+	}
+	return 0
+}
+
+// DemandCoverage reports capacity already promised to jobs that GitHub still
+// reports as queued. Pending and online-but-unassigned runners cover queued
+// demand; assigned runners do not, because their jobs have left the queue.
+func (s *State) DemandCoverage(repo string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if r, ok := s.perRepo[repo]; ok {
+		return r.Pending + r.Online
 	}
 	return 0
 }
@@ -360,6 +385,25 @@ func (s *State) RecordPollFailure(repo, class, detail string) {
 	s.mu.Unlock()
 }
 
+// RecordRunnerOperationFailure records an unresolved runner-management
+// capability failure independently from demand polling.
+func (s *State) RecordRunnerOperationFailure(repo, operation, class, detail string) {
+	s.mu.Lock()
+	s.ensure(repo).RunnerOperationError[operation] = OperationError{
+		Class: class, Detail: detail,
+	}
+	s.mu.Unlock()
+}
+
+// RecordRunnerOperationSuccess clears only the corresponding capability.
+// This prevents a successful queue read (or a different runner API) from
+// masking a permission failure that has not itself recovered.
+func (s *State) RecordRunnerOperationSuccess(repo, operation string) {
+	s.mu.Lock()
+	delete(s.ensure(repo).RunnerOperationError, operation)
+	s.mu.Unlock()
+}
+
 func (s *State) SetBreakerOpen(repo string, open bool) {
 	s.mu.Lock()
 	s.ensure(repo).BreakerOpen = open
@@ -473,7 +517,14 @@ func (s *State) Snapshot() Snapshot {
 		TeardownReconciledTotal: s.teardownReconciled,
 	}
 	for repo, r := range s.perRepo {
-		snap.PerRepo[repo] = *r
+		repoCopy := *r
+		if r.RunnerOperationError != nil {
+			repoCopy.RunnerOperationError = make(map[string]OperationError, len(r.RunnerOperationError))
+			for operation, operationErr := range r.RunnerOperationError {
+				repoCopy.RunnerOperationError[operation] = operationErr
+			}
+		}
+		snap.PerRepo[repo] = repoCopy
 		snap.GlobalInFlight += r.InFlight
 	}
 	for spawnID, reservation := range s.reservations {

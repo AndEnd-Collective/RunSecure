@@ -3,16 +3,47 @@
   "title": "RunSecure Orchestrator Helm Values",
   "type": "object",
   "additionalProperties": false,
-  "required": ["scope", "auth", "image"],
+  "required": ["scope", "auth", "image", "kubernetesNetwork"],
   "properties": {
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["orchestrator", "proxy", "socketProxy"],
+      "required": ["orchestrator", "proxy", "runners", "socketProxy"],
       "properties": {
         "orchestrator": { "$ref": "#/$defs/imageSpec" },
         "proxy":        { "$ref": "#/$defs/imageSpec" },
+        "runners": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default", "node", "python", "rust"],
+          "properties": {
+            "default": { "$ref": "#/$defs/imageSpec" },
+            "node":    { "$ref": "#/$defs/imageSpec" },
+            "python":  { "$ref": "#/$defs/imageSpec" },
+            "rust":    { "$ref": "#/$defs/imageSpec" }
+          }
+        },
         "socketProxy":  { "$ref": "#/$defs/imageSpec" }
+      }
+    },
+    "kubernetesNetwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiServerCIDR", "apiServerPort", "dnsCIDR"],
+      "properties": {
+        "apiServerCIDR": {
+          "type": "string",
+          "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/32$"
+        },
+        "apiServerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "dnsCIDR": {
+          "type": "string",
+          "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/32$"
+        }
       }
     },
     "scope": {
@@ -88,7 +119,8 @@
         "dnsNames":   { "type": "array", "items": { "type": "string" } }
       }
     },
-    "replicaCount": { "type": "integer", "minimum": 1 },
+    "replicaCount": { "type": "integer", "const": 1 },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 90 },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
@@ -114,7 +146,8 @@
       "additionalProperties": false,
       "properties": {
         "type": { "type": "string" },
-        "port": { "type": "integer" }
+        "port":      { "type": "integer" },
+        "statePort": { "type": "integer" }
       }
     },
     "extraEnv":       { "type": "array" },

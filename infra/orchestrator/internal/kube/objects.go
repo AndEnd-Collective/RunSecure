@@ -13,9 +13,11 @@
 //   - No host namespaces (hostNetwork/hostPID/hostIPC all false).
 //   - No hostPath volumes.
 //   - RunnerPod.Spec.RestartPolicy = Never (one-shot CI runner).
-//   - ProxySecret JIT key is projected with defaultMode 0o400.
+//   - Secret keys are projected with defaultMode 0o440 and fsGroup 1001, so
+//     non-root processes can read them without granting world access.
 //   - NetworkPolicies enforce default-deny + explicit allow-lists so the runner
-//     can ONLY reach the proxy and the proxy can ONLY reach kube-dns + internet.
+//     can only reach cluster DNS and its proxy, while the proxy can only reach
+//     cluster DNS plus its configured external/private destinations.
 package kube
 
 import (
@@ -24,6 +26,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -48,13 +51,6 @@ const (
 	// runnerUID is the non-root UID used for both runner and proxy containers
 	// (matches the hardened image layer: UID 1001 is created in base.Dockerfile).
 	runnerUID = int64(1001)
-
-	// kubeDNSClusterIP is the well-known kube-dns cluster IP in standard
-	// Kubernetes distributions. Used by ProxyEgressNetworkPolicy to explicitly
-	// allow outbound DNS from the proxy pod.
-	// TODO(egress): replace this with a dynamic look-up or a configurable field
-	// once the egress package exposes parsed CIDRs (Phase 2 Task 5).
-	kubeDNSClusterIP = "10.96.0.10/32"
 
 	// worldCIDR is the catch-all for external internet egress in
 	// ProxyEgressNetworkPolicy. The proxy enforces domain allow-lists at L7
@@ -91,10 +87,16 @@ func Namespace(scope string) string {
 func Labels(in backend.SpawnInput, role string) map[string]string {
 	return map[string]string{
 		LabelScope:   in.Scope,
-		LabelRepo:    strings.ReplaceAll(in.Repo, "/", "_"),
+		LabelRepo:    RepoLabel(in.Repo),
 		LabelSpawnID: in.SpawnID,
 		LabelRole:    role,
 	}
+}
+
+// RepoLabel returns the canonical Kubernetes label value for a GitHub
+// repository identity.
+func RepoLabel(repo string) string {
+	return strings.ReplaceAll(repo, "/", "_")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -107,15 +109,15 @@ func ptr[T any](v T) *T { return &v }
 // hardPodSecCtx returns the pod-level PodSecurityContext shared by every pod
 // in the stack.
 //
-// FSGroup is set to runnerUID (1001) so that k8s chowns Secret and ConfigMap
-// volume files to GID 1001 at mount time. Without FSGroup, Secret volume files
-// are owned by root:root; a defaultMode of 0o400 would then be unreadable by
-// UID 1001 (EPERM). Setting FSGroup=1001 makes mounted files 1001:1001 with
-// mode 0o400 (-r--------), which UID 1001 can read as the file owner.
+// FSGroup is set to runnerUID (1001) so Kubernetes exposes projected Secret
+// files as root:1001. defaultMode 0o440 then grants the non-root process group
+// read access without granting any world permission. RunAsGroup fixes the
+// primary GID as well; fsGroup remains the projected-volume ownership control.
 func hardPodSecCtx() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
 		RunAsNonRoot: ptr(true),
 		RunAsUser:    ptr(runnerUID),
+		RunAsGroup:   ptr(runnerUID),
 		FSGroup:      ptr(runnerUID),
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -200,8 +202,6 @@ func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte)
 
 	return &corev1.Secret{
 		ObjectMeta: objectMeta(name, ns, labels),
-		// defaultMode 0o400 — read-only by the owning UID; no group/world access.
-		// Individual volumes that mount from this Secret should also specify mode 0o400.
 		Immutable:  ptr(false), // allow the orchestrator to patch egress configs
 		StringData: sd,
 	}
@@ -211,39 +211,35 @@ func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte)
 // ProxyPod
 // ──────────────────────────────────────────────────────────────────────────────
 
-// ProxyPod builds the proxy Pod (Squid + HAProxy + optional dnsmasq).
-//
-//   - 2 containers when EnableDNSMasq is false (squid, haproxy).
-//   - 3 containers when EnableDNSMasq is true  (squid, haproxy, dnsmasq).
+// ProxyPod builds one proxy-supervisor container. The proxy image entrypoint
+// starts Squid, HAProxy, and optional dnsmasq and exits fail-closed if any
+// child exits. Running one copy per daemon would start Squid in every
+// container and cause port collisions because containers in a Pod share a
+// network namespace.
 //
 // The proxy egress configs are mounted from secretName under /etc/runsecure
-// with mode 0o400 using KeyToPath projection (jit-config is NOT projected here;
+// with mode 0o440 using KeyToPath projection (jit-config is NOT projected here;
 // the runner pod mounts that key separately).
 func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 	ns := Namespace(in.Scope)
 	labels := Labels(in, RoleProxy)
 
 	// Secret volume projects only the proxy config keys (not jit-config).
+	secretItems := []corev1.KeyToPath{
+		{Key: "squid.conf", Path: "squid.conf"},
+		{Key: "haproxy.cfg", Path: "haproxy.cfg"},
+	}
+	if in.EnableDNSMasq {
+		secretItems = append(secretItems,
+			corev1.KeyToPath{Key: "dnsmasq.conf", Path: "dnsmasq.conf"})
+	}
 	secretVolume := corev1.Volume{
 		Name: "jit-secret",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  secretName,
-				DefaultMode: ptr(int32(0o400)),
-				Items: []corev1.KeyToPath{
-					{Key: "squid.conf", Path: "squid.conf"},
-					{Key: "haproxy.cfg", Path: "haproxy.cfg"},
-					{Key: "dnsmasq.conf", Path: "dnsmasq.conf"},
-				},
-			},
-		},
-	}
-	// tmpfs for writable ephemeral state the proxy processes need.
-	tmpVolume := corev1.Volume{
-		Name: "tmp",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium: corev1.StorageMediumMemory,
+				DefaultMode: ptr(int32(0o440)),
+				Items:       secretItems,
 			},
 		},
 	}
@@ -253,10 +249,30 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		MountPath: "/etc/runsecure",
 		ReadOnly:  true,
 	}
-	tmpMount := corev1.VolumeMount{
-		Name:      "tmp",
-		MountPath: "/tmp",
-		ReadOnly:  false,
+	writablePaths := []struct {
+		name string
+		path string
+	}{
+		{name: "tmp", path: "/tmp"},
+		{name: "run", path: "/run"},
+		{name: "squid-run", path: "/var/run/squid"},
+		{name: "squid-log", path: "/var/log/squid"},
+		{name: "squid-spool", path: "/var/spool/squid"},
+		{name: "haproxy-lib", path: "/var/lib/haproxy"},
+	}
+	volumes := []corev1.Volume{secretVolume}
+	mounts := []corev1.VolumeMount{secretMount}
+	for _, writable := range writablePaths {
+		sizeLimit := resource.MustParse("64Mi")
+		volumes = append(volumes, corev1.Volume{
+			Name: writable.name,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory, SizeLimit: &sizeLimit,
+			}},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: writable.name, MountPath: writable.path, ReadOnly: false,
+		})
 	}
 
 	// Common env vars for all proxy containers.
@@ -270,43 +286,28 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		proxyEnv = append(proxyEnv, corev1.EnvVar{Name: "ENABLE_DNSMASQ", Value: "true"})
 	}
 
-	squid := corev1.Container{
-		Name:            "squid",
-		Image:           in.ProxyImage,
-		ImagePullPolicy: corev1.PullAlways,
-		SecurityContext: hardContainerSecCtx(),
-		Env:             proxyEnv,
-		VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
-		Ports: []corev1.ContainerPort{
-			{Name: "squid", ContainerPort: proxyPort, Protocol: corev1.ProtocolTCP},
-		},
+	ports := []corev1.ContainerPort{
+		{Name: "squid", ContainerPort: proxyPort, Protocol: corev1.ProtocolTCP},
 	}
-	haproxy := corev1.Container{
-		Name:            "haproxy",
-		Image:           in.ProxyImage,
-		ImagePullPolicy: corev1.PullAlways,
-		SecurityContext: hardContainerSecCtx(),
-		Env:             proxyEnv,
-		VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
-		Args:            []string{"haproxy"},
+	for index, port := range in.TCPEgressPorts {
+		ports = append(ports, corev1.ContainerPort{
+			Name: fmt.Sprintf("tcp-%d", index), ContainerPort: int32(port), Protocol: corev1.ProtocolTCP,
+		})
 	}
-
-	containers := []corev1.Container{squid, haproxy}
 	if in.EnableDNSMasq {
-		dnsmasq := corev1.Container{
-			Name:            "dnsmasq",
-			Image:           in.ProxyImage,
-			ImagePullPolicy: corev1.PullAlways,
-			SecurityContext: hardContainerSecCtx(),
-			Env:             proxyEnv,
-			VolumeMounts:    []corev1.VolumeMount{secretMount, tmpMount},
-			Args:            []string{"dnsmasq"},
-			Ports: []corev1.ContainerPort{
-				{Name: "dns-udp", ContainerPort: dnsPort, Protocol: corev1.ProtocolUDP},
-				{Name: "dns-tcp", ContainerPort: dnsPort, Protocol: corev1.ProtocolTCP},
-			},
-		}
-		containers = append(containers, dnsmasq)
+		ports = append(ports,
+			corev1.ContainerPort{Name: "dns-udp", ContainerPort: dnsPort, Protocol: corev1.ProtocolUDP},
+			corev1.ContainerPort{Name: "dns-tcp", ContainerPort: dnsPort, Protocol: corev1.ProtocolTCP},
+		)
+	}
+	proxy := corev1.Container{
+		Name:            "proxy",
+		Image:           in.ProxyImage,
+		ImagePullPolicy: corev1.PullAlways,
+		SecurityContext: hardContainerSecCtx(),
+		Env:             proxyEnv,
+		VolumeMounts:    mounts,
+		Ports:           ports,
 	}
 
 	return &corev1.Pod{
@@ -318,8 +319,8 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 			HostPID:                      false,
 			HostIPC:                      false,
 			SecurityContext:              hardPodSecCtx(),
-			Volumes:                      []corev1.Volume{secretVolume, tmpVolume},
-			Containers:                   containers,
+			Volumes:                      volumes,
+			Containers:                   []corev1.Container{proxy},
 		},
 	}
 }
@@ -379,7 +380,7 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  secretName,
-				DefaultMode: ptr(int32(0o400)),
+				DefaultMode: ptr(int32(0o440)),
 				Items: []corev1.KeyToPath{
 					{Key: "jit-config", Path: "jit-config"},
 				},
@@ -528,11 +529,13 @@ func DefaultDenyNetworkPolicy(scope string) *networkingv1.NetworkPolicy {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // RunnerEgressNetworkPolicy returns a NetworkPolicy that restricts the runner
-// Pod to egress ONLY to the proxy Pod on the explicitly listed ports:
+// Pod to cluster DNS plus the proxy Pod on the explicitly listed ports:
 //
 //   - 3128/TCP   — HTTP CONNECT (always).
 //   - 53/UDP+TCP  — dnsmasq (only when EnableDNSMasq is true).
 //   - Each port in TCPEgressPorts.
+//   - 53/UDP+TCP to the exact operator-configured cluster DNS /32 so the proxy
+//     Service DNS name can be resolved without opening general egress.
 //
 // All other egress from the runner is denied by the DefaultDenyNetworkPolicy.
 // No Ingress rule is created — the runner must not accept inbound connections.
@@ -574,6 +577,16 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 		},
 	}
 
+	dnsRule := networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{{
+			IPBlock: &networkingv1.IPBlock{CIDR: in.KubeDNSCIDR},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: &udpProto, Port: ptrIntStr(dnsPort)},
+			{Protocol: &tcpProto, Port: ptrIntStr(dnsPort)},
+		},
+	}
+
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: objectMeta(spawnResourceName("runner-egress", in.SpawnID), ns, labels),
 		Spec: networkingv1.NetworkPolicySpec{
@@ -591,6 +604,7 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 					To:    []networkingv1.NetworkPolicyPeer{proxyPeer},
 					Ports: ports,
 				},
+				dnsRule,
 			},
 		},
 	}
@@ -611,8 +625,9 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 // The proxy enforces a domain allow-list at L7 via Squid's ACLs. The
 // NetworkPolicy here cannot replicate that fidelity without a per-domain CIDR
 // list. Using 0.0.0.0/0 is acceptable because:
-//   - The runner is restricted to "proxy only" by RunnerEgressNetworkPolicy —
-//     it cannot bypass the proxy to reach the internet directly.
+//   - The runner is restricted to cluster DNS plus its proxy by
+//     RunnerEgressNetworkPolicy; it cannot bypass the proxy to reach the
+//     internet directly.
 //   - The proxy's Squid config (rendered by internal/egress) enforces L7
 //     allow-lists; any attempt by a compromised proxy process to reach a
 //     non-allow-listed domain is rejected by Squid itself.
@@ -626,12 +641,12 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 	tcpProto := corev1.ProtocolTCP
 	udpProto := corev1.ProtocolUDP
 
-	// Rule 1: DNS to kube-dns (well-known cluster IP).
+	// Rule 1: DNS to the operator-configured cluster DNS service address.
 	dnsRule := networkingv1.NetworkPolicyEgressRule{
 		To: []networkingv1.NetworkPolicyPeer{
 			{
 				IPBlock: &networkingv1.IPBlock{
-					CIDR: kubeDNSClusterIP,
+					CIDR: in.KubeDNSCIDR,
 				},
 			},
 		},

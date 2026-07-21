@@ -38,6 +38,7 @@ func newPollDeps(t *testing.T) *pollDeps {
 
 func (d *pollDeps) IntentChannel() chan<- SpawnIntent { return d.intents }
 func (d *pollDeps) InFlight(repo string) int          { return d.st.InFlight(repo) }
+func (d *pollDeps) DemandCoverage(repo string) int    { return d.st.DemandCoverage(repo) }
 func (d *pollDeps) GlobalInFlight() int               { return d.st.GlobalInFlight() }
 func (d *pollDeps) SchedulingBlocked() bool           { return d.st.SchedulingBlocked() }
 func (d *pollDeps) BreakerIsOpen(repo string) bool    { return d.breakers.IsOpen(repo) }
@@ -156,6 +157,48 @@ func TestPoll_ReservationsPreventDuplicateCapacityAcrossTicks(t *testing.T) {
 	p.tick(context.Background())
 	p.tick(context.Background())
 	require.Len(t, d.intents, 3, "second poll must not duplicate pending capacity")
+	require.Equal(t, 3, d.st.GlobalInFlight())
+}
+
+func TestPoll_OneQueuedJobCannotReserveDuplicateSlowRunner(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 1
+	srv.mu.Unlock()
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+
+	p.tick(context.Background())
+	p.tick(context.Background())
+	p.tick(context.Background())
+
+	require.Len(t, d.intents, 1,
+		"pending capacity already covers the still-queued GitHub job")
+	require.Equal(t, 1, d.st.DemandCoverage("o/r"))
+}
+
+func TestPoll_AssignedRunnerDoesNotCoverAnotherQueuedJob(t *testing.T) {
+	d := newPollDeps(t)
+	gh, srv := newFakeGitHubClient(t)
+	d.gh = gh
+	p := NewPoll(ScopeRef{
+		Name: "s", GlobalMaxRunners: 3, PollIntervalSec: 5,
+		Repos: []RepoRef{{Repo: "o/r", MaxConcurrent: 3}},
+	}, d)
+	require.True(t, d.st.TryReserve("assigned", "o/r", 3, 3, d.clk.Now()))
+	require.True(t, d.st.MarkAssigned("assigned", d.clk.Now()))
+	srv.mu.Lock()
+	srv.queuedFor["o/r"] = 2
+	srv.mu.Unlock()
+
+	p.tick(context.Background())
+
+	require.Len(t, d.intents, 2,
+		"assigned work has left GitHub's queued set and must not be subtracted")
 	require.Equal(t, 3, d.st.GlobalInFlight())
 }
 

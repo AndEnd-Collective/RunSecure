@@ -58,6 +58,8 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     environment: ghcr-publish
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_date: ${{ steps.meta.outputs.build_date }}
@@ -76,6 +78,23 @@ jobs:
           else
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Check out the tagged source for stable-release provenance
+        if: github.event_name == 'push'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Prove the release tag is already merged to main
+        if: github.event_name == 'push'
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "$RELEASE_TAG" "$BUILD_SHA"
 
       - name: Compute build metadata (single source of truth for all jobs)
         id: meta
@@ -536,7 +555,8 @@ jobs:
   # are found WITH a fix available (unfixed CVEs upload to the Security tab
   # but don't block — chasing unfixable issues creates noise).
   #
-  # Syft and Grype are installed directly (not via anchore/scan-action) because the
+  # Syft and Grype are installed through a commit/version/checksum-pinned wrapper
+  # (not via anchore/scan-action) because the
   # action wrapper bundles a pinned grype binary that periodically fails
   # with "vulnerability database was built N weeks ago" when the upstream
   # CDN drifts past the pinned grype's tolerance.
@@ -544,10 +564,17 @@ jobs:
     needs: [gate, base]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable base digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-base
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -555,25 +582,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Syft + Grype (latest catalogers and CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          syft version
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (base image) — fail on HIGH/CRITICAL with fix
-        # IMAGE_REF is computed in step `env:` rather than job `env:` because
-        # job-level env evaluates BEFORE workflow-level env is in scope, so
-        # `${{ env.IMAGE_PREFIX }}` resolves empty there. Step-level env is
-        # evaluated when the step runs and resolves correctly.
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/base:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-base.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/base
         run: |
           set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
           bash infra/scripts/grype-scan-image.sh \
             "$IMAGE_REF" grype-base.sarif ca-certificates
 
@@ -591,6 +620,7 @@ jobs:
     needs: [gate, languages]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     strategy:
@@ -603,26 +633,42 @@ jobs:
             expected_dpkg_package: nodejs
             expected_cataloger: javascript-package-cataloger
             expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
           - name: node
             lang_version: "22"
             sarif_name: node-22
             expected_dpkg_package: nodejs
             expected_cataloger: javascript-package-cataloger
             expected_cataloger_package: npm
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
           - name: python
             lang_version: "3.12"
             sarif_name: python-3.12
             expected_dpkg_package: ca-certificates
             expected_cataloger: python-installed-package-cataloger
             expected_cataloger_package: pip
+            expected_presence_cataloger: ''
+            expected_presence_package: ''
           - name: rust
             lang_version: stable
             sarif_name: rust-stable
             expected_dpkg_package: ca-certificates
             expected_cataloger: ''
             expected_cataloger_package: ''
+            # rustup ships rustc outside a package database. Prove the exact
+            # Rust binary separately; this heuristic SBOM is never fed to Grype.
+            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_package: rust
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable terminal-image digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-${{ matrix.name }}-${{ matrix.lang_version }}
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -630,29 +676,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Syft + Grype (latest catalogers and CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          syft version
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (terminal language image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:${{ needs.gate.outputs.version }}-canary-${{ matrix.lang_version }}"
+          DIGEST_FILE: .scan-digest/release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
           SARIF_FILE: "grype-${{ matrix.sarif_name }}.sarif"
           EXPECTED_DPKG_PACKAGE: ${{ matrix.expected_dpkg_package }}
           EXPECTED_CATALOGER: ${{ matrix.expected_cataloger }}
           EXPECTED_CATALOGER_PACKAGE: ${{ matrix.expected_cataloger_package }}
+          EXPECTED_PRESENCE_CATALOGER: ${{ matrix.expected_presence_cataloger }}
+          EXPECTED_PRESENCE_PACKAGE: ${{ matrix.expected_presence_package }}
         run: |
           set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
           bash infra/scripts/grype-scan-image.sh \
             "$IMAGE_REF" "$SARIF_FILE" \
             "$EXPECTED_DPKG_PACKAGE" "$EXPECTED_CATALOGER" \
-            "$EXPECTED_CATALOGER_PACKAGE"
+            "$EXPECTED_CATALOGER_PACKAGE" \
+            "$EXPECTED_PRESENCE_CATALOGER" "$EXPECTED_PRESENCE_PACKAGE"
 
       - name: Upload Grype scan results (terminal language image)
         if: always() && hashFiles(format('grype-{0}.sarif', matrix.sarif_name)) != ''
@@ -666,10 +721,17 @@ jobs:
     needs: [gate, proxy]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable proxy digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-proxy
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -677,21 +739,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Syft + Grype (latest catalogers and CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          syft version
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/proxy:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-proxy.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/proxy
         run: |
           set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
           bash infra/scripts/grype-scan-image.sh \
             "$IMAGE_REF" grype-proxy.sarif squid
 
@@ -709,10 +777,17 @@ jobs:
     needs: [gate, orchestrator]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable orchestrator digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-orchestrator
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -720,21 +795,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Syft + Grype (latest catalogers and CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          syft version
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (orchestrator image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/orchestrator:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-orchestrator.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/orchestrator
         run: |
           set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
           bash infra/scripts/grype-scan-image.sh \
             "$IMAGE_REF" grype-orchestrator.sarif \
             '' go-module-binary-cataloger ''
@@ -753,10 +834,17 @@ jobs:
     needs: [gate, socket-proxy]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download immutable socket-proxy digest from this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-digest-socket-proxy
+          path: .scan-digest
 
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -764,21 +852,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Syft + Grype (latest catalogers and CVE DB)
+      - name: Install checksum-pinned Syft + Grype
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin
-          syft version
-          grype version
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
       - name: Grype scan (socket-proxy image) — fail on HIGH/CRITICAL with fix
         env:
-          IMAGE_REF: "${{ env.IMAGE_PREFIX }}/socket-proxy:${{ needs.gate.outputs.version }}-canary"
+          DIGEST_FILE: .scan-digest/release-digest-socket-proxy.txt
+          EXPECTED_IMAGE: ${{ env.IMAGE_PREFIX }}/socket-proxy
         run: |
           set -euo pipefail
+          IFS= read -r IMAGE_REF < "$DIGEST_FILE"
+          if [[ "$IMAGE_REF" != "${EXPECTED_IMAGE}@"* ]]; then
+            echo "::error::Scan digest artifact names an unexpected image: $IMAGE_REF"
+            exit 1
+          fi
+          DIGEST="${IMAGE_REF#"${EXPECTED_IMAGE}"@}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Scan digest artifact is not immutable: $IMAGE_REF"
+            exit 1
+          fi
           bash infra/scripts/grype-scan-image.sh \
             "$IMAGE_REF" grype-socket-proxy.sarif \
             '' go-module-binary-cataloger ''

@@ -67,6 +67,10 @@ func readinessReasons(snap state.Snapshot, now time.Time, pollIntervalSeconds in
 		if repoState.LastPollError != "" {
 			reasons = append(reasons, "poll_error:"+repo+":"+repoState.LastPollError)
 		}
+		for operation, operationErr := range repoState.RunnerOperationError {
+			reasons = append(reasons, "runner_operation_error:"+repo+":"+
+				operation+":"+operationErr.Class)
+		}
 		if repoState.BreakerOpen {
 			reasons = append(reasons, "breaker_open:"+repo)
 		}

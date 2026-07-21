@@ -155,8 +155,16 @@ func TestValidate_Backend_Compose_Accepted(t *testing.T) {
 // TestValidate_Backend_Kube_Accepted verifies that "kube" is a valid backend
 // value and that project_dir is NOT required when the kube backend is selected.
 func TestValidate_Backend_Kube_Accepted(t *testing.T) {
-	s := makeScope(t, func(s *Scope) { s.Backend = "kube" })
+	s := makeScope(t, func(s *Scope) {
+		s.Backend = "kube"
+		require.NoError(t, os.Chmod(s.Auth.PATFile, 0o440))
+	})
 	require.NoError(t, s.Validate())
+}
+
+func TestValidate_Backend_Kube_RejectsComposeOnlySecretMode(t *testing.T) {
+	s := makeScope(t, func(s *Scope) { s.Backend = "kube" })
+	require.ErrorContains(t, s.Validate(), "mode 0440")
 }
 
 // TestValidate_Backend_Kube_NoProjectDir verifies that repos without project_dir
@@ -164,6 +172,7 @@ func TestValidate_Backend_Kube_Accepted(t *testing.T) {
 func TestValidate_Backend_Kube_NoProjectDir(t *testing.T) {
 	s := makeScope(t, func(s *Scope) {
 		s.Backend = "kube"
+		require.NoError(t, os.Chmod(s.Auth.PATFile, 0o440))
 		// Strip the project_dir; kube backend must NOT require it.
 		s.Repos[0].ProjectDir = ""
 	})
@@ -176,6 +185,7 @@ func TestValidate_Backend_Kube_NoProjectDir(t *testing.T) {
 func TestValidate_Backend_Kube_NonexistentProjectDir(t *testing.T) {
 	s := makeScope(t, func(s *Scope) {
 		s.Backend = "kube"
+		require.NoError(t, os.Chmod(s.Auth.PATFile, 0o440))
 		s.Repos[0].ProjectDir = "/nonexistent/path"
 	})
 	require.NoError(t, s.Validate(),
@@ -285,4 +295,13 @@ func TestValidate_GitHubApp_PrivateKeyFileMode0400Required(t *testing.T) {
 	s := makeAppScope(t, nil)
 	require.NoError(t, os.Chmod(s.Auth.PrivateKeyFile, 0o644))
 	require.ErrorContains(t, s.Validate(), "mode 0400")
+}
+
+func TestValidate_GitHubApp_KubeSecretMode0440(t *testing.T) {
+	s := makeAppScope(t, func(s *Scope) {
+		s.Backend = "kube"
+		require.NoError(t, os.Chmod(s.Auth.PrivateKeyFile, 0o440))
+		s.Repos[0].ProjectDir = ""
+	})
+	require.NoError(t, s.Validate())
 }

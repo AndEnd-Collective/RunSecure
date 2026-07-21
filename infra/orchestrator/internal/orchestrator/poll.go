@@ -126,13 +126,19 @@ func (p *Poll) tick(ctx context.Context) {
 		repoAvail := repo.MaxConcurrent - p.deps.InFlight(repo.Repo)
 		globalAvail := p.scope.GlobalMaxRunners - p.deps.GlobalInFlight()
 		avail := max(min(repoAvail, globalAvail), 0)
-		toSpawn := min(queued, avail)
+		// GitHub continues to report a job as queued while a reserved JIT
+		// runner is registering or online but not yet assigned. Subtract that
+		// repo-specific delivered capacity before reserving again; otherwise a
+		// slow registration can create one runner per poll for one job.
+		uncoveredDemand := max(queued-p.deps.DemandCoverage(repo.Repo), 0)
+		toSpawn := min(uncoveredDemand, avail)
 
 		for i := 0; i < toSpawn; i++ {
 			intent := SpawnIntent{
-				Scope:   p.scope.Name,
-				Repo:    repo.Repo,
-				SpawnID: p.deps.NewSpawnID(),
+				Scope:         p.scope.Name,
+				Repo:          repo.Repo,
+				SpawnID:       p.deps.NewSpawnID(),
+				CandidateJobs: append([]github.WorkflowJob(nil), demand.Jobs...),
 			}
 			if !p.deps.TryReserve(intent.SpawnID, intent.Repo, repo.MaxConcurrent, p.scope.GlobalMaxRunners) {
 				break

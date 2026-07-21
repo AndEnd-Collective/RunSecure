@@ -183,10 +183,9 @@ wait_for_pod_ready "${NS}" "rs-proxy-spawn02" 120
 log "Sleeping 10s for Calico NetworkPolicy programming to converge..."
 sleep 10
 
-# Resolve ClusterIPs before NetworkPolicy assertions.
-# The RunnerEgressNetworkPolicy (objects.go) does NOT grant DNS egress from the runner
-# pod — the runner is isolated to proxy-only. We must use ClusterIPs (not DNS names)
-# for nc -z tests inside the runner pod to avoid false failures from DNS timeouts.
+# Resolve ClusterIPs before NetworkPolicy assertions. The own-proxy assertion
+# intentionally uses the Service DNS name so the test proves both the exact
+# cluster-DNS /32 rule and the same-spawn proxy path.
 PROXY_SVC_IP=$(kubectl get svc rs-proxy-svc-spawn01 -n "${NS}" \
   -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
 PROXY_SVC2_IP=$(kubectl get svc rs-proxy-svc-spawn02 -n "${NS}" \
@@ -205,15 +204,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 log "=== Step 5: NetworkPolicy assertions ==="
 
-# 5a. Runner → proxy (spawn01) on 3128 MUST succeed.
-# Use ClusterIP directly (no DNS) — the runner has no kube-dns egress by design
-# (RunnerEgressNetworkPolicy only allows TCP 3128 to the proxy pod selector).
-log "5a. runner → own proxy ClusterIP (${PROXY_SVC_IP}:3128) — MUST succeed..."
+# 5a. Runner → proxy (spawn01) through its Service DNS name MUST succeed.
+PROXY_SVC_DNS="rs-proxy-svc-spawn01.${NS}.svc"
+log "5a. runner → own proxy DNS (${PROXY_SVC_DNS}:3128) — MUST succeed..."
 if kubectl exec rs-runner-spawn01 -n "${NS}" -c runner -- \
-    nc -z -w 10 "${PROXY_SVC_IP}" 3128 2>/dev/null; then
-  pass "NetworkPolicy: runner can reach own proxy on ${PROXY_SVC_IP}:3128 (TCP connect succeeded)"
+    nc -z -w 10 "${PROXY_SVC_DNS}" 3128 2>/dev/null; then
+  pass "NetworkPolicy: runner resolved and reached own proxy at ${PROXY_SVC_DNS}:3128"
 else
-  fail "NetworkPolicy: runner CANNOT reach own proxy on ${PROXY_SVC_IP}:3128 — should be allowed"
+  fail "NetworkPolicy: runner CANNOT resolve/reach own proxy at ${PROXY_SVC_DNS}:3128"
 fi
 
 # 5b. Runner → internet (1.1.1.1) MUST fail (blocked by default-deny + RunnerEgress only allows proxy)
@@ -368,6 +366,39 @@ if helm install rs-helm-dryrun "${CHART_DIR}" \
   pass "Helm: dry-run install succeeded against live cluster"
 else
   fail "Helm: dry-run install failed"
+fi
+
+# 7c. Runtime wiring parity: a rendered Kubernetes deployment must be able to
+# initialize and spawn without Docker/socket-proxy, must receive every exact
+# runtime image reference, and must use truthful readiness + readable Secret
+# projections.
+log "7c. helm runtime wiring matches Kubernetes backend contract..."
+HELM_RUNTIME_MANIFEST=$(helm template rs-runtime "${CHART_DIR}" \
+  -f "${MANIFESTS}/helm-test-values.yaml" \
+  --set scope.name=itest 2>/dev/null || echo "")
+RUNTIME_WIRING_OK=1
+for name in RUNSECURE_PROXY_IMAGE RUNSECURE_RUNNER_IMAGE_DEFAULT \
+  RUNSECURE_RUNNER_IMAGE_NODE RUNSECURE_RUNNER_IMAGE_PYTHON \
+  RUNSECURE_RUNNER_IMAGE_RUST RUNSECURE_EGRESS_BASE_DIR \
+  RUNSECURE_KUBE_API_SERVER_CIDR RUNSECURE_KUBE_API_SERVER_PORT \
+  RUNSECURE_KUBE_DNS_CIDR; do
+  if ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q -- "- name: ${name}"; then
+    RUNTIME_WIRING_OK=0
+  fi
+done
+if echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'DOCKER_HOST\|socket-proxy:2375'; then
+  RUNTIME_WIRING_OK=0
+fi
+if ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'path: /readyz' ||
+   ! echo "${HELM_RUNTIME_MANIFEST}" | grep -Eq 'defaultMode: (288|0440)' ||
+   ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'type: Recreate' ||
+   ! echo "${HELM_RUNTIME_MANIFEST}" | grep -q 'terminationGracePeriodSeconds: 90'; then
+  RUNTIME_WIRING_OK=0
+fi
+if [[ "${RUNTIME_WIRING_OK}" -eq 1 ]]; then
+  pass "Helm: Kubernetes runtime wiring is Docker-free, immutable, readable, and readiness-aware"
+else
+  fail "Helm: Kubernetes runtime wiring contract is incomplete"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

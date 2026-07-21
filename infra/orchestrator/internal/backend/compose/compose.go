@@ -92,11 +92,6 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 		EnableDNSMasq:      in.EnableDNSMasq,
 		Labels:             in.Labels,
 	})
-	if err != nil {
-		_ = b.c.DeleteNetwork(ctx, netID)
-		return backend.Handle{}, fmt.Errorf("compose: spawn containers: %w", err)
-	}
-
 	refs := map[string]string{
 		"network":           netID,
 		"network_name":      netName,
@@ -105,12 +100,25 @@ func (b *composeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (back
 	for role, id := range containerIDs {
 		refs[role] = id
 	}
-
-	return backend.Handle{
+	h := backend.Handle{
 		SpawnID: in.SpawnID,
 		Backend: "compose",
 		Refs:    refs,
-	}, nil
+	}
+	if err != nil {
+		networkErr := b.c.DeleteNetwork(ctx, netID)
+		spawnErr := fmt.Errorf("compose: spawn containers: %w", err)
+		if docker.HasIncompleteRollback(err) || networkErr != nil {
+			if networkErr != nil {
+				spawnErr = errors.Join(spawnErr,
+					fmt.Errorf("compose: rollback network %s: %w", netID, networkErr))
+			}
+			return h, spawnErr
+		}
+		return backend.Handle{}, spawnErr
+	}
+
+	return h, nil
 }
 
 // WaitForExit polls InspectContainer on the runner container until it reports

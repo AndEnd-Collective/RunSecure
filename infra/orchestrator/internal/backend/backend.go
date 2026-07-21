@@ -53,6 +53,12 @@ type SpawnInput struct {
 	// config (rendered by internal/egress) already lists the ports explicitly.
 	TCPEgressPorts []int
 
+	// KubeDNSCIDR is the operator-configured cluster DNS service address used
+	// by Kubernetes NetworkPolicies. Compose ignores it. It is required for the
+	// kube backend because both the runner (to resolve its proxy Service) and
+	// the proxy (to resolve approved destinations) need DNS under default-deny.
+	KubeDNSCIDR string
+
 	// AllowedPrivateCIDRs is the set of operator-approved private CIDRs from
 	// the resolved security Policy (allow_private_cidrs scope override).
 	// Each entry is in canonical CIDR notation (e.g. "172.17.0.0/16").

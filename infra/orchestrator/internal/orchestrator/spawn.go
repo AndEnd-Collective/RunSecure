@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,32 @@ import (
 // constant covers bare docker / integration-test environments that do not run
 // through compose.
 const egressNetworkFallback = "runsecure-egress"
+
+const (
+	runnerOperationGenerateJIT   = "generate_jit_config"
+	runnerOperationGetRunner     = "get_runner"
+	runnerOperationGetJob        = "get_workflow_job"
+	runnerOperationFindRecentJob = "find_recent_workflow_job"
+	runnerOperationDelete        = "delete_runner"
+	// JITOwnerLabel and JITScopeLabelPrefix make a registration discoverable
+	// after both the worker process and its backend resources are gone.
+	JITOwnerLabel       = "runsecure-jit"
+	JITScopeLabelPrefix = "runsecure-scope-"
+)
+
+func jitRunnerLabels(scope string, configured []string) []string {
+	labels := make([]string, 0, len(configured)+2)
+	seen := make(map[string]bool, len(configured)+2)
+	for _, label := range append(append([]string(nil), configured...),
+		JITOwnerLabel, JITScopeLabelPrefix+scope) {
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		labels = append(labels, label)
+	}
+	return labels
+}
 
 // egressNetworkName returns the Docker network name the proxy container is
 // attached to for outbound internet access. It reads RUNSECURE_EGRESS_NETWORK
@@ -117,11 +144,19 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// Step 1: generate JIT.
 	jit, err := w.deps.GitHub().GenerateJITConfig(ctx, intent.Repo, github.JITConfigRequest{
 		Name:   containerName,
-		Labels: snapshot.YML.Labels,
+		Labels: jitRunnerLabels(intent.Scope, snapshot.YML.Labels),
 	})
+	w.recordRunnerOperation(intent.Repo, runnerOperationGenerateJIT, err)
 	if err != nil {
 		reason := classifyJITError(err)
 		w.pauseForRateLimit(intent.Scope, err)
+		if jit.RunnerID > 0 {
+			// GitHub creates the runner before the response can fail local
+			// validation. Preserve its identity and clean it exactly like every
+			// other post-JIT failure.
+			w.deps.State().RecordJIT(intent.SpawnID, jit.RunnerID, containerName)
+			return w.failAndLeak(ctx, intent, containerName, reason, err, jit.RunnerID)
+		}
 		return w.fail(intent, containerName, reason, err)
 	}
 	_ = w.deps.Emit().EmitSpawnJITAcquired(cornerstone.SpawnJITAcquiredFields{
@@ -154,9 +189,6 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	tcpEgressPorts := make([]int, 0, len(r.TCPEgress))
 	for _, entry := range r.TCPEgress {
 		colon := strings.LastIndex(entry, ":")
-		if colon < 0 {
-			continue
-		}
 		var port int
 		if _, err := fmt.Sscanf(entry[colon+1:], "%d", &port); err == nil && port > 0 {
 			tcpEgressPorts = append(tcpEgressPorts, port)
@@ -181,10 +213,26 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		EgressVolume:        egressVolumeName(),
 		EnableDNSMasq:       enableDNSMasq,
 		TCPEgressPorts:      tcpEgressPorts,
+		KubeDNSCIDR:         os.Getenv("RUNSECURE_KUBE_DNS_CIDR"),
 		AllowedPrivateCIDRs: allowedPrivateCIDRs,
 	}
 	h, err := w.deps.Backend().Spawn(ctx, spawnIn)
 	if err != nil {
+		if h.Backend != "" {
+			// A non-empty handle on failure means backend rollback was not
+			// proven complete. Retry that exact handle and the JIT registration
+			// under one retained reservation.
+			cleanupResult := w.settlePartialSpawn(
+				ctx, intent, containerName, h, err, jit.RunnerID,
+			)
+			if !w.deps.State().HasReservation(intent.SpawnID, intent.Repo) {
+				_ = w.deps.Emit().EmitRunnerLeakCleaned(cornerstone.RunnerLeakCleanedFields{
+					Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+					GitHubRunnerID: jit.RunnerID,
+				})
+			}
+			return w.fail(intent, containerName, classifyDockerError(err), cleanupResult)
+		}
 		return w.failAndLeak(ctx, intent, containerName, classifyDockerError(err), err, jit.RunnerID)
 	}
 
@@ -211,31 +259,26 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	// always receives a fresh bounded context so cancellation cannot leak the
 	// runner/proxy resources.
 	teardownErr := teardownSpawn(ctx, w.deps.Backend(), h, timedOut || lifecycle.err != nil)
+	deregisterErr := w.deregister(ctx, intent.Repo, jit.RunnerID)
 
 	if lifecycle.err != nil {
-		if teardownErr != nil {
-			lifecycle.err = errors.Join(lifecycle.err,
-				fmt.Errorf("backend teardown failed: %w", teardownErr))
-			w.blockTeardown(intent, containerName, lifecycle.err, lifecycle.failureReason)
-		}
 		w.pauseForRateLimit(intent.Scope, lifecycle.err)
 		if lifecycle.unassigned {
 			w.deps.State().RecordUnassignedExit()
 		}
-		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
-		if teardownErr != nil {
-			return w.reconcileTeardown(ctx, intent, h, lifecycle.err)
-		}
-		return w.fail(intent, containerName, lifecycle.failureReason, lifecycle.err)
+		cleanupResult := w.settleCleanup(
+			ctx, intent, containerName, h, teardownErr, deregisterErr,
+			lifecycle.err, lifecycle.failureReason, jit.RunnerID,
+		)
+		return w.fail(intent, containerName, lifecycle.failureReason, cleanupResult)
 	}
 
 	if timedOut {
 		timeoutErr := errors.New("spawn timed out")
-		if teardownErr != nil {
-			timeoutErr = errors.Join(timeoutErr, teardownErr)
-			w.blockTeardown(intent, containerName, timeoutErr, "wall_clock_timeout")
-		}
-		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
+		cleanupResult := w.settleCleanup(
+			ctx, intent, containerName, h, teardownErr, deregisterErr,
+			timeoutErr, "wall_clock_timeout", jit.RunnerID,
+		)
 		elapsed := int(w.deps.Clock().Now().Sub(start).Seconds())
 		_ = w.deps.Emit().EmitSpawnTimeoutForcedTeardown(cornerstone.SpawnTimeoutForcedTeardownFields{
 			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
@@ -243,15 +286,13 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 			ConfiguredTimeoutSecs: timeoutSecs,
 			ElapsedSeconds:        elapsed,
 		})
-		if teardownErr != nil {
-			return w.reconcileTeardown(ctx, intent, h, timeoutErr)
-		}
-		return timeoutErr
+		return cleanupResult
 	}
 	if teardownErr != nil {
-		w.blockTeardown(intent, containerName, teardownErr, "")
-		_ = w.deregister(ctx, intent.Repo, jit.RunnerID)
-		return w.reconcileTeardown(ctx, intent, h, teardownErr)
+		return w.settleCleanup(
+			ctx, intent, containerName, h, teardownErr, deregisterErr,
+			nil, "", jit.RunnerID,
+		)
 	}
 	durationMs := w.deps.Clock().Now().Sub(start).Milliseconds()
 	runnerContainerID := h.Refs["runner"]
@@ -261,8 +302,12 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		ContainerName: containerName, GitHubRunnerID: jit.RunnerID,
 		ExitCode: exitCode, DurationMillis: durationMs,
 	})
-	if err := w.deregister(ctx, intent.Repo, jit.RunnerID); err != nil {
-		return w.fail(intent, containerName, "runner_deregistration_failed", err)
+	if deregisterErr != nil {
+		cleanupResult := w.settleCleanup(
+			ctx, intent, containerName, h, nil, deregisterErr,
+			nil, "", jit.RunnerID,
+		)
+		return w.fail(intent, containerName, "runner_deregistration_failed", cleanupResult)
 	}
 
 	if exitCode == 0 {
@@ -280,6 +325,42 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 		Detail:        fmt.Sprintf("exit_code=%d", exitCode),
 	})
 	return fmt.Errorf("runner exited %d", exitCode)
+}
+
+func (w *SpawnWorker) settlePartialSpawn(
+	ctx context.Context,
+	intent SpawnIntent,
+	containerName string,
+	h backend.Handle,
+	spawnErr error,
+	runnerID int64,
+) error {
+	// The backend has already reported an incomplete rollback. Convert the
+	// reservation to global admission debt before the first exact retry so a
+	// concurrent poll cannot race cleanup.
+	w.blockTeardown(intent, containerName, spawnErr, classifyDockerError(spawnErr))
+	backendErr := teardownSpawn(ctx, w.deps.Backend(), h, true)
+	runnerErr := w.deregister(ctx, intent.Repo, runnerID)
+	result := spawnErr
+	if backendErr != nil {
+		result = errors.Join(result, fmt.Errorf("backend teardown failed: %w", backendErr))
+	}
+	if runnerErr != nil {
+		result = errors.Join(result, fmt.Errorf("runner deregistration failed: %w", runnerErr))
+		w.blockRunnerCleanup(intent, containerName, result)
+	}
+	if backendErr != nil {
+		if retryErr := w.retryBackendTeardown(ctx, intent, h); retryErr != nil {
+			return errors.Join(result, retryErr)
+		}
+	}
+	if runnerErr != nil {
+		if retryErr := w.retryRunnerDeletion(ctx, intent, runnerID); retryErr != nil {
+			return errors.Join(result, retryErr)
+		}
+	}
+	w.deps.State().ResolveTeardown(intent.SpawnID)
+	return result
 }
 
 // teardownSpawn never reuses a cancelled run context for cleanup. Docker and
@@ -324,27 +405,107 @@ func (w *SpawnWorker) blockTeardown(
 	})
 }
 
-// reconcileTeardown retries the exact backend handle with force enabled. A
-// generic inventory reconciliation is insufficient proof because it may omit
-// network-only, sidecar-only, or owning-resource leaks.
-func (w *SpawnWorker) reconcileTeardown(
+func (w *SpawnWorker) blockRunnerCleanup(
+	intent SpawnIntent,
+	containerName string,
+	err error,
+) {
+	w.deps.State().MarkTeardownBlocked(
+		intent.SpawnID, intent.Repo, err.Error(), w.deps.Clock().Now(),
+	)
+	_ = w.deps.Emit().EmitSpawnFailed(cornerstone.SpawnFailedFields{
+		Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+		ContainerName: containerName,
+		FailureReason: "runner_deregistration_failed",
+		Detail:        err.Error(),
+		ExtraErrorData: map[string]any{
+			"cleanup_target":     "github_runner_registration",
+			"capacity_retained":  true,
+			"scheduling_blocked": true,
+			"recovery":           "exact_runner_deregistration_retry",
+		},
+	})
+}
+
+// settleCleanup turns every failed backend or GitHub cleanup into capacity
+// debt before retrying the exact resources. The reservation is resolved only
+// after every outstanding cleanup succeeds.
+func (w *SpawnWorker) settleCleanup(
+	ctx context.Context,
+	intent SpawnIntent,
+	containerName string,
+	h backend.Handle,
+	backendErr error,
+	runnerErr error,
+	originalErr error,
+	priorFailureReason string,
+	runnerID int64,
+) error {
+	result := originalErr
+	if backendErr != nil {
+		result = errors.Join(result, fmt.Errorf("backend teardown failed: %w", backendErr))
+	}
+	if runnerErr != nil {
+		result = errors.Join(result, fmt.Errorf("runner deregistration failed: %w", runnerErr))
+	}
+	if backendErr == nil && runnerErr == nil {
+		return result
+	}
+	if backendErr != nil {
+		w.blockTeardown(intent, containerName, result, priorFailureReason)
+	}
+	if runnerErr != nil {
+		w.blockRunnerCleanup(intent, containerName, result)
+	}
+	if backendErr != nil {
+		if err := w.retryBackendTeardown(ctx, intent, h); err != nil {
+			return errors.Join(result, err)
+		}
+	}
+	if runnerErr != nil {
+		if err := w.retryRunnerDeletion(ctx, intent, runnerID); err != nil {
+			return errors.Join(result, err)
+		}
+	}
+	w.deps.State().ResolveTeardown(intent.SpawnID)
+	return result
+}
+
+func (w *SpawnWorker) retryBackendTeardown(
 	ctx context.Context,
 	intent SpawnIntent,
 	h backend.Handle,
-	originalErr error,
 ) error {
 	retryInterval := normalizedLifecycleTiming(w.deps.LifecycleTiming()).CleanupRetryInterval
 	for {
 		retryErr := teardownSpawn(ctx, w.deps.Backend(), h, true)
 		if retryErr == nil {
-			w.deps.State().ResolveTeardown(intent.SpawnID)
-			return originalErr
+			return nil
 		}
 		w.deps.State().UpdateTeardownFailure(intent.SpawnID, retryErr.Error())
 		select {
 		case <-ctx.Done():
-			return errors.Join(originalErr,
-				fmt.Errorf("teardown reconciliation interrupted: %w", ctx.Err()))
+			return fmt.Errorf("teardown reconciliation interrupted: %w", ctx.Err())
+		case <-w.deps.Clock().After(retryInterval):
+		}
+	}
+}
+
+func (w *SpawnWorker) retryRunnerDeletion(
+	ctx context.Context,
+	intent SpawnIntent,
+	runnerID int64,
+) error {
+	retryInterval := normalizedLifecycleTiming(w.deps.LifecycleTiming()).CleanupRetryInterval
+	for {
+		if err := w.deregister(ctx, intent.Repo, runnerID); err == nil {
+			return nil
+		} else {
+			w.deps.State().UpdateTeardownFailure(intent.SpawnID, err.Error())
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("runner deregistration reconciliation interrupted: %w", ctx.Err())
 		case <-w.deps.Clock().After(retryInterval):
 		}
 	}
@@ -356,7 +517,9 @@ func (w *SpawnWorker) deregister(ctx context.Context, repo string, runnerID int6
 	}
 	cleanupCtx, cancel := runnerCleanupContext(ctx)
 	defer cancel()
-	if err := w.deps.GitHub().DeleteRunner(cleanupCtx, repo, runnerID); err != nil {
+	err := w.deps.GitHub().DeleteRunner(cleanupCtx, repo, runnerID)
+	w.recordRunnerOperation(repo, runnerOperationDelete, err)
+	if err != nil {
 		return err
 	}
 	w.deps.State().RecordDeregistered()
@@ -378,17 +541,53 @@ func (w *SpawnWorker) fail(intent SpawnIntent, containerName, reason string, err
 // failAndLeak — used AFTER JIT is acquired but before runner starts claiming
 // a job. Implements A1: delete the orphan runner registration.
 func (w *SpawnWorker) failAndLeak(ctx context.Context, intent SpawnIntent, containerName, reason string, err error, runnerID int64) error {
-	if runnerID > 0 {
-		cleanupCtx, cancel := runnerCleanupContext(ctx)
-		defer cancel()
-		if delErr := w.deps.GitHub().DeleteRunner(cleanupCtx, intent.Repo, runnerID); delErr == nil {
-			_ = w.deps.Emit().EmitRunnerLeakCleaned(cornerstone.RunnerLeakCleanedFields{
-				Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
-				GitHubRunnerID: runnerID,
-			})
-		}
+	if runnerID <= 0 {
+		return w.fail(intent, containerName, reason, err)
+	}
+	deregisterErr := w.deregister(ctx, intent.Repo, runnerID)
+	if deregisterErr != nil {
+		err = w.settleCleanup(
+			ctx, intent, containerName, backend.Handle{}, nil, deregisterErr,
+			err, reason, runnerID,
+		)
+	}
+	if deregisterErr == nil || !w.deps.State().HasReservation(intent.SpawnID, intent.Repo) {
+		_ = w.deps.Emit().EmitRunnerLeakCleaned(cornerstone.RunnerLeakCleanedFields{
+			Scope: intent.Scope, Repo: intent.Repo, SpawnID: intent.SpawnID,
+			GitHubRunnerID: runnerID,
+		})
 	}
 	return w.fail(intent, containerName, reason, err)
+}
+
+func (w *SpawnWorker) recordRunnerOperation(repo, operation string, err error) {
+	switch {
+	case err == nil:
+		w.deps.State().RecordRunnerOperationSuccess(repo, operation)
+	case operation == runnerOperationGetRunner && errors.Is(err, github.ErrRunnerNotFound):
+		w.deps.State().RecordRunnerOperationSuccess(repo, operation)
+	case operation == runnerOperationGetJob && github.ErrorStatus(err) == 404:
+		w.deps.State().RecordRunnerOperationSuccess(repo, operation)
+	default:
+		w.deps.State().RecordRunnerOperationFailure(
+			repo, operation, classifyRunnerOperationError(err), err.Error(),
+		)
+	}
+}
+
+func classifyRunnerOperationError(err error) string {
+	switch {
+	case errors.Is(err, github.ErrJITLabelMismatch):
+		return "github_jit_label_mismatch"
+	case errors.Is(err, github.ErrAuthFailed):
+		return "github_auth_failed"
+	case errors.Is(err, github.ErrRateLimited):
+		return "github_rate_limited"
+	case github.ErrorStatus(err) == http.StatusUnprocessableEntity:
+		return "github_jit_unavailable"
+	default:
+		return "github_runner_operation_failed"
+	}
 }
 
 // runnerCleanupContext bounds GitHub cleanup independently from the worker

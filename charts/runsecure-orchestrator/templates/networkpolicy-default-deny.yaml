@@ -30,8 +30,8 @@ spec:
   # No ingress or egress rules — all traffic denied.
 ---
 # Allow the orchestrator pod egress to:
-#   - kube-apiserver (TCP 6443 — standard port; adjust if your cluster differs)
-#   - kube-dns (UDP+TCP 53 on the well-known 10.96.0.10/32 cluster IP)
+#   - kube-apiserver on the operator-configured Service CIDR and port
+#   - kube-dns on the operator-configured Service CIDR (UDP+TCP 53)
 #   - External orchestrator egress domains (any port via 0.0.0.0/0 minus
 #     RFC1918; the Squid L7 allow-list is the authoritative control).
 apiVersion: networking.k8s.io/v1
@@ -48,18 +48,15 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # kube-apiserver (TCP 6443).
+    # kube-apiserver Service. In-cluster client-go normally uses a private
+    # ClusterIP on 443, so this must not share the public-internet RFC1918 deny.
     - ports:
         - protocol: TCP
-          port: 6443
+          port: {{ .Values.kubernetesNetwork.apiServerPort }}
       to:
         - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-    # kube-dns (well-known cluster IP 10.96.0.10/32).
+            cidr: {{ .Values.kubernetesNetwork.apiServerCIDR | quote }}
+    # Cluster DNS Service.
     - ports:
         - protocol: UDP
           port: 53
@@ -67,7 +64,7 @@ spec:
           port: 53
       to:
         - ipBlock:
-            cidr: 10.96.0.10/32
+            cidr: {{ .Values.kubernetesNetwork.dnsCIDR | quote }}
     # Orchestrator egress — reaches GitHub API and other allow-listed domains
     # via the configured Squid proxy. The L7 allow-list is the primary control;
     # this rule provides network-layer reachability for HTTPS (443/TCP).

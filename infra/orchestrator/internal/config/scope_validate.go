@@ -24,6 +24,13 @@ func (s *Scope) Validate() error {
 	if !validBackends[s.Backend] {
 		return fmt.Errorf("config: backend must be 'compose' or 'kube' (got %q)", s.Backend)
 	}
+	secretMode := os.FileMode(0o400)
+	if s.Backend == "kube" {
+		// Kubernetes Secret projections remain root-owned and apply fsGroup as
+		// the group owner. 0440 is the least-privilege mode readable by the
+		// non-root workload without granting world access.
+		secretMode = 0o440
+	}
 	if s.Name == "" {
 		return errors.New("config: name is required")
 	}
@@ -45,8 +52,8 @@ func (s *Scope) Validate() error {
 		if err != nil {
 			return fmt.Errorf("config: auth.pat_file %s: %w", s.Auth.PATFile, err)
 		}
-		if info.Mode().Perm() != 0o400 {
-			return fmt.Errorf("config: auth.pat_file %s must be mode 0400 (got %o)", s.Auth.PATFile, info.Mode().Perm())
+		if info.Mode().Perm() != secretMode {
+			return fmt.Errorf("config: auth.pat_file %s must be mode %04o (got %o)", s.Auth.PATFile, secretMode, info.Mode().Perm())
 		}
 	case "github_app":
 		if s.Auth.AppID <= 0 {
@@ -62,8 +69,8 @@ func (s *Scope) Validate() error {
 		if err != nil {
 			return fmt.Errorf("config: auth.private_key_file %s: %w", s.Auth.PrivateKeyFile, err)
 		}
-		if info.Mode().Perm() != 0o400 {
-			return fmt.Errorf("config: auth.private_key_file %s must be mode 0400 (got %o)", s.Auth.PrivateKeyFile, info.Mode().Perm())
+		if info.Mode().Perm() != secretMode {
+			return fmt.Errorf("config: auth.private_key_file %s must be mode %04o (got %o)", s.Auth.PrivateKeyFile, secretMode, info.Mode().Perm())
 		}
 	default:
 		return fmt.Errorf("config: auth.type must be 'pat' or 'github_app' (got %q)", s.Auth.Type)

@@ -81,6 +81,20 @@ else
     fail "promotion does not bind acceptance to the exact publish manifest"
 fi
 
+if grep -Fq 'run.get("head_branch") != f"v{expected_version}"' "$PROMOTE_WF"; then
+    pass "promotion accepts only the expected version-tag Publish Images run"
+else
+    fail "promotion does not bind the accepted run to vEXPECTED_VERSION"
+fi
+
+if [[ $(grep -c 'verify-remote-release-tag.sh' "$PROMOTE_WF") -ge 4 ]] \
+    && grep -Fq 'ref: ${{ needs.resolve-manifest.outputs.build_sha }}' "$PROMOTE_WF" \
+    && grep -Fq -- '--verify-tag' "$PROMOTE_WF"; then
+    pass "promotion and release re-fetch the tag, run at BUILD_SHA, and verify the tag"
+else
+    fail "promotion or release can mutate without a fresh exact tag/build check"
+fi
+
 if grep -qE '^[[:space:]]+workflow_run:' "$PROMOTE_WF"; then
     fail "promote-to-stable.yml: automatic workflow_run promotion is forbidden"
 else
@@ -98,6 +112,15 @@ if grep -qE '^[[:space:]]+workflow_run:' "$ACCEPT_WF" \
     pass "post-publish acceptance remains automatic after image publication"
 else
     fail "post-publish acceptance must run automatically after Publish Images"
+fi
+
+if grep -Fq '[[ ! "$RUNNER_IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]' "$ACCEPT_WF" \
+    && grep -Fq -- '--entrypoint node' "$ACCEPT_WF" \
+    && grep -Fq -- '--entrypoint python3' "$ACCEPT_WF" \
+    && grep -Fq 'rustc "$work/main.rs"' "$ACCEPT_WF"; then
+    pass "post-publish acceptance executes all language runtimes by exact digest"
+else
+    fail "post-publish acceptance does not execute every exact-digest runtime"
 fi
 
 echo ""

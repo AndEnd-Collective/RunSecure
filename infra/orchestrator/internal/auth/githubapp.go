@@ -63,12 +63,34 @@ var appReadFile = os.ReadFile
 //	privateKeyPEMFile — path to the PEM-encoded RSA private key (mode 0400)
 //	apiBaseURL     — GitHub API base URL (e.g. "https://api.github.com")
 func NewGitHubAppProvider(appID, installationID int64, privateKeyPEMFile, apiBaseURL string) (Provider, error) {
+	return newGitHubAppProvider(
+		appID, installationID, privateKeyPEMFile, apiBaseURL, 0o400,
+	)
+}
+
+// NewKubernetesGitHubAppProvider accepts the 0440 group-readable mode used by
+// root-owned Kubernetes Secret projections with fsGroup. The standard
+// constructor remains strict 0400 for host/Compose deployments.
+func NewKubernetesGitHubAppProvider(appID, installationID int64, privateKeyPEMFile, apiBaseURL string) (Provider, error) {
+	return newGitHubAppProvider(
+		appID, installationID, privateKeyPEMFile, apiBaseURL, 0o440,
+	)
+}
+
+func newGitHubAppProvider(
+	appID, installationID int64,
+	privateKeyPEMFile, apiBaseURL string,
+	expectedMode os.FileMode,
+) (Provider, error) {
 	info, err := os.Stat(privateKeyPEMFile)
 	if err != nil {
 		return nil, fmt.Errorf("auth: stat private key file %s: %w", privateKeyPEMFile, err)
 	}
-	if info.Mode().Perm() != 0o400 {
-		return nil, fmt.Errorf("auth: private key file %s must be mode 0400 (got %o)", privateKeyPEMFile, info.Mode().Perm())
+	if info.Mode().Perm() != expectedMode {
+		return nil, fmt.Errorf(
+			"auth: private key file %s must be mode %04o (got %o)",
+			privateKeyPEMFile, expectedMode, info.Mode().Perm(),
+		)
 	}
 	pemBytes, err := appReadFile(privateKeyPEMFile)
 	if err != nil {

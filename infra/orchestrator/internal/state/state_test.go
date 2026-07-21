@@ -167,11 +167,25 @@ func TestReservationLifecycleAndSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), snap.CompletedTotal)
 	require.Equal(t, int64(1), snap.DeregistrationsTotal)
 	require.Equal(t, int64(42), snap.Reservations["spawn-1"].RunnerID)
+	require.Zero(t, s.DemandCoverage("o/r"),
+		"assigned runners no longer cover jobs in GitHub's queued set")
 
 	s.ReleaseReservation("spawn-1")
 	s.ReleaseReservation("spawn-1")
 	require.Equal(t, 0, s.GlobalInFlight())
 	require.Empty(t, s.Snapshot().Reservations)
+}
+
+func TestDemandCoverageCountsOnlyUnassignedDeliveredCapacity(t *testing.T) {
+	s := New()
+	now := time.Now()
+	require.Zero(t, s.DemandCoverage("unknown/repo"))
+	require.True(t, s.TryReserve("pending", "o/r", 3, 3, now))
+	require.True(t, s.TryReserve("online", "o/r", 3, 3, now))
+	require.True(t, s.MarkOnline("online", now))
+	require.True(t, s.TryReserve("assigned", "o/r", 3, 3, now))
+	require.True(t, s.MarkAssigned("assigned", now))
+	require.Equal(t, 2, s.DemandCoverage("o/r"))
 }
 
 func TestReservationCapsAndDirectAssignment(t *testing.T) {
@@ -330,6 +344,48 @@ func TestPollAndDrainState(t *testing.T) {
 	require.Equal(t, now.Add(time.Second), snap.PerRepo["o/r"].LastPollSuccess)
 	require.Empty(t, snap.PerRepo["o/r"].LastPollError)
 	require.Empty(t, snap.PerRepo["o/r"].LastErrorDetail)
+}
+
+func TestRunnerOperationErrorsAreIndependentAndSnapshotIsolated(t *testing.T) {
+	s := New()
+	now := time.Now()
+	s.RecordPollSuccess("o/r", 1, now)
+	s.RecordRunnerOperationFailure(
+		"o/r", "generate_jit_config", "github_auth_failed", "status 403",
+	)
+	s.RecordRunnerOperationFailure(
+		"o/r", "delete_runner", "github_auth_failed", "status 401",
+	)
+	s.RecordPollSuccess("o/r", 0, now.Add(time.Second))
+
+	snap := s.Snapshot()
+	require.Empty(t, snap.PerRepo["o/r"].LastPollError)
+	require.Len(t, snap.PerRepo["o/r"].RunnerOperationError, 2,
+		"successful demand refresh must not mask runner-management auth")
+	snap.PerRepo["o/r"].RunnerOperationError["delete_runner"] = OperationError{Class: "mutated"}
+	require.Equal(t, "github_auth_failed",
+		s.Snapshot().PerRepo["o/r"].RunnerOperationError["delete_runner"].Class,
+		"snapshot maps must not alias live state")
+
+	s.RecordRunnerOperationSuccess("o/r", "generate_jit_config")
+	snap = s.Snapshot()
+	require.NotContains(t, snap.PerRepo["o/r"].RunnerOperationError, "generate_jit_config")
+	require.Contains(t, snap.PerRepo["o/r"].RunnerOperationError, "delete_runner")
+	s.RecordRunnerOperationSuccess("o/r", "delete_runner")
+	require.Empty(t, s.Snapshot().PerRepo["o/r"].RunnerOperationError)
+}
+
+func TestEmptyRunnerOperationMapSnapshotIsIsolated(t *testing.T) {
+	s := New()
+	s.Configure([]string{"o/r"}, 3, 3, "2.1.8", "abcdef")
+
+	snap := s.Snapshot()
+	snap.PerRepo["o/r"].RunnerOperationError["get_runner"] = OperationError{
+		Class: "mutated",
+	}
+
+	require.Empty(t, s.Snapshot().PerRepo["o/r"].RunnerOperationError,
+		"even an empty operation map must not alias live readiness state")
 }
 
 func TestConcurrentReservationsNeverExceedCap(t *testing.T) {

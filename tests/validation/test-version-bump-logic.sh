@@ -92,6 +92,22 @@ if [ -f "$WF" ]; then
     else
         fail "workflow drift" "see $WF" "matching arithmetic for major/minor/patch"
     fi
+    if grep -Fq 'secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN' "$WF"; then
+        fail "release token fallback" "GITHUB_TOKEN fallback present" "RELEASE_TOKEN only"
+    elif ! grep -Fq 'token: ${{ secrets.RELEASE_TOKEN }}' "$WF"; then
+        fail "release token pin" "dedicated token missing" "RELEASE_TOKEN only"
+    elif ! grep -Fq 'RELEASE_TOKEN is required' "$WF"; then
+        fail "release token preflight" "missing fail-closed guard" "guard before tag creation"
+    else
+        pass "workflow requires RELEASE_TOKEN with no ineffective GITHUB_TOKEN fallback"
+    fi
+    require_line=$(grep -n 'name: Require the release cascade token' "$WF" | cut -d: -f1)
+    tag_line=$(grep -n 'name: Create and push tag' "$WF" | cut -d: -f1)
+    if [ -n "$require_line" ] && [ -n "$tag_line" ] && [ "$require_line" -lt "$tag_line" ]; then
+        pass "release token failure occurs before tag creation or push"
+    else
+        fail "release token guard ordering" "guard=$require_line tag=$tag_line" "guard before tag step"
+    fi
 else
     fail "workflow missing" "$WF" "exists"
 fi

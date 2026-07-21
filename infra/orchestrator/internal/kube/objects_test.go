@@ -32,6 +32,7 @@ func testInput() backend.SpawnInput {
 		EnableDNSMasq:      true,
 		Labels:             []string{"runsecure.scope=ci"},
 		TCPEgressPorts:     []int{443, 8080},
+		KubeDNSCIDR:        "10.96.0.10/32",
 	}
 }
 
@@ -171,8 +172,8 @@ func TestProxyPod_ContainerCount_DNSMasqOn(t *testing.T) {
 	in := testInput()
 	in.EnableDNSMasq = true
 	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
-	if len(pod.Spec.Containers) != 3 {
-		t.Errorf("ProxyPod with dnsmasq: got %d containers, want 3", len(pod.Spec.Containers))
+	if len(pod.Spec.Containers) != 1 {
+		t.Errorf("ProxyPod with dnsmasq: got %d containers, want 1 supervisor", len(pod.Spec.Containers))
 	}
 }
 
@@ -180,8 +181,8 @@ func TestProxyPod_ContainerCount_DNSMasqOff(t *testing.T) {
 	in := testInput()
 	in.EnableDNSMasq = false
 	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
-	if len(pod.Spec.Containers) != 2 {
-		t.Errorf("ProxyPod without dnsmasq: got %d containers, want 2", len(pod.Spec.Containers))
+	if len(pod.Spec.Containers) != 1 {
+		t.Errorf("ProxyPod without dnsmasq: got %d containers, want 1 supervisor", len(pod.Spec.Containers))
 	}
 }
 
@@ -412,6 +413,56 @@ func TestProxyPod_SecretVolumeItemsContainConfigKeys(t *testing.T) {
 	}
 }
 
+func TestProxyPod_SecretProjectionIsGroupReadableWithoutWorldAccess(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret == nil {
+			continue
+		}
+		requireMode := int32(0o440)
+		if volume.Secret.DefaultMode == nil || *volume.Secret.DefaultMode != requireMode {
+			t.Errorf("ProxyPod secret mode = %v, want 0o440", volume.Secret.DefaultMode)
+		}
+		return
+	}
+	t.Fatal("ProxyPod: no secret volume found")
+}
+
+func TestProxyPod_WritableRuntimePathsAreBoundedMemoryVolumes(t *testing.T) {
+	in := testInput()
+	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
+	container := pod.Spec.Containers[0]
+	wanted := map[string]bool{
+		"/tmp": false, "/run": false, "/var/run/squid": false,
+		"/var/log/squid": false, "/var/spool/squid": false,
+		"/var/lib/haproxy": false,
+	}
+	volumeByName := map[string]corev1.Volume{}
+	for _, volume := range pod.Spec.Volumes {
+		volumeByName[volume.Name] = volume
+	}
+	for _, mount := range container.VolumeMounts {
+		if _, ok := wanted[mount.MountPath]; !ok {
+			continue
+		}
+		wanted[mount.MountPath] = true
+		if mount.ReadOnly {
+			t.Errorf("runtime mount %s must be writable", mount.MountPath)
+		}
+		volume := volumeByName[mount.Name]
+		if volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory ||
+			volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.IsZero() {
+			t.Errorf("runtime mount %s must use a size-bounded memory EmptyDir", mount.MountPath)
+		}
+	}
+	for path, found := range wanted {
+		if !found {
+			t.Errorf("ProxyPod missing writable runtime mount %s", path)
+		}
+	}
+}
+
 func TestProxyPod_DoesNotMountJITConfigKey(t *testing.T) {
 	in := testInput()
 	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
@@ -454,7 +505,7 @@ func TestRunnerPod_HasRunSecureProvenanceEnv(t *testing.T) {
 	}
 }
 
-func TestRunnerPod_MountsJITSecretWith0400(t *testing.T) {
+func TestRunnerPod_MountsJITSecretWith0440(t *testing.T) {
 	in := testInput()
 	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
 	var secretVol *corev1.SecretVolumeSource
@@ -467,8 +518,8 @@ func TestRunnerPod_MountsJITSecretWith0400(t *testing.T) {
 	if secretVol == nil {
 		t.Fatal("RunnerPod: no secret volume found")
 	}
-	if secretVol.DefaultMode == nil || *secretVol.DefaultMode != int32(0o400) {
-		t.Errorf("RunnerPod secret volume defaultMode = %v, want 0o400", secretVol.DefaultMode)
+	if secretVol.DefaultMode == nil || *secretVol.DefaultMode != int32(0o440) {
+		t.Errorf("RunnerPod secret volume defaultMode = %v, want 0o440", secretVol.DefaultMode)
 	}
 	hasJIT := false
 	for _, item := range secretVol.Items {
@@ -699,24 +750,26 @@ func TestRunnerEgressNetworkPolicy_EgressOnly(t *testing.T) {
 	}
 }
 
-func TestRunnerEgressNetworkPolicy_ToProxyOnly(t *testing.T) {
+func TestRunnerEgressNetworkPolicy_ToProxyAndClusterDNSOnly(t *testing.T) {
 	in := testInput()
 	pol := kube.RunnerEgressNetworkPolicy(in)
 
-	if len(pol.Spec.Egress) == 0 {
-		t.Fatalf("RunnerEgress: no egress rules")
+	if len(pol.Spec.Egress) != 2 {
+		t.Fatalf("RunnerEgress: got %d egress rules, want proxy + DNS", len(pol.Spec.Egress))
 	}
-	// All peers must select role=proxy and the matching spawn-id.
-	for _, rule := range pol.Spec.Egress {
-		for _, peer := range rule.To {
-			if peer.PodSelector == nil {
-				t.Errorf("RunnerEgress: egress peer must have podSelector, got %+v", peer)
-				continue
-			}
-			if peer.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" {
-				t.Errorf("RunnerEgress: peer role = %q, want proxy", peer.PodSelector.MatchLabels["runsecure.io/role"])
-			}
-		}
+	proxyPeer := pol.Spec.Egress[0].To[0]
+	if proxyPeer.PodSelector == nil ||
+		proxyPeer.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" ||
+		proxyPeer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+		t.Errorf("RunnerEgress: proxy peer is not pinned to this spawn: %+v", proxyPeer)
+	}
+	dnsPeer := pol.Spec.Egress[1].To[0]
+	if dnsPeer.IPBlock == nil || dnsPeer.IPBlock.CIDR != in.KubeDNSCIDR {
+		t.Errorf("RunnerEgress: DNS peer = %+v, want exact %s", dnsPeer, in.KubeDNSCIDR)
+	}
+	if len(pol.Spec.Egress[1].Ports) != 2 ||
+		!networkPolicyHasPort(pol.Spec.Egress[1:2], 53) {
+		t.Errorf("RunnerEgress: DNS rule must allow TCP+UDP port 53")
 	}
 }
 
@@ -751,8 +804,11 @@ func TestRunnerEgressNetworkPolicy_NoDNSPortWhenDisabled(t *testing.T) {
 	in := testInput()
 	in.EnableDNSMasq = false
 	pol := kube.RunnerEgressNetworkPolicy(in)
-	if networkPolicyHasPort(pol.Spec.Egress, 53) {
-		t.Errorf("RunnerEgress: port 53 must not appear when dnsmasq disabled")
+	if networkPolicyHasPort(pol.Spec.Egress[:1], 53) {
+		t.Errorf("RunnerEgress: proxy rule must not expose port 53 when dnsmasq disabled")
+	}
+	if !networkPolicyHasPort(pol.Spec.Egress[1:], 53) {
+		t.Errorf("RunnerEgress: cluster DNS path must remain available")
 	}
 }
 
@@ -1068,9 +1124,11 @@ func assertPodSecurity(t *testing.T, name string, pod *corev1.Pod) {
 	if psc.RunAsUser == nil || *psc.RunAsUser != 1001 {
 		t.Errorf("%s: RunAsUser must be 1001, got %v", name, psc.RunAsUser)
 	}
-	// FSGroup must be set to 1001 so that Secret volume files (defaultMode 0o400)
-	// are owned 1001:1001 at mount time and readable by the non-root process.
-	// Without FSGroup, files are root:root and 0o400 is unreadable by UID 1001.
+	if psc.RunAsGroup == nil || *psc.RunAsGroup != 1001 {
+		t.Errorf("%s: RunAsGroup must be 1001, got %v", name, psc.RunAsGroup)
+	}
+	// Kubernetes projects Secret files root:fsGroup. Mode 0o440 is therefore
+	// readable by GID 1001 without granting world access.
 	if psc.FSGroup == nil || *psc.FSGroup != 1001 {
 		t.Errorf("%s: FSGroup must be 1001 (ensures Secret volume files are readable by UID 1001), got %v", name, psc.FSGroup)
 	}

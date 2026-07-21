@@ -88,19 +88,22 @@ jobs:
 
           gh api "/repos/${REPOSITORY}/actions/runs/${PUBLISH_RUN_ID}" \
             > .publish-manifest/workflow-run.json
-          BUILD_SHA=$(python3 - .publish-manifest/workflow-run.json <<'PY'
+          BUILD_SHA=$(python3 - .publish-manifest/workflow-run.json "$EXPECTED_VERSION" <<'PY'
           import json
           import pathlib
           import re
           import sys
 
           run = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          expected_version = sys.argv[2]
           if run.get("name") != "Publish Images":
               raise SystemExit("not a Publish Images workflow run")
           if run.get("path") != ".github/workflows/publish-images.yml":
               raise SystemExit("workflow path does not match publish-images.yml")
           if run.get("event") != "push" or run.get("conclusion") != "success":
               raise SystemExit("Publish Images run must be a successful tag push")
+          if run.get("head_branch") != f"v{expected_version}":
+              raise SystemExit("Publish Images run is not for the expected release tag")
           build_sha = run.get("head_sha", "")
           if re.fullmatch(r"[0-9a-f]{40,64}", build_sha) is None:
               raise SystemExit("Publish Images run has an invalid head SHA")
@@ -185,11 +188,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Aggregate preflight, version promotion, and alias barrier
+        env:
+          BUILD_SHA: ${{ needs.resolve-manifest.outputs.build_sha }}
+          VERSION: ${{ needs.resolve-manifest.outputs.version }}
         run: |
           set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "v${VERSION}" "$BUILD_SHA"
           python3 infra/scripts/promote-release-images.py \
             .verified-manifest/release-images.json \
-            --release '${{ needs.resolve-manifest.outputs.version }}'
+            --release "$VERSION"
 
   release:
     needs: [resolve-manifest, promote]
@@ -198,10 +206,12 @@ jobs:
       actions: read
       contents: write
     env:
+      BUILD_SHA: ${{ needs.resolve-manifest.outputs.build_sha }}
       VERSION: ${{ needs.resolve-manifest.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.resolve-manifest.outputs.build_sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -222,6 +232,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "v${VERSION}" "$BUILD_SHA"
           if existing=$(gh release view "v${VERSION}" --json isDraft --jq '.isDraft' 2>/dev/null); then
             if [ "$existing" = "true" ]; then
               gh release delete "v${VERSION}" --yes
@@ -239,7 +251,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "v${VERSION}" "$BUILD_SHA"
           gh release create "v${VERSION}" \
+            --verify-tag \
             --title "v${VERSION}" \
             --generate-notes \
             --notes-start-tag "$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -A1 "^v${VERSION}$" | tail -1)"
@@ -249,6 +264,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          infra/scripts/verify-remote-release-tag.sh \
+            origin "v${VERSION}" "$BUILD_SHA"
           ASSET="runsecure-v${VERSION}-release-images.json"
           mkdir .downloaded-release-asset
           if gh release download "v${VERSION}" \

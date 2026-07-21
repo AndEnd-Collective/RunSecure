@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"time"
@@ -51,26 +52,47 @@ func (b *kubeBackend) Name() string { return "kube" }
 //	Refs["network_name"] → "" (not used by the kube backend)
 func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend.Handle, error) {
 	ns := kube.Namespace(in.Scope)
+	dnsPrefix, err := netip.ParsePrefix(in.KubeDNSCIDR)
+	if err != nil || !dnsPrefix.Addr().Is4() || dnsPrefix.Bits() != 32 || dnsPrefix != dnsPrefix.Masked() {
+		return backend.Handle{}, errors.New("kube backend: KubeDNSCIDR must be an exact IPv4 /32")
+	}
 
 	if err := b.c.EnsureNamespace(ctx, in.Scope); err != nil {
 		return backend.Handle{}, fmt.Errorf("kube backend: ensure namespace: %w", err)
 	}
 
-	// Read rendered egress config files. Missing files are silently ignored —
-	// the proxy containers pick up what is available via env vars.
-	readEgressFile := func(name string) []byte {
+	// The proxy supervisor cannot start safely with a missing or empty config.
+	// Fail before creating any per-spawn API objects rather than letting a Pod
+	// crash-loop with a partially projected Secret.
+	readEgressFile := func(name string) ([]byte, error) {
 		if in.EgressConfigDir == "" {
-			return nil
+			return nil, errors.New("egress config directory is required")
 		}
-		b, err := os.ReadFile(filepath.Join(in.EgressConfigDir, name))
+		path := filepath.Join(in.EgressConfigDir, name)
+		content, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
-		return b
+		if len(content) == 0 {
+			return nil, fmt.Errorf("read %s: config is empty", name)
+		}
+		return content, nil
 	}
-	squidBytes := readEgressFile("squid.conf")
-	haproxyBytes := readEgressFile("haproxy.cfg")
-	dnsmasqBytes := readEgressFile("dnsmasq.conf")
+	squidBytes, err := readEgressFile("squid.conf")
+	if err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+	}
+	haproxyBytes, err := readEgressFile("haproxy.cfg")
+	if err != nil {
+		return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+	}
+	var dnsmasqBytes []byte
+	if in.EnableDNSMasq {
+		dnsmasqBytes, err = readEgressFile("dnsmasq.conf")
+		if err != nil {
+			return backend.Handle{}, fmt.Errorf("kube backend: %w", err)
+		}
+	}
 
 	// Build the per-spawn objects.
 	secret := kube.SpawnSecret(in, squidBytes, haproxyBytes, dnsmasqBytes)
@@ -95,14 +117,7 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		ProxyPod:  proxyPod,
 		RunnerPod: runnerPod,
 	}
-
-	if err := b.c.ApplySpawn(ctx, objs); err != nil {
-		// Best-effort cleanup: delete the owning Secret which cascades GC.
-		_ = b.c.DeleteSpawn(ctx, ns, secret.Name)
-		return backend.Handle{}, fmt.Errorf("kube backend: apply spawn: %w", err)
-	}
-
-	return backend.Handle{
+	h := backend.Handle{
 		SpawnID: in.SpawnID,
 		Backend: "kube",
 		Refs: map[string]string{
@@ -112,8 +127,25 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 			"proxy_pod":         proxyPod.Name,
 			"network_name":      "",
 			"egress_config_dir": in.EgressConfigDir,
+			"repo_label":        kube.RepoLabel(in.Repo),
 		},
-	}, nil
+	}
+
+	if err := b.c.ApplySpawn(ctx, objs); err != nil {
+		applyErr := fmt.Errorf("kube backend: apply spawn: %w", err)
+		// Deleting the owning Secret is the exact rollback. If confirmation
+		// fails, return the handle so the orchestrator retains teardown debt
+		// and retries instead of releasing capacity around leaked objects.
+		if cleanupErr := b.c.DeleteSpawn(
+			ctx, ns, secret.Name, in.SpawnID, kube.RepoLabel(in.Repo),
+		); cleanupErr != nil {
+			return h, errors.Join(applyErr,
+				fmt.Errorf("kube backend: rollback spawn: %w", cleanupErr))
+		}
+		return backend.Handle{}, applyErr
+	}
+
+	return h, nil
 }
 
 // WaitForExit blocks until the runner pod transitions to a terminal phase or
@@ -151,8 +183,9 @@ func (b *kubeBackend) WaitForExit(ctx context.Context, h backend.Handle, timeout
 func (b *kubeBackend) Teardown(ctx context.Context, h backend.Handle, _ bool) error {
 	ns := h.Refs["namespace"]
 	secretName := h.Refs["secret"]
+	repoLabel := h.Refs["repo_label"]
 	var cleanupErrors []error
-	if err := b.c.DeleteSpawn(ctx, ns, secretName); err != nil {
+	if err := b.c.DeleteSpawn(ctx, ns, secretName, h.SpawnID, repoLabel); err != nil {
 		cleanupErrors = append(cleanupErrors,
 			fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err))
 	}
@@ -185,6 +218,7 @@ func (b *kubeBackend) Reconcile(ctx context.Context, scope string) ([]backend.Ha
 				"runner_pod":   ref.RunnerPod,
 				"proxy_pod":    "",
 				"network_name": "",
+				"repo_label":   ref.RepoLabel,
 			},
 		})
 	}

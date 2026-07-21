@@ -52,10 +52,6 @@ func Run(ctx context.Context, scopePath string) error {
 	if err != nil {
 		return err
 	}
-	dc, err := docker.NewClient(envOr("DOCKER_HOST", "tcp://socket-proxy:2375"))
-	if err != nil {
-		return err
-	}
 	st := state.New()
 	repoNames := make([]string, 0, len(s.Repos))
 	for _, repo := range s.Repos {
@@ -63,27 +59,15 @@ func Run(ctx context.Context, scopePath string) error {
 	}
 	st.Configure(repoNames, s.GlobalMaxRunners, s.GlobalMaxRunners, version, buildSHA)
 
-	// A restarted process cannot safely adopt old runners: it has no lifecycle
-	// goroutine capable of releasing their capacity. Clean exact JIT
-	// registrations first, then their scope-owned containers, and fail startup
-	// if either dependency cannot be reconciled.
-	if err := cleanupRecoveredSpawns(ctx, s.Name, repoNames, dc, gh); err != nil {
-		return err
-	}
-
-	// Cold-start per-spawn network cleanup (#54 fix 4): remove any rs-net-*
-	// networks from a previous orchestrator run. These are created per-spawn and
-	// normally deleted by Teardown, but a hard restart or crash leaves them
-	// behind. The address-pool exhausts after ~31 unreleased bridge networks.
-	// We list only runsecure.scope-labelled networks so the scope is precise.
-	nets, err := dc.ListNetworksForScope(ctx, s.Name)
+	// Initialize and reconcile only the selected runtime backend. Kubernetes
+	// deployments intentionally have no Docker socket-proxy or DOCKER_HOST;
+	// constructing a Docker client there made a valid Helm deployment fail
+	// before the in-cluster backend was selected.
+	be, dc, err := initializeBackend(
+		ctx, s, repoNames, gh, docker.NewClient, productionKubeCtor,
+	)
 	if err != nil {
-		return fmt.Errorf("cold-start: list recovered networks: %w", err)
-	}
-	for _, n := range nets {
-		if err := dc.DeleteNetwork(ctx, n.ID); err != nil {
-			return fmt.Errorf("cold-start: delete recovered network %s: %w", n.ID, err)
-		}
+		return fmt.Errorf("orchestrator: backend init: %w", err)
 	}
 
 	// Server (healthz + metrics + snapshot) starts only after cold-start
@@ -105,10 +89,6 @@ func Run(ctx context.Context, scopePath string) error {
 	basePolicy, err := buildBasePolicy(s.SecurityProfile, s.SecurityOverrides, allOverrideKeys())
 	if err != nil {
 		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
-	}
-	be, err := selectBackend(s, dc, productionKubeCtor)
-	if err != nil {
-		return fmt.Errorf("orchestrator: backend init: %w", err)
 	}
 	serverDeps.setBackendReady(func(ctx context.Context) error {
 		_, err := be.Reconcile(ctx, s.Name)
@@ -215,8 +195,19 @@ func Run(ctx context.Context, scopePath string) error {
 func buildAuthProvider(s *config.Scope, apiBaseURL string) (auth.Provider, error) {
 	switch s.Auth.Type {
 	case "pat":
+		if s.Backend == "kube" {
+			return auth.NewKubernetesPATProvider(s.Auth.PATFile)
+		}
 		return auth.NewPATProvider(s.Auth.PATFile)
 	case "github_app":
+		if s.Backend == "kube" {
+			return auth.NewKubernetesGitHubAppProvider(
+				s.Auth.AppID,
+				s.Auth.InstallationID,
+				s.Auth.PrivateKeyFile,
+				apiBaseURL,
+			)
+		}
 		return auth.NewGitHubAppProvider(
 			s.Auth.AppID,
 			s.Auth.InstallationID,
@@ -562,6 +553,10 @@ func (p *productionDeps) TryReserve(spawnID, repo string, repoCap, globalCap int
 	return p.st.TryReserve(spawnID, repo, repoCap, globalCap, p.clk.Now())
 }
 
+func (p *productionDeps) DemandCoverage(repo string) int {
+	return p.st.DemandCoverage(repo)
+}
+
 func (p *productionDeps) ReleaseReservation(spawnID string) {
 	p.st.ReleaseReservation(spawnID)
 }
@@ -758,6 +753,9 @@ func productionKubeCtor() (backend.Backend, error) {
 func selectBackend(s *config.Scope, dc docker.Client, kubeCtor func() (backend.Backend, error)) (backend.Backend, error) {
 	if s.Backend == "kube" {
 		return kubeCtor()
+	}
+	if dc == nil {
+		return nil, errors.New("compose backend requires a Docker client")
 	}
 	return compose.New(dc), nil
 }

@@ -25,7 +25,14 @@ import (
 )
 
 // testInput returns a SpawnInput with stable, deterministic field values.
-func testInput(spawnID string) backend.SpawnInput {
+func testInput(t *testing.T, spawnID string) backend.SpawnInput {
+	t.Helper()
+	egressDir := t.TempDir()
+	for name, content := range map[string]string{
+		"squid.conf": "# squid fixture", "haproxy.cfg": "# haproxy fixture",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(egressDir, name), []byte(content), 0o600))
+	}
 	return backend.SpawnInput{
 		Scope:           "testscope",
 		Repo:            "owner/repo",
@@ -33,9 +40,10 @@ func testInput(spawnID string) backend.SpawnInput {
 		RunnerImage:     "ghcr.io/runsecure/runner-base:latest",
 		ProxyImage:      "ghcr.io/runsecure/proxy:latest",
 		JITConfigB64:    "dGVzdC1qaXQtY29uZmlnLWI2NA==",
-		EgressConfigDir: "",
+		EgressConfigDir: egressDir,
 		EnableDNSMasq:   false,
 		TCPEgressPorts:  []int{443},
+		KubeDNSCIDR:     "10.96.0.10/32",
 	}
 }
 
@@ -63,7 +71,7 @@ func TestName(t *testing.T) {
 func TestSpawn_CreatesAllObjects(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-abc")
+	in := testInput(t, "spawn-abc")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -135,7 +143,7 @@ func TestSpawn_CreatesAllObjects(t *testing.T) {
 func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-refs")
+	in := testInput(t, "spawn-refs")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -153,7 +161,7 @@ func TestSpawn_Handle_ContainsAllRequiredRefs(t *testing.T) {
 func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-proxy-ingress")
+	in := testInput(t, "spawn-proxy-ingress")
 
 	_, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -194,10 +202,10 @@ func TestSpawn_Idempotent_Namespace(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	_, err := b.Spawn(ctx, testInput("spawn-idem-1"))
+	_, err := b.Spawn(ctx, testInput(t, "spawn-idem-1"))
 	require.NoError(t, err, "first Spawn must succeed")
 
-	_, err = b.Spawn(ctx, testInput("spawn-idem-2"))
+	_, err = b.Spawn(ctx, testInput(t, "spawn-idem-2"))
 	require.NoError(t, err, "second Spawn in the same scope must succeed (namespace already exists)")
 }
 
@@ -211,7 +219,7 @@ func TestWaitForExit_Succeeded(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-ok")
+	in := testInput(t, "spawn-wait-ok")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -241,7 +249,7 @@ func TestWaitForExit_Failed(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-fail")
+	in := testInput(t, "spawn-wait-fail")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -269,7 +277,7 @@ func TestWaitForExit_Timeout(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-wait-timeout")
+	in := testInput(t, "spawn-wait-timeout")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -287,7 +295,7 @@ func TestTeardown_DeletesOwningSecret(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-tear")
+	in := testInput(t, "spawn-tear")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -316,9 +324,10 @@ func TestTeardown_MissingSecret_IsIdempotentSuccess(t *testing.T) {
 		Backend: "kube",
 		Refs: map[string]string{
 			"namespace":  "runsecure-ghost",
-			"secret":     "rs-secret-ghost",
-			"runner_pod": "rs-runner-ghost",
-			"proxy_pod":  "rs-proxy-ghost",
+			"secret":     "rs-secret-ghost-spawn",
+			"runner_pod": "rs-runner-ghost-spawn",
+			"proxy_pod":  "rs-proxy-ghost-spawn",
+			"repo_label": "owner_repo",
 		},
 	}
 	require.NoError(t, b.Teardown(ctx, h, true),
@@ -330,7 +339,8 @@ func TestTeardown_RemovesExactEgressConfigDir(t *testing.T) {
 	egressDir := filepath.Join(t.TempDir(), "custom-egress", "spawn")
 	require.NoError(t, os.MkdirAll(egressDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "squid.conf"), []byte("fixture"), 0o600))
-	in := testInput("spawn-egress-cleanup")
+	require.NoError(t, os.WriteFile(filepath.Join(egressDir, "haproxy.cfg"), []byte("fixture"), 0o600))
+	in := testInput(t, "spawn-egress-cleanup")
 	in.EgressConfigDir = egressDir
 	h, err := b.Spawn(context.Background(), in)
 	require.NoError(t, err)
@@ -346,7 +356,14 @@ func TestTeardown_RemovesExactEgressConfigDir(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
-	cs := fake.NewSimpleClientset()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-secret-spawn-cleanup-errors", Namespace: "runsecure-cleanup-errors",
+		Labels: map[string]string{
+			"runsecure.io/scope": "cleanup-errors", "runsecure.io/repo": "owner_repo",
+			"runsecure.io/spawn-id": "spawn-cleanup-errors", "runsecure.io/role": "proxy",
+		},
+	}}
+	cs := fake.NewSimpleClientset(secret)
 	deleteErr := errors.New("injected secret deletion failure")
 	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, deleteErr
@@ -363,7 +380,8 @@ func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
 		Backend: "kube",
 		Refs: map[string]string{
 			"namespace":         "runsecure-cleanup-errors",
-			"secret":            "rs-secret-cleanup-errors",
+			"secret":            "rs-secret-spawn-cleanup-errors",
+			"repo_label":        "owner_repo",
 			"egress_config_dir": filepath.Join(blockingParent, "spawn"),
 		},
 	}
@@ -380,7 +398,7 @@ func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
 func TestReconcile_FindsSpawnAfterSpawn(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
-	in := testInput("spawn-recon")
+	in := testInput(t, "spawn-recon")
 
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
@@ -413,7 +431,7 @@ func TestReconcile_MultipleSpawns(t *testing.T) {
 
 	spawnIDs := []string{"recon-s1", "recon-s2", "recon-s3"}
 	for _, id := range spawnIDs {
-		in := testInput(id)
+		in := testInput(t, id)
 		in.Scope = scope
 		_, err := b.Spawn(ctx, in)
 		require.NoError(t, err, "Spawn %s must succeed", id)
@@ -458,10 +476,39 @@ func TestSpawn_ApplySpawnError(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	in := testInput("spawn-applyerr")
+	in := testInput(t, "spawn-applyerr")
 	_, err := b.Spawn(ctx, in)
 	require.Error(t, err, "Spawn must return an error when ApplySpawn fails")
 	assert.Contains(t, err.Error(), "apply spawn")
+}
+
+func TestSpawn_ApplyAndRollbackFailureReturnsExactTeardownHandle(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("injected pod create error")
+	})
+	failDelete := true
+	cs.PrependReactor("delete", "secrets", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		if failDelete {
+			return true, nil, errors.New("injected secret delete error")
+		}
+		return false, nil, nil
+	})
+	b := backendkube.New(kube.NewClient(cs))
+	in := testInput(t, "spawn-rollback-debt")
+
+	h, err := b.Spawn(context.Background(), in)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "apply spawn")
+	require.Contains(t, err.Error(), "rollback spawn")
+	require.Equal(t, "kube", h.Backend)
+	require.Equal(t, kube.Namespace(in.Scope), h.Refs["namespace"])
+	require.NotEmpty(t, h.Refs["secret"])
+
+	failDelete = false
+	require.NoError(t, b.Teardown(context.Background(), h, true),
+		"returned handle must support exact cleanup after the dependency recovers")
 }
 
 // TestSpawn_EnsureNamespaceError verifies that an EnsureNamespace failure
@@ -477,7 +524,7 @@ func TestSpawn_EnsureNamespaceError(t *testing.T) {
 	b := backendkube.New(c)
 	ctx := context.Background()
 
-	_, err := b.Spawn(ctx, testInput("spawn-nserr"))
+	_, err := b.Spawn(ctx, testInput(t, "spawn-nserr"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ensure namespace")
 }
@@ -558,8 +605,9 @@ func TestSpawn_SecretContainsSquidCfg(t *testing.T) {
 	dir := t.TempDir()
 	squidContent := "# squid config test"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "squid.conf"), []byte(squidContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "haproxy.cfg"), []byte("# haproxy"), 0o644))
 
-	in := testInput("spawn-squid-cfg")
+	in := testInput(t, "spawn-squid-cfg")
 	in.EgressConfigDir = dir
 
 	h, err := b.Spawn(ctx, in)
@@ -581,8 +629,9 @@ func TestSpawn_SecretContainsHAProxyCfg(t *testing.T) {
 	dir := t.TempDir()
 	haproxyContent := "# haproxy config test"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "haproxy.cfg"), []byte(haproxyContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "squid.conf"), []byte("# squid"), 0o644))
 
-	in := testInput("spawn-haproxy-cfg")
+	in := testInput(t, "spawn-haproxy-cfg")
 	in.EgressConfigDir = dir
 
 	h, err := b.Spawn(ctx, in)
@@ -597,22 +646,76 @@ func TestSpawn_SecretContainsHAProxyCfg(t *testing.T) {
 		"Secret must contain haproxy.cfg content from EgressConfigDir")
 }
 
-func TestSpawn_SecretMissingFiles_NoError(t *testing.T) {
+func TestSpawn_RequiredEgressConfigsFailClosed(t *testing.T) {
 	b, _ := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-missing-files")
-	in.EgressConfigDir = "" // empty = no files
+	for _, tc := range []struct {
+		name   string
+		setup  func(*testing.T, *backend.SpawnInput)
+		wanted string
+	}{
+		{
+			name: "missing directory",
+			setup: func(_ *testing.T, in *backend.SpawnInput) {
+				in.EgressConfigDir = ""
+			},
+			wanted: "directory is required",
+		},
+		{
+			name: "empty squid",
+			setup: func(t *testing.T, in *backend.SpawnInput) {
+				require.NoError(t, os.WriteFile(filepath.Join(in.EgressConfigDir, "squid.conf"), nil, 0o600))
+			},
+			wanted: "squid.conf: config is empty",
+		},
+		{
+			name: "missing haproxy",
+			setup: func(t *testing.T, in *backend.SpawnInput) {
+				require.NoError(t, os.Remove(filepath.Join(in.EgressConfigDir, "haproxy.cfg")))
+			},
+			wanted: "haproxy.cfg",
+		},
+		{
+			name: "missing dnsmasq when enabled",
+			setup: func(_ *testing.T, in *backend.SpawnInput) {
+				in.EnableDNSMasq = true
+			},
+			wanted: "dnsmasq.conf",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := testInput(t, "spawn-missing-files")
+			tc.setup(t, &in)
+			_, err := b.Spawn(ctx, in)
+			require.ErrorContains(t, err, tc.wanted)
+		})
+	}
+}
 
-	_, err := b.Spawn(ctx, in)
-	require.NoError(t, err, "Spawn must succeed when EgressConfigDir is empty")
+func TestSpawn_SecretContainsDNSMasqCfgWhenEnabled(t *testing.T) {
+	b, cs := newBackend(t)
+	in := testInput(t, "spawn-dnsmasq-cfg")
+	in.EnableDNSMasq = true
+	content := "# dnsmasq fixture"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(in.EgressConfigDir, "dnsmasq.conf"), []byte(content), 0o600,
+	))
+
+	h, err := b.Spawn(context.Background(), in)
+	require.NoError(t, err)
+	secret, err := cs.CoreV1().Secrets(kube.Namespace(in.Scope)).Get(
+		context.Background(), h.Refs["secret"], metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, content, secret.StringData["dnsmasq.conf"])
 }
 
 func TestSpawn_RunnerPodHasJITConfigFileEnv(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-jit-env")
+	in := testInput(t, "spawn-jit-env")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 
@@ -631,7 +734,7 @@ func TestSpawn_RunnerPodMountsJITSecret(t *testing.T) {
 	b, cs := newBackend(t)
 	ctx := context.Background()
 
-	in := testInput("spawn-jit-mount")
+	in := testInput(t, "spawn-jit-mount")
 	h, err := b.Spawn(ctx, in)
 	require.NoError(t, err)
 

@@ -21,13 +21,25 @@ cat >"${FAKE_BIN}/syft" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 OUTPUT=''
+SELECTION=''
 for arg in "$@"; do
     case "$arg" in
         syft-json=*) OUTPUT="${arg#syft-json=}" ;;
-        --select-catalogers=*) printf 'selection=%s\n' "${arg#*=}" >>"$FAKE_LOG" ;;
+        --select-catalogers=*) SELECTION="${arg#*=}"; printf 'selection=%s\n' "$SELECTION" >>"$FAKE_LOG" ;;
     esac
 done
 [[ -n "$OUTPUT" ]]
+if [[ "$SELECTION" == +binary-classifier-cataloger ]]; then
+    if [[ "${FAKE_PRESENCE_MODE:-good}" == good ]]; then
+        printf '%s\n' '{
+          "artifacts":[{"name":"rust","type":"binary","foundBy":"binary-classifier-cataloger","locations":[{"path":"/home/runner/.rustup/toolchains/stable/bin/rustc"}]}],
+          "descriptor":{"configuration":{"catalogers":{"used":["binary-classifier-cataloger"]}}}
+        }' >"$OUTPUT"
+    else
+        printf '%s\n' '{"artifacts":[],"descriptor":{"configuration":{"catalogers":{"used":["binary-classifier-cataloger"]}}}}' >"$OUTPUT"
+    fi
+    exit 0
+fi
 case "${FAKE_SBOM_MODE:-good}" in
     good)
         printf '%s\n' '{
@@ -118,6 +130,33 @@ if [[ -n "$TABLE_TARGET" && "$TABLE_TARGET" == "$SARIF_TARGET" && -f "$GOOD_SARI
     pass "blocking table and SARIF consume one exact SBOM"
 else
     fail "table and SARIF did not consume one exact SBOM"
+fi
+
+PRESENCE_SARIF="${TEST_TMP}/presence.sarif"
+if PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+    FAKE_PRESENCE_MODE=good bash "$SCANNER" image:test "$PRESENCE_SARIF" \
+    ca-certificates '' '' binary-classifier-cataloger rust >/dev/null 2>&1; then
+    pass "separate exact runtime presence inventory passes"
+else
+    fail "runtime presence inventory should pass"
+fi
+if grep -Fxq 'selection=+binary-classifier-cataloger' "$FAKE_LOG"; then
+    pass "runtime presence uses the one explicit supplemental cataloger"
+else
+    fail "runtime presence cataloger selection drifted"
+fi
+if grep -Eq '^grype=.*presence\.syft\.json' "$FAKE_LOG"; then
+    fail "generic runtime presence inventory must never feed Grype"
+else
+    pass "generic runtime presence inventory is isolated from Grype"
+fi
+if PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+    FAKE_PRESENCE_MODE=missing bash "$SCANNER" image:test \
+    "${TEST_TMP}/missing-presence.sarif" ca-certificates '' '' \
+    binary-classifier-cataloger rust >/dev/null 2>&1; then
+    fail "missing exact runtime presence should fail closed"
+else
+    pass "missing exact runtime presence fails closed"
 fi
 
 RAW_SARIF="${TEST_TMP}/raw.sarif"

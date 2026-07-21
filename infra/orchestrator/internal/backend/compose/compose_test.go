@@ -274,6 +274,28 @@ func TestSpawn_RollsBackNetworkOnSpawnError(t *testing.T) {
 	}
 }
 
+func TestSpawn_RollbackFailureReturnsExactTeardownHandle(t *testing.T) {
+	fd := newFakeDocker()
+	fd.errOnRole = "runner"
+	fd.deleteContainerErrs["cid-proxy"] = errors.New("proxy delete conflict")
+	fd.deleteNetworkErr = errors.New("network still has endpoint")
+	b := New(fd)
+
+	h, err := b.Spawn(context.Background(), minimalInput())
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "container rollback incomplete")
+	require.Contains(t, err.Error(), "rollback network")
+	require.Equal(t, "compose", h.Backend)
+	require.Equal(t, "cid-proxy", h.Refs["proxy"])
+	require.Equal(t, fd.networkID, h.Refs["network"])
+
+	fd.deleteContainerErrs["cid-proxy"] = nil
+	fd.deleteNetworkErr = nil
+	require.NoError(t, b.Teardown(context.Background(), h, true),
+		"returned handle must support an exact idempotent cleanup retry")
+}
+
 // TestSpawn_RollsBackNetworkOnNetworkCreateError is a sanity check: if
 // CreateNetwork itself fails, we return an error and do not attempt to spawn
 // containers.

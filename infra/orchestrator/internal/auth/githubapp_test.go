@@ -47,6 +47,33 @@ func generateTestKey(t *testing.T) (*rsa.PrivateKey, string) {
 	return key, keyFile
 }
 
+func TestKubernetesGitHubAppProviderRequiresProjectedSecretMode(t *testing.T) {
+	_, keyFile := generateTestKey(t)
+	if err := os.Chmod(keyFile, 0o440); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	provider, err := auth.NewKubernetesGitHubAppProvider(
+		1, 2, keyFile, "https://api.github.com",
+	)
+	if err != nil || provider == nil {
+		t.Fatalf("NewKubernetesGitHubAppProvider = %v, %v", provider, err)
+	}
+	if _, err := auth.NewGitHubAppProvider(
+		1, 2, keyFile, "https://api.github.com",
+	); err == nil || !strings.Contains(err.Error(), "0400") {
+		t.Fatalf("host constructor must continue rejecting 0440, got %v", err)
+	}
+
+	if err := os.Chmod(keyFile, 0o400); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if _, err := auth.NewKubernetesGitHubAppProvider(
+		1, 2, keyFile, "https://api.github.com",
+	); err == nil || !strings.Contains(err.Error(), "0440") {
+		t.Fatalf("expected projected-secret 0440 error, got %v", err)
+	}
+}
+
 // fakeInstallationServer returns an httptest.Server that responds to
 // POST /app/installations/{id}/access_tokens with the given token and expiry.
 // It records the Authorization header from each request and increments callCount.

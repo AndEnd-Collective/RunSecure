@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 var (
-	ErrAuthFailed     = errors.New("github: authentication failed (401/403)")
-	ErrRateLimited    = errors.New("github: rate-limited")
-	ErrRunnerNotFound = errors.New("github: runner not found")
+	ErrAuthFailed                   = errors.New("github: authentication failed (401/403)")
+	ErrRateLimited                  = errors.New("github: rate-limited")
+	ErrRunnerNotFound               = errors.New("github: runner not found")
+	ErrRecentJobSearchIndeterminate = errors.New("github: recent workflow job search exhausted its safety bound")
 )
 
 const githubPageSize = 100
@@ -73,9 +75,237 @@ type WorkflowJob struct {
 	RunID      int64    `json:"run_id,omitempty"`
 	Name       string   `json:"name"`
 	Status     string   `json:"status"`
+	Conclusion string   `json:"conclusion"`
 	Labels     []string `json:"labels"`
 	RunnerID   int64    `json:"runner_id"`
 	RunnerName string   `json:"runner_name"`
+}
+
+// RecentJobSearchBounds bounds the fallback used to correlate a short-lived
+// JIT runner after it has disappeared from the runner API. Since is sent to
+// GitHub's workflow-runs created filter. PriorityRunIDs are searched without
+// that filter so a later dependent job in an already-existing candidate run
+// cannot be missed. MaxRuns and MaxAPICalls are separate fail-closed guards:
+// reaching either before every eligible page is consumed makes the result
+// indeterminate rather than evidence of an unassigned exit.
+type RecentJobSearchBounds struct {
+	Since          time.Time
+	PriorityRunIDs []int64
+	MaxRuns        int
+	MaxAPICalls    int
+}
+
+// RecentJobSearchResult carries both the match and the last observed rate
+// limit so callers preserve the runner-management readiness signal.
+type RecentJobSearchResult struct {
+	Job          WorkflowJob
+	Found        bool
+	RateLimit    RateLimit
+	RunsExamined int
+	APICalls     int
+}
+
+// FindRecentWorkflowJobByRunner searches latest-attempt jobs from workflow
+// runs that GitHub classifies as queued, in progress, or completed. It is a
+// fallback for jobs that became eligible after the scheduler's demand poll.
+// A clean no-match is returned only after every page inside the time bound was
+// consumed; safety-bound exhaustion returns ErrRecentJobSearchIndeterminate.
+func (c *Client) FindRecentWorkflowJobByRunner(
+	ctx context.Context,
+	repo string,
+	runnerID int64,
+	runnerName string,
+	bounds RecentJobSearchBounds,
+) (RecentJobSearchResult, error) {
+	if bounds.Since.IsZero() {
+		return RecentJobSearchResult{}, errors.New("github: recent job search requires a non-zero since time")
+	}
+	if bounds.MaxRuns <= 0 || bounds.MaxAPICalls <= 0 {
+		return RecentJobSearchResult{}, errors.New("github: recent job search bounds must be positive")
+	}
+	if runnerID <= 0 && runnerName == "" {
+		return RecentJobSearchResult{}, errors.New("github: recent job search requires a runner id or name")
+	}
+
+	search := recentJobSearcher{
+		client: c, repo: repo, runnerID: runnerID, runnerName: runnerName,
+		bounds: bounds,
+	}
+	return search.run(ctx)
+}
+
+type recentJobSearcher struct {
+	client     *Client
+	repo       string
+	runnerID   int64
+	runnerName string
+	bounds     RecentJobSearchBounds
+	result     RecentJobSearchResult
+}
+
+func (s *recentJobSearcher) run(ctx context.Context) (RecentJobSearchResult, error) {
+	seenRuns := make(map[int64]bool, len(s.bounds.PriorityRunIDs))
+	for _, runID := range s.bounds.PriorityRunIDs {
+		if runID <= 0 || seenRuns[runID] {
+			continue
+		}
+		seenRuns[runID] = true
+		if s.result.RunsExamined >= s.bounds.MaxRuns {
+			return s.result, s.boundError("workflow run limit")
+		}
+		s.result.RunsExamined++
+		found, err := s.searchRun(ctx, runID)
+		if err != nil {
+			return s.result, err
+		}
+		if found {
+			return s.result, nil
+		}
+	}
+
+	for _, status := range []string{"queued", "in_progress", "completed"} {
+		for page := 1; ; page++ {
+			runs, err := s.workflowRunsPage(ctx, status, page)
+			if err != nil {
+				return s.result, err
+			}
+			for _, run := range runs {
+				if seenRuns[run.ID] {
+					continue
+				}
+				seenRuns[run.ID] = true
+				if s.result.RunsExamined >= s.bounds.MaxRuns {
+					return s.result, s.boundError("workflow run limit")
+				}
+				s.result.RunsExamined++
+				found, err := s.searchRun(ctx, run.ID)
+				if err != nil {
+					return s.result, err
+				}
+				if found {
+					return s.result, nil
+				}
+			}
+			if len(runs) < githubPageSize {
+				break
+			}
+		}
+	}
+	return s.result, nil
+}
+
+func (s *recentJobSearcher) workflowRunsPage(
+	ctx context.Context,
+	status string,
+	page int,
+) ([]WorkflowRun, error) {
+	query := url.Values{}
+	query.Set("status", status)
+	query.Set("created", ">="+s.bounds.Since.UTC().Format(time.RFC3339))
+	query.Set("per_page", fmt.Sprint(githubPageSize))
+	query.Set("page", fmt.Sprint(page))
+	path := fmt.Sprintf("/repos/%s/actions/runs?%s", s.repo, query.Encode())
+	resp, err := s.do(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, responseError(resp, "list recent workflow runs")
+	}
+	var body workflowRunsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("github: decode recent workflow runs: %w", err)
+	}
+	return body.WorkflowRuns, nil
+}
+
+func (s *recentJobSearcher) searchRun(ctx context.Context, runID int64) (bool, error) {
+	for page := 1; ; page++ {
+		query := url.Values{}
+		query.Set("filter", "latest")
+		query.Set("per_page", fmt.Sprint(githubPageSize))
+		query.Set("page", fmt.Sprint(page))
+		path := fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?%s", s.repo, runID, query.Encode())
+		resp, err := s.do(ctx, path)
+		if err != nil {
+			return false, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			err := responseError(resp, "list recent workflow jobs")
+			_ = resp.Body.Close()
+			return false, err
+		}
+		var body workflowJobsResponse
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return false, fmt.Errorf("github: decode recent workflow jobs: %w", err)
+		}
+		for _, job := range body.Jobs {
+			if !workflowJobMatchesRunner(job, s.runnerID, s.runnerName) {
+				continue
+			}
+			job.RunID = runID
+			s.result.Job = job
+			s.result.Found = true
+			return true, nil
+		}
+		if len(body.Jobs) < githubPageSize {
+			return false, nil
+		}
+	}
+}
+
+func (s *recentJobSearcher) do(ctx context.Context, path string) (*http.Response, error) {
+	if s.result.APICalls >= s.bounds.MaxAPICalls {
+		return nil, s.boundError("API call limit")
+	}
+	s.result.APICalls++
+	resp, err := s.client.Do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	s.result.RateLimit = newestRateLimit(s.result.RateLimit, ParseRateLimit(resp.Header))
+	return resp, nil
+}
+
+func (s *recentJobSearcher) boundError(bound string) error {
+	return fmt.Errorf(
+		"%w: %s reached after %d runs and %d API calls",
+		ErrRecentJobSearchIndeterminate, bound, s.result.RunsExamined, s.result.APICalls,
+	)
+}
+
+func workflowJobMatchesRunner(job WorkflowJob, runnerID int64, runnerName string) bool {
+	if job.Status != "in_progress" && job.Status != "completed" {
+		return false
+	}
+	if job.RunnerID > 0 && runnerID > 0 {
+		return job.RunnerID == runnerID
+	}
+	return runnerName != "" && job.RunnerName == runnerName
+}
+
+// GetWorkflowJob returns the current state and runner correlation for one job.
+// The scheduler carries candidate job IDs into a spawn so a fast JIT job that
+// completes between runner samples can still prove assignment after exit.
+func (c *Client) GetWorkflowJob(ctx context.Context, repo string, jobID int64) (WorkflowJob, RateLimit, error) {
+	resp, err := c.Do(ctx, http.MethodGet,
+		fmt.Sprintf("/repos/%s/actions/jobs/%d", repo, jobID), nil)
+	if err != nil {
+		return WorkflowJob{}, RateLimit{}, err
+	}
+	defer resp.Body.Close()
+	lim := ParseRateLimit(resp.Header)
+	if resp.StatusCode != http.StatusOK {
+		return WorkflowJob{}, lim, responseError(resp, "get workflow job")
+	}
+	var job WorkflowJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return WorkflowJob{}, lim, fmt.Errorf("github: decode workflow job: %w", err)
+	}
+	return job, lim, nil
 }
 
 // JobDemand is an atomic view of eligible queued jobs from the latest poll.
