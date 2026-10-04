@@ -186,17 +186,39 @@ jobs:
             tools/corner-lint
             tests/integration/orchestrator/compose/mock-github
           )
+          # k8s.io/kube-openapi publishes no semver tags, so `go get -u` always
+          # walks it to the newest pseudo-version — which is routinely ahead of
+          # the k8s.io/{api,apimachinery,client-go} release the module pins.
+          # The two then disagree on which major of
+          # sigs.k8s.io/structured-merge-diff to use, and the module resolves
+          # but does not compile:
+          #   apimachinery/pkg/util/managedfields/internal/typeconverter.go:51:
+          #   cannot use typeSchema.Types (…/structured-merge-diff/v7/schema) as
+          #   […]/structured-merge-diff/v6/schema value in struct literal
+          # Re-pin it to exactly the revision the k8s release asks for, read out
+          # of apimachinery's own go.mod rather than hardcoded here so it
+          # follows future k8s bumps on its own.
+          repin_kube_openapi() {
+            grep -q 'k8s.io/kube-openapi' go.mod || return 0
+            local am_mod want
+            am_mod=$(go list -m -f '{{.GoMod}}' k8s.io/apimachinery) || return 0
+            want=$(awk '$1=="k8s.io/kube-openapi"{print $2; exit}' "$am_mod")
+            if [ -z "$want" ]; then
+              echo "::error::could not read the kube-openapi revision required by k8s.io/apimachinery"
+              return 1
+            fi
+            echo "re-pinning k8s.io/kube-openapi to ${want} (required by apimachinery)"
+            go get "k8s.io/kube-openapi@${want}"
+            go mod tidy
+          }
+
           for mod in "${MODULES[@]}"; do
             # -t so test-only direct deps (testify) are upgraded too; without
             # it `go get -u ./...` silently leaves them pinned.
-            ( cd "$mod" && go get -u -t ./... && go mod tidy )
+            ( cd "$mod" && go get -u -t ./... && go mod tidy && repin_kube_openapi )
           done
-          # A blanket `go get -u` can produce a module that resolves but does
-          # not compile: k8s.io/kube-openapi has no semver tags, so -u walks it
-          # to a pseudo-version newer than the k8s.io/{api,apimachinery,client-go}
-          # release pins, and the two disagree on which major of
-          # sigs.k8s.io/structured-merge-diff to use. Build and vet here so the
-          # bot never opens a PR that cannot build.
+          # Build, vet and test every module so the bot can never open a PR
+          # that does not compile, whatever else `go get -u` decided to move.
           for mod in "${MODULES[@]}"; do
             ( cd "$mod" && go build ./... && go vet ./... && go test ./... )
           done
