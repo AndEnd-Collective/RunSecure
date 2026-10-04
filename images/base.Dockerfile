@@ -21,35 +21,75 @@
 #  15.  Multi-stage ready (used as FROM target)
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS base
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS base
 
 # ---- Build arguments --------------------------------------------------------
-# All pins follow a 48-hour freshness rule: the chosen version must be at
-# least 48h old (we don't adopt bleeding-edge releases that could still
-# be yanked for regressions). Renovate's customManager handles ongoing
-# bumps with this same window.
+# Every pin here tracks absolute latest stable and is bumped in lockstep.
+# There is no cooling-off window: a release that is held back is a release
+# whose security fixes we are not shipping, and the checksum pin plus the
+# per-image Grype gate already catch a bad upstream build. Each pin records
+# why it is at the version it is at, so a bump is a one-line audit.
 #
-# RUNNER_VERSION 2.335.1 (2026-06-09): background steps, Node 24 date
-#   update, Docker v29.5.2 + Buildx v0.34.1, Ubuntu 26.04 compat.
-ARG RUNNER_VERSION=2.335.1
-ARG RUNNER_SHA256_ARM64=6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207
-ARG RUNNER_SHA256_AMD64=4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
+# RUNNER_VERSION 2.337.0 — latest stable. Checksums are the ones published
+#   in the release body (`<!-- BEGIN SHA linux-x64 -->` / `linux-arm64`).
+ARG RUNNER_VERSION=2.337.0
+ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+ARG RUNNER_SHA256_AMD64=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
 # The runner tarball vendors npm under both of its private Node runtimes.
 # Refresh that payload from a checksum-pinned npm release so newly disclosed
 # vulnerabilities do not remain trapped behind the actions/runner release
-# cadence. npm 11.18.0 (2026-06-29, beyond the 48h freshness window) supports
-# both bundled Node 20 and Node 24 runtimes.
-ARG NPM_VERSION=11.18.0
-ARG NPM_SHA256=73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e
-# GH_CLI_VERSION 2.96.0 (2026-07-02) — latest stable. Still built with
-#   go1.26.4 (verified: `go version` on the released binary reports go1.26.4),
-#   so it clears the older go-stdlib CVEs but NOT GO-2026-4970
-#   (CVE-2026-39822, "os symlink escape", first fixed in go1.26.5). No gh
-#   release ships on go1.26.5+ yet, so that one is carried as a justified
-#   allow in .grype.yaml until a gh build on go1.26.5+ exists.
-ARG GH_CLI_VERSION=2.96.0
-ARG GH_CLI_SHA256_AMD64=11a731f4e0ca8c3db96ef6d2cc404dcab3d78247ce0e07c53e07117e7627d6a1
-ARG GH_CLI_SHA256_ARM64=334dd9c6704fc1656a48e475c5a3a9aa32bbadb87fa1777513bc626af4a99e89
+# cadence.
+#
+# This is deliberately npm 11.21.0 and NOT npm 12.x, which is the current
+# `latest`. runner 2.337.0 bundles node20=20.20.2 and node24=24.19.0, and npm
+# 12.2.0 declares `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0` — it does
+# not support Node 20, so installing it into externals/node20 would ship a
+# broken npm to every action that still runs on the node20 handler. npm
+# 11.21.0 declares `^20.17.0 || >=22.9.0` and covers both runtimes.
+#
+# Nothing is given up by staying on 11.x here: 11.21.0 vendors exactly the
+# same versions of the CVE-tracked transitive deps as 12.2.0 does. The
+# workflow-facing npm in images/node.Dockerfile runs on NodeSource Node 24
+# and is pinned to 12.2.0 there.
+#
+# Revisit when the runner drops its node20 external — then this can follow
+# `latest` again. NPM_SHA256 is the sha256 of the registry tarball
+# (https://registry.npmjs.org/npm/-/npm-11.21.0.tgz).
+ARG NPM_VERSION=11.21.0
+ARG NPM_SHA256=783e7c92bf73b442fb800c2d6ef3921e86da8894a700fed45140e37916877482
+# Two of npm's own bundled dependencies lag behind their security fixes, in
+# EVERY npm release including the current `latest` (12.2.0 bundles the same
+# versions as 11.21.0). Refreshing npm alone is therefore not enough — these
+# are HIGH findings with fixes available, so the Grype gate blocks the publish:
+#
+#   undici 6.28.0          GHSA-rfgv-xxqx-mfg5  (>=6.7.0 <6.28.1)  WebSocket DoS
+#   brace-expansion 5.0.9  GHSA-6j4f-fj2g-mc7p  (>=4.0.0 <5.0.10)  recursion DoS
+#                          GHSA-qhr7-859c-m2p7  (>=4.0.0 <5.0.11)  recursion DoS
+#
+# So the same checksum-pinned overwrite the npm payload already gets is applied
+# one level down, to these two packages inside npm's node_modules. Both are
+# patch-level bumps within the major npm depends on, and each image carries
+# exactly one copy of each (verified with `find` in the built images), so there
+# is no nested copy left behind at an older version.
+# Re-evaluate on every npm bump: if npm catches up, drop these and let the
+# bundled versions stand.
+ARG UNDICI_VERSION=6.29.0
+ARG UNDICI_SHA256=b7d888586625c1508c0e17463bac86aecd22ed6053bc945372aed8cae14406fc
+ARG BRACE_EXPANSION_VERSION=5.0.12
+ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
+# GH_CLI_VERSION 2.102.0 — latest stable, and the first pin in this file built
+#   with go1.27.1 (verified: `go version` on the released linux_amd64 binary
+#   reports go1.27.1). That clears GO-2026-4970 / CVE-2026-39822 ("os symlink
+#   escape", fixed in go1.26.5), which earlier gh builds forced us to carry as
+#   a justified allow in .grype.yaml. Those go-stdlib allows are removed in
+#   this change — if a future gh release regresses to an older Go, the Grype
+#   gate will fail loudly rather than pass on a stale ignore.
+#   These are the checksums of the .deb packages (what the install step below
+#   downloads), NOT the .tar.gz archives — the release publishes both and they
+#   differ.
+ARG GH_CLI_VERSION=2.102.0
+ARG GH_CLI_SHA256_AMD64=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0
+ARG GH_CLI_SHA256_ARM64=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237
 
 ARG TARGETARCH
 
@@ -129,6 +169,14 @@ RUN ARCH=$(dpkg --print-architecture) \
          "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" \
          -o /tmp/npm.tgz \
     && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+         -o /tmp/undici.tgz \
+    && echo "${UNDICI_SHA256}  /tmp/undici.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
+         -o /tmp/brace-expansion.tgz \
+    && echo "${BRACE_EXPANSION_SHA256}  /tmp/brace-expansion.tgz" | sha256sum -c - \
     && for NODE_RUNTIME in node20 node24; do \
          NODE_PREFIX="/home/runner/actions-runner/externals/${NODE_RUNTIME}"; \
          rm -rf "${NODE_PREFIX}/lib/node_modules/npm"; \
@@ -137,20 +185,29 @@ RUN ARCH=$(dpkg --print-architecture) \
            --strip-components=1 \
            --no-same-owner \
            -C "${NODE_PREFIX}/lib/node_modules/npm"; \
+         NPM_MODULES="${NODE_PREFIX}/lib/node_modules/npm/node_modules"; \
+         for VENDORED in undici brace-expansion; do \
+           rm -rf "${NPM_MODULES}/${VENDORED}"; \
+           mkdir -p "${NPM_MODULES}/${VENDORED}"; \
+           tar xzf "/tmp/${VENDORED}.tgz" \
+             --strip-components=1 \
+             --no-same-owner \
+             -C "${NPM_MODULES}/${VENDORED}"; \
+         done; \
          test "$("${NODE_PREFIX}/bin/node" \
            "${NODE_PREFIX}/lib/node_modules/npm/bin/npm-cli.js" --version)" \
            = "${NPM_VERSION}"; \
          test "$("${NODE_PREFIX}/bin/node" -p \
            "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/tar/package.json').version")" \
-           = "7.5.19"; \
+           = "7.5.22"; \
          test "$("${NODE_PREFIX}/bin/node" -p \
            "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" \
-           = "5.0.7"; \
+           = "${BRACE_EXPANSION_VERSION}"; \
          test "$("${NODE_PREFIX}/bin/node" -p \
            "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/undici/package.json').version")" \
-           = "6.27.0"; \
+           = "${UNDICI_VERSION}"; \
        done \
-    && rm /tmp/runner.tar.gz /tmp/npm.tgz \
+    && rm /tmp/runner.tar.gz /tmp/npm.tgz /tmp/undici.tgz /tmp/brace-expansion.tgz \
     && chown -R runner:0 /home/runner/actions-runner
 
 # ---- Install runner dependencies (.NET runtime libs) ------------------------
@@ -216,7 +273,10 @@ ENV PATH="/home/runner/actions-runner:/home/runner/actions-runner/bin:/usr/local
 # only knows about its own image set). That's a known, accepted UI quirk —
 # the values themselves are still informative.
 ENV ImageOS=runsecure-bookworm
-ENV ImageVersion=2.335.1
+# Derived from the ARG rather than restated, so it cannot drift from the
+# runner actually installed above — it had been left at 2.335.1 across a
+# RUNNER_VERSION bump before this was wired up.
+ENV ImageVersion=${RUNNER_VERSION}
 
 # ---- Job-started diagnostics hook ------------------------------------------
 # When ACTIONS_RUNNER_HOOK_JOB_STARTED is set, the actions-runner executes

@@ -51,10 +51,10 @@ jobs:
       build_sha: ${{ steps.verify.outputs.build_sha }}
       publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download manifest from the exact Publish Images run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-image-manifest-${{ inputs.image_version }}
           path: .publish-manifest
@@ -63,7 +63,7 @@ jobs:
           run-id: ${{ inputs.publish_run_id }}
 
       - name: Download manifest proven by the exact acceptance run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-publish-manifest-${{ inputs.publish_run_id }}
           path: .accepted-manifest
@@ -102,7 +102,7 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
       - name: Download receipt from the exact live-acceptance run and attempt
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ steps.live-run.outputs.artifact_name }}
           path: .live-acceptance/receipt
@@ -322,7 +322,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Preserve the verified manifest for promotion and release
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-release-image-manifest-${{ inputs.image_version }}
           path: .publish-manifest/release-images.json
@@ -338,19 +338,19 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-manifest.outputs.build_sha }}
 
       - name: Download verified immutable manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-release-image-manifest-${{ needs.resolve-manifest.outputs.version }}
           path: .verified-manifest
 
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -378,14 +378,14 @@ jobs:
       BUILD_SHA: ${{ needs.resolve-manifest.outputs.build_sha }}
       VERSION: ${{ needs.resolve-manifest.outputs.version }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-manifest.outputs.build_sha }}
           fetch-depth: 0
           fetch-tags: true
 
       - name: Download verified release manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-release-image-manifest-${{ needs.resolve-manifest.outputs.version }}
           path: .verified-manifest

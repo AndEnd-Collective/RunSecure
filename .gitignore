@@ -79,4 +79,9 @@ tests/integration/orchestrator/compose/testdata/
 
 # SDD workflow scratch (local-only)
 .superpowers/
+
+# Compiled Go binaries left behind by `go build ./...` in each module
 infra/orchestrator/orchestrator
+infra/socket-proxy/socket-proxy
+tools/corner-lint/corner-lint
+tests/integration/orchestrator/compose/mock-github/mock-github

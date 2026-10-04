@@ -10,7 +10,7 @@
 # monitors them. Exits non-zero if Squid exits non-zero.
 # ============================================================================
 
-FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Egress Proxy"

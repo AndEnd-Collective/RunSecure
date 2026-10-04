@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 
 # Build stage. CI uses buildx for multi-arch via --platform=$BUILDPLATFORM
 # and TARGETOS/TARGETARCH; on a local docker build without buildx the
@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 \
     go build -trimpath -ldflags='-s -w' \
     -o /out/socket-proxy ./cmd/socket-proxy
 
-FROM gcr.io/distroless/static-debian12:latest@sha256:9c346e4be81b5ca7ff31a0d89eaeade58b0f95cfd3baed1f36083ddb47ca3160
+FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 COPY --from=build /out/socket-proxy /usr/local/bin/socket-proxy
 COPY allowed-images.txt /etc/runsecure/socket-proxy/allowed-images.txt
 # Runs as root by necessity: /var/run/docker.sock on Docker Desktop / Colima

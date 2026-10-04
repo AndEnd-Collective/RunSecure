@@ -19,10 +19,24 @@ FROM ${BASE_REF} AS node-build
 
 ARG NODE_VERSION=24
 # Keep the workflow-facing npm independent from the version bundled by
-# NodeSource. npm 11.18.0 (2026-06-29, beyond the 48h freshness window) is
-# checksum-pinned and contains fixed tar, brace-expansion, and undici.
-ARG NPM_VERSION=11.18.0
-ARG NPM_SHA256=73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e
+# NodeSource. npm 12.2.0 is latest stable and checksum-pinned.
+#
+# This can be 12.x while images/base.Dockerfile is held at 11.21.0 because
+# this image runs NodeSource Node 24, which satisfies npm 12's
+# `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0`. The base image installs
+# npm into the runner's externals/node20 (Node 20.20.2), which does not.
+ARG NPM_VERSION=12.2.0
+ARG NPM_SHA256=6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677
+# npm bundles undici and brace-expansion versions that are behind their
+# security fixes in every current release, including 12.2.0 — see the longer
+# note in images/base.Dockerfile. Both are HIGH with fixes available, so the
+# Grype gate blocks the publish until they are replaced. Same checksum-pinned
+# overwrite, same versions as the base image, so the two npm installations do
+# not drift apart.
+ARG UNDICI_VERSION=6.29.0
+ARG UNDICI_SHA256=b7d888586625c1508c0e17463bac86aecd22ed6053bc945372aed8cae14406fc
+ARG BRACE_EXPANSION_VERSION=5.0.12
+ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Node.js Composition Stage"
@@ -58,6 +72,14 @@ RUN apt-get update \
          "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" \
          -o /tmp/npm.tgz \
     && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+         -o /tmp/undici.tgz \
+    && echo "${UNDICI_SHA256}  /tmp/undici.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
+         -o /tmp/brace-expansion.tgz \
+    && echo "${BRACE_EXPANSION_SHA256}  /tmp/brace-expansion.tgz" | sha256sum -c - \
     && NPM_ROOT="$(npm root --global)" \
     && rm -rf "${NPM_ROOT}/npm" \
     && mkdir -p "${NPM_ROOT}/npm" \
@@ -65,18 +87,26 @@ RUN apt-get update \
          --strip-components=1 \
          --no-same-owner \
          -C "${NPM_ROOT}/npm" \
-    && rm /tmp/npm.tgz \
+    && for VENDORED in undici brace-expansion; do \
+         rm -rf "${NPM_ROOT}/npm/node_modules/${VENDORED}"; \
+         mkdir -p "${NPM_ROOT}/npm/node_modules/${VENDORED}"; \
+         tar xzf "/tmp/${VENDORED}.tgz" \
+           --strip-components=1 \
+           --no-same-owner \
+           -C "${NPM_ROOT}/npm/node_modules/${VENDORED}"; \
+       done \
+    && rm /tmp/npm.tgz /tmp/undici.tgz /tmp/brace-expansion.tgz \
     && node --version \
     && test "$(npm --version)" = "${NPM_VERSION}" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/tar/package.json').version")" \
-         = "7.5.19" \
+         = "7.5.22" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/brace-expansion/package.json').version")" \
-         = "5.0.7" \
+         = "${BRACE_EXPANSION_VERSION}" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/undici/package.json').version")" \
-         = "6.27.0"
+         = "${UNDICI_VERSION}"
 
 # ---- BUILD-TIME ASSERTION ---------------------------------------------------
 # Fail the build if the installed Node major version does not match

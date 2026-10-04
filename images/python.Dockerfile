@@ -63,9 +63,9 @@ RUN ARCH_DEB=$(dpkg --print-architecture) \
        esac \
     && case "${PYTHON_VERSION}" in \
          3.12) \
-            PY_FULL=3.12.13; PBS_TAG=20260610; \
-            SHA_AMD64=c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a; \
-            SHA_ARM64=bc74cf1bb517651868342b0619b21eaaf9f94a2022c9c61886dd980e16fb091b ;; \
+            PY_FULL=3.12.15; PBS_TAG=20261003; \
+            SHA_AMD64=f937814031eab4698ca6d07ec606ede1825768f3f3e99af76d9db3900bee03c5; \
+            SHA_ARM64=95c01982c9fcb9d95b0acfdb5eb8a6e0099dd11edf062314a474228d93f2b765 ;; \
          *) echo "Unsupported PYTHON_VERSION: ${PYTHON_VERSION}" && exit 1 ;; \
        esac \
     && if [ "$ARCH_DEB" = "amd64" ]; then EXPECTED_SHA="$SHA_AMD64"; else EXPECTED_SHA="$SHA_ARM64"; fi \

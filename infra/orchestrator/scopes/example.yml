@@ -21,9 +21,25 @@ security_profile: strict
 allow_project_overrides:
   - allow_wildcards
 
+# Two credential types are supported. The Compose wrapper reads auth.type
+# from this file and initializes only the matching secret, so a github_app
+# scope does not need a PAT and a pat scope does not need a private key.
+#
+# auth.type: pat — set RUNSECURE_PAT_FILE in the scope .env to the host PAT
+# (regular file, owned by you, mode 0400).
 auth:
   type: pat
   pat_file: /run/secrets/runsecure-pat
+
+# auth.type: github_app — set RUNSECURE_APP_PRIVATE_KEY_FILE in the scope .env
+# to the host PEM (regular file, owned by you, mode 0400). The orchestrator
+# mints and refreshes installation tokens from it; no PAT is involved.
+#
+# auth:
+#   type: github_app
+#   app_id: 123456
+#   installation_id: 7890123
+#   private_key_file: /run/secrets/runsecure-app-private-key
 
 orch_egress:
   allow_domains:

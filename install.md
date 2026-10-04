@@ -143,7 +143,7 @@ same release contains the matching proxy and runner digest allowlist; mixing
 releases fails closed with `socket_proxy_denied`.
 
 ```sh
-RUNSECURE_RELEASE=2.1.8
+RUNSECURE_RELEASE=2.1.10
 RUNSECURE_RELEASE_MANIFEST="$HOME/.config/runsecure/runsecure-v${RUNSECURE_RELEASE}-release-images.json"
 gh release download "v${RUNSECURE_RELEASE}" \
   --repo AndEnd-Collective/RunSecure \
@@ -178,6 +178,32 @@ RUNSECURE_ORCHESTRATOR_HEALTH_PORT=8080
 RUNSECURE_ORCHESTRATOR_STATE_PORT=8081
 EOF
 ```
+
+### GitHub App authentication instead of a PAT
+
+The wrapper reads `auth.type` from the scope YAML and initializes only the
+credential that type needs, so an App-authenticated scope does not require a
+PAT at all. Replace the `auth:` block in the scope file with:
+
+```yaml
+auth:
+  type: github_app
+  app_id: 123456
+  installation_id: 7890123
+  private_key_file: /run/secrets/runsecure-app-private-key
+```
+
+and in the `.env`, swap `RUNSECURE_PAT_FILE` for the host path of the App's
+private key:
+
+```sh
+RUNSECURE_APP_PRIVATE_KEY_FILE=$HOME/.config/runsecure/datacentric-app.pem
+```
+
+The key must meet the same host secret contract as a PAT: a regular,
+non-symlink file owned by the invoking UID at mode `0400`. The orchestrator
+mints and refreshes installation tokens from it; no token is ever written to
+disk or to the environment.
 
 `RUNSECURE_PROJECTS_ROOT` is the *parent* directory holding every repo
 checkout this scope will serve — `compose.scope.yml` mounts it once,
@@ -315,9 +341,10 @@ runsecure.orchestrator.spawn.completed
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Wrapper rejects the PAT as non-regular, symlinked, wrong-owner, or not mode `0400` | `RUNSECURE_PAT_FILE` does not meet the host secret contract | Point it directly at a regular file owned by the invoking UID, then run `chmod 0400 <pat>`; do not use a symlink |
-| Orchestrator exits with `auth.pat_file ... mode 0400` | The named-volume PAT copy has unexpected permissions | Re-run the stack through `infra/scripts/orchestrator-compose.sh`; `pat-init` replaces the copy at UID 65532 and mode `0400` |
-| `auth.pat_file ... no such file` | PAT initialization did not complete | Inspect `rs-orch-<scope>-pat-init`, then verify `RUNSECURE_PAT_FILE` in the external `.env` points at the real host file |
+| Wrapper rejects the credential as non-regular, symlinked, wrong-owner, or not mode `0400` | `RUNSECURE_PAT_FILE` (or `RUNSECURE_APP_PRIVATE_KEY_FILE`) does not meet the host secret contract | Point it directly at a regular file owned by the invoking UID, then `chmod 0400` it; do not use a symlink |
+| Orchestrator exits with `auth.pat_file ... mode 0400` (or `auth.private_key_file ...`) | The named-volume credential copy has unexpected permissions | Re-run the stack through `infra/scripts/orchestrator-compose.sh`; `auth-secret-init` replaces the copy at UID 65532 and mode `0400` |
+| `auth.pat_file ... no such file` | Credential initialization did not complete | Inspect `rs-orch-<scope>-auth-secret-init`, then verify `RUNSECURE_PAT_FILE` / `RUNSECURE_APP_PRIVATE_KEY_FILE` in the external `.env` points at the real host file |
+| Wrapper says a variable "is required" for an auth type you are not using | `auth.type` in the scope YAML does not match the credential you supplied | The wrapper follows `auth.type`: `pat` needs `RUNSECURE_PAT_FILE`, `github_app` needs `RUNSECURE_APP_PRIVATE_KEY_FILE`. Fix whichever is wrong |
 | Many `runsecure.orchestrator.auth.degraded` events | PAT lacks Administration:RW for one or more listed repos | Re-issue with correct permissions; the orchestrator reloads on PAT-file mtime change |
 | Many `socket_proxy_denied` in `spawn.failed` events | Runner image digest is absent from the baked release allowlist and optional operator allowlist | Verify the runner and socket-proxy came from the same release. For a custom image, set `RUNSECURE_ALLOWED_IMAGES_EXTRA_FILE_HOST` in the scope `.env` file to a local file listing the extra digest(s) (same format as `allowed-images.txt`) — `compose.scope.yml` mounts it automatically, with no tracked-file edit. |
 | Breaker stuck open (no spawns) | 5 consecutive spawn failures | `docker logs rs-orch-* \| grep breaker.opened` — fix the upstream cause; the breaker enters half-open after 5min cooldown |
