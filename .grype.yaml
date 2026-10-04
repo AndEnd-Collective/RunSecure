@@ -25,53 +25,54 @@ ignore:
   # --- docker/cli vendored inside the gh CLI binary ------------------------
   # The ONLY Go binary in the base image is /usr/bin/gh (the actions/runner is
   # .NET — it ships no Go binary). gh (GH_CLI_VERSION in images/base.Dockerfile)
-  # vendors github.com/docker/cli; as of gh 2.95.0 the vendored version is
-  # v29.4.3+incompatible, which is ALREADY PAST the v29.2.0+incompatible fix
+  # vendors github.com/docker/cli; as of gh 2.102.0 the vendored version is
+  # v29.7.2+incompatible (verified: `go version -m` on the released
+  # linux_amd64 binary), which is ALREADY PAST the v29.2.0+incompatible fix
   # for GO-2026-4610. Grype flags it anyway because it cannot order Go
-  # "+incompatible" pseudo-versions and so treats 29.4.3 as < 29.2.0. This is
+  # "+incompatible" pseudo-versions and so treats 29.7.2 as < 29.2.0. This is
   # a false positive, not an unpatched dependency.
   # Re-evaluate when bumping GH_CLI_VERSION: drop this entry if a future gh
   # release stops vendoring docker/cli, or once Grype orders +incompatible
   # versions correctly.
-  #
-  # NOTE: the only Go binary in the base image is /usr/bin/gh (the actions/
-  # runner is .NET). gh (GH_CLI_VERSION) is built with go1.26.4, which clears
-  # the older go-stdlib findings — but NOT go-stdlib CVEs first fixed in
-  # go1.26.5+ (see GO-2026-4970 below). We cannot bump past this until the gh
-  # project ships a release built with go1.26.5+: gh 2.96.0 (the latest as of
-  # 2026-07-11) is still built with go1.26.4 (verified: `go version` on the
-  # 2.96.0 binary reports go1.26.4). Re-evaluate GH_CLI_VERSION on each gh
-  # release and drop the go-stdlib entry once gh ships on go1.26.5+.
-  - vulnerability: GO-2026-4610  # docker/cli 29.4.3 vendored in gh — already past the 29.2.0 fix; Grype +incompatible mis-order
+  - vulnerability: GO-2026-4610  # docker/cli 29.7.2 vendored in gh — already past the 29.2.0 fix; Grype +incompatible mis-order
 
-  # GO-2026-4970 (CVE-2026-39822) — "root escape via symlink plus trailing
-  # slash in os". A Go stdlib os-package path-traversal fixed in go1.25.12 /
-  # go1.26.5. It rides in via the gh CLI binary (built with go1.26.4); no gh
-  # release is built with go1.26.5 yet (2.96.0 is still go1.26.4), so there is
-  # nothing upstream to bump to. Reachability: exploiting it requires a program
-  # to perform os.Root-scoped filesystem operations across an attacker-planted
-  # symlink whose target ends in "/". gh's filesystem use is config/state and
-  # git/API plumbing, not traversal of untrusted trees; and inside the runner
-  # gh is only reachable by workflow code, which already runs untrusted by
-  # design in this ephemeral, resource-capped, single-job container.
-  # Re-evaluate (drop this) when GH_CLI_VERSION is bumped to a gh release built
-  # with go1.26.5+.
-  - vulnerability: GO-2026-4970  # go1.26.4 os symlink escape via gh CLI — no gh build on go1.26.5+ yet
+  # GO-2026-4970 (CVE-2026-39822, go stdlib "os" symlink escape, fixed in
+  # go1.25.12 / go1.26.5) WAS allowed here because every gh release up to
+  # 2.96.0 was still built with go1.26.4 and there was nothing to bump to.
+  # That is resolved: GH_CLI_VERSION is now 2.102.0, which reports go1.27.1
+  # (verified with `go version` on the released linux_amd64 binary). The entry
+  # is removed rather than left in place — a stale ignore silently suppresses a
+  # real finding if a future gh release ever regresses to an older toolchain,
+  # and the point of this file is that every suppression is currently true.
 
   # --- CPython CVEs flagged by Grype on the pinned 3.12 interpreter --------
-  # The python image pins CPython 3.12.13 (PYTHON_VERSION in
-  # images/python.Dockerfile) — the latest 3.12 from astral-sh/
-  # python-build-standalone; there is no 3.12.14. Grype flags these because it
-  # compares 3.12.13 against fixes that exist only in the 3.13/3.14 lines and
-  # cannot reason across CPython minor branches:
+  # !! EVERY ENTRY BELOW IS PENDING RE-VERIFICATION AGAINST CPython 3.12.15 !!
+  # These were all written against CPython 3.12.13 and justified on the claim
+  # that 3.12.13 was the newest 3.12 and no 3.12.14 existed. That claim has
+  # expired: 3.12.14 and 3.12.15 have both shipped, and
+  # images/python.Dockerfile now installs 3.12.15 from python-build-standalone
+  # 20261003. Several of the "no 3.12 fix available" justifications below are
+  # therefore likely obsolete.
+  #
+  # They are deliberately NOT deleted in the same change that bumps the
+  # interpreter. Removing an ignore that Grype does still report fails the
+  # publish gate, and this repo has just spent ten weeks unable to ship
+  # because its release path was blocked — so the bump lands first and the
+  # suppressions are pruned against real scanner output, not a guess.
+  #
+  # ACTION, on the first publish-images run after this change: read the Grype
+  # SARIF for the python image and delete every entry below that no longer
+  # appears. Do not just refresh the version numbers in these comments.
+  #
+  # Rationale as originally recorded (still correct for the two cross-branch
+  # false positives, which do not depend on the patch level):
   #   - CVE-2026-7210: affected 3.13.x/3.14.x/3.15 only (per NVD) — 3.12 is
   #     NOT in the affected range. Cross-branch false positive.
   #   - CVE-2026-4224: affected <3.10.0 and 3.13.0-3.13.12 / 3.14.0-3.14.3
   #     (a regression re-introduced in 3.13) — 3.12 is NOT affected. FP.
-  #   - CVE-2026-3644: http.cookies follow-up to CVE-2026-0672; no 3.12 fix
-  #     has shipped (no 3.12.14 exists), so there is nothing to upgrade to.
-  # Re-evaluate when python-build-standalone ships a 3.12.x that Grype marks
-  # fixed, or if the python image's minor is bumped to 3.13/3.14.
+  #   - CVE-2026-3644: http.cookies follow-up to CVE-2026-0672. Recorded as
+  #     "no 3.12 fix has shipped" when 3.12.13 was current. RECHECK: 3.12.14
+  #     and 3.12.15 are both security releases and may carry this fix.
   #
   # Reachability: all three are DoS / parser issues (expat hash-flooding,
   # ElementDecl recursion, cookie control-char parsing) that require the
@@ -82,28 +83,30 @@ ignore:
   - vulnerability: CVE-2026-4224  # CPython expat ElementDecl recursion — 3.12 not affected (Grype cross-branch FP)
   - vulnerability: CVE-2026-3644  # CPython http.cookies control-char parse — no 3.12 fix available to upgrade to
 
-  # --- 2026-07 CPython batch (5 new High findings on 3.12.13) ---------------
-  # 3.12.13 is the LATEST CPython 3.12 (no v3.12.14 tag exists; the newest
-  # python-build-standalone release still ships 3.12.13), so there is no 3.12
-  # patch to bump PYTHON_VERSION/PBS_TAG to for any of these. Grype lists fixes
-  # only in the 3.13/3.14/3.15 lines. Per project policy runner-python stays on
-  # 3.12; these are accepted with justification and a re-eval trigger. Two are
-  # not applicable to this image at all:
+  # --- 2026-07 CPython batch (5 High findings, recorded on 3.12.13) ---------
+  # RECHECK ALL FIVE against 3.12.15 — see the ACTION note above. The original
+  # justification for the first three was "3.12.13 is the latest CPython 3.12,
+  # no v3.12.14 exists, so there is no 3.12 patch to bump
+  # PYTHON_VERSION/PBS_TAG to". 3.12.15 now exists and is installed, so that
+  # premise is gone and these three may well be fixed. Grype listed fixes only
+  # in the 3.13/3.14/3.15 lines at the time. Per project policy runner-python
+  # stays on the 3.12 minor; the patch level tracks latest.
+  # The last two do not depend on the patch level and remain valid regardless:
   #   - CVE-2026-3298 is Windows-only (asyncio.ProactorEventLoop.sock_recvfrom_into
   #     OOB write); the runner is Linux — the affected code path does not exist.
   #   - CVE-2026-4786 is command injection via webbrowser.open() %action
   #     expansion; there is no browser in the headless CI image and no workflow
   #     path calls webbrowser.open with attacker-controlled URLs.
-  # The remaining three are memory-safety / DoS bugs in decompressor reuse and
+  # The other three are memory-safety / DoS bugs in decompressor reuse and
   # HTML parsing that require the workflow to feed attacker-controlled
   # compressed data / markup to CPython — i.e. reachable only from untrusted
   # workflow code, which this ephemeral, resource-capped, single-job container
   # already sandboxes by design; a crash/DoS of that container is not an
-  # escalation in the threat model.
-  # Re-evaluate (drop these) when python-build-standalone ships a 3.12.x that
-  # Grype marks fixed, or if the python image's minor is bumped.
-  - vulnerability: CVE-2026-6100   # bz2/lzma/gzip decompressor use-after-free on reuse-after-error — no 3.12 fix
-  - vulnerability: CVE-2026-9669   # bz2.BZ2Decompressor reuse-after-error stack buffer overflow — no 3.12 fix
-  - vulnerability: CVE-2026-15308  # HTMLParser.feed() CPU-exhaustion DoS on unterminated markup — no 3.12 fix
+  # escalation in the threat model. That reachability argument still holds, but
+  # it is the fallback, not the primary justification: if 3.12.15 fixes them,
+  # drop the entry.
+  - vulnerability: CVE-2026-6100   # bz2/lzma/gzip decompressor use-after-free — RECHECK against 3.12.15
+  - vulnerability: CVE-2026-9669   # bz2.BZ2Decompressor reuse-after-error stack overflow — RECHECK against 3.12.15
+  - vulnerability: CVE-2026-15308  # HTMLParser.feed() CPU-exhaustion DoS — RECHECK against 3.12.15
   - vulnerability: CVE-2026-3298   # Windows-only asyncio ProactorEventLoop OOB write — not applicable to Linux runner
   - vulnerability: CVE-2026-4786   # webbrowser.open() %action command injection — no browser in headless CI image
