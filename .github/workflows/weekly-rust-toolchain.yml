@@ -40,11 +40,15 @@ on:
 permissions: {}
 
 jobs:
-  certify:
+  # --- Resolve once so every arch certifies the same candidate --------------
+  resolve:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+    outputs:
+      current: ${{ steps.versions.outputs.current }}
+      candidate: ${{ steps.versions.outputs.candidate }}
+      proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,77 +99,108 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # --- Certify the candidate on EVERY published architecture ---------------
+  # publish-images builds and scans linux/amd64 and linux/arm64, so the
+  # certification has to cover both or it is not actually certifying the
+  # release. An arch-specific regression — a classifier that only recognises
+  # one of the two rustc builds, or a HIGH that only appears in one base image
+  # — would otherwise sail through here and block the publish instead.
+  # arm64 is emulated via QEMU on the amd64 runner, the same way the publish
+  # pipeline cross-builds.
+  certify:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: amd64
+          - platform: linux/arm64
+            slug: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.gate.outputs.proceed == 'true'
 
       - name: Install checksum-pinned Syft + Grype
-        if: steps.gate.outputs.proceed == 'true'
         run: |
           set -euo pipefail
           infra/scripts/install-pinned-scanners.sh /usr/local/bin
 
-      - name: Build base and candidate rust image
-        if: steps.gate.outputs.proceed == 'true'
+      - name: Build base and candidate rust image for ${{ matrix.platform }}
         env:
-          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
         run: |
           set -euo pipefail
-          docker build -f images/base.Dockerfile -t runner-base:latest .
+          docker build --platform "$PLATFORM" \
+            -f images/base.Dockerfile -t "runner-base:${SLUG}" .
           # Build through RUST_VERSION=stable with the candidate supplied as the
           # pin, so this exercises the exact resolution path every consumer
           # uses rather than a one-off explicit-version build.
-          docker build -f images/rust.Dockerfile \
+          docker build --platform "$PLATFORM" \
+            -f images/rust.Dockerfile \
+            --build-arg "BASE_TAG=${SLUG}" \
             --build-arg RUST_VERSION=stable \
             --build-arg "RUST_STABLE_PIN=${CANDIDATE}" \
-            -t runner-rust:candidate .
-          docker run --rm --entrypoint sh runner-rust:candidate -c 'rustc --version'
+            -t "runner-rust:candidate-${SLUG}" .
+          docker run --rm --platform "$PLATFORM" \
+            --entrypoint sh "runner-rust:candidate-${SLUG}" -c 'rustc --version'
 
-      # --- The certification ----------------------------------------------
       # Same script, same arguments, same pinned scanners as the rust jobs in
       # publish-images.yml. If this cannot pass, the release cannot either.
-      #
-      # Certified on linux/amd64 only (the native runner arch). syft's binary
-      # classifier keys off the rustc binary's version strings, not the
-      # architecture — when 1.98.0+ stopped being recognised it failed on amd64
-      # and arm64 identically — so one arch is a sound proxy and avoids a QEMU
-      # cross-build on every weekly run. The publish pipeline still scans both.
       - name: Certify — Grype gate + rust inventory presence
         id: certify
-        if: steps.gate.outputs.proceed == 'true'
-        continue-on-error: true
+        env:
+          SLUG: ${{ matrix.slug }}
         run: |
           set -euo pipefail
           bash infra/scripts/grype-scan-image.sh \
-            runner-rust:candidate \
-            rust-candidate.sarif \
+            "runner-rust:candidate-${SLUG}" \
+            "rust-candidate-${SLUG}.sarif" \
             ca-certificates '' '' \
             binary-classifier-cataloger rust
 
       - name: Certify — rust terminal-stage hardening contract
-        id: certify_hardening
-        if: steps.gate.outputs.proceed == 'true' && steps.certify.outcome == 'success'
-        continue-on-error: true
         run: |
           set -euo pipefail
           bash tests/validation/test-language-terminal-stages.sh
 
+  # --- Move the pin only if EVERY arch certified ---------------------------
+  bump:
+    needs: [resolve, certify]
+    # `always()` so this job still runs when a certify matrix leg failed, and
+    # the explicit result check decides. Without it the job would be skipped
+    # and the "not adopted" summary would never be written.
+    if: always() && needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
       - name: Report a failed certification and stop
-        if: steps.gate.outputs.proceed == 'true' && (steps.certify.outcome != 'success' || steps.certify_hardening.outcome != 'success')
+        if: needs.certify.result != 'success'
         env:
-          CURRENT: ${{ steps.versions.outputs.current }}
-          CANDIDATE: ${{ steps.versions.outputs.candidate }}
-          GATE_OUTCOME: ${{ steps.certify.outcome }}
-          HARDENING_OUTCOME: ${{ steps.certify_hardening.outcome }}
+          CURRENT: ${{ needs.resolve.outputs.current }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+          CERTIFY_RESULT: ${{ needs.certify.result }}
         run: |
           {
             echo "### Rust ${CANDIDATE} NOT adopted"
             echo
             echo "The pin stays at **${CURRENT}**."
             echo
-            echo "| check | result |"
-            echo "|---|---|"
-            echo "| Grype gate + \`binary-classifier-cataloger:rust\` presence | ${GATE_OUTCOME} |"
-            echo "| rust terminal-stage hardening | ${HARDENING_OUTCOME} |"
+            echo "Certification across linux/amd64 and linux/arm64: **${CERTIFY_RESULT}**."
+            echo "See the per-architecture \`certify\` jobs for which one failed."
             echo
             echo "This is expected when upstream rust is ahead of the pinned syft:"
             echo "the toolchain would not appear in the SBOM, so rust CVEs would not"
@@ -175,12 +210,17 @@ jobs:
             echo "\`infra/scripts/install-pinned-scanners.sh\` may unblock it."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.certify.result == 'success'
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+
       - name: Open the pin-bump PR
-        if: steps.gate.outputs.proceed == 'true' && steps.certify.outcome == 'success' && steps.certify_hardening.outcome == 'success'
+        if: needs.certify.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          CURRENT: ${{ steps.versions.outputs.current }}
-          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+          CURRENT: ${{ needs.resolve.outputs.current }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
         run: |
           set -euo pipefail
           BRANCH="bot/rust-toolchain-${CANDIDATE}"
@@ -197,22 +237,14 @@ jobs:
           )
           if n != 1:
               raise SystemExit(f"expected exactly one RUST_STABLE_PIN={current} line, replaced {n}")
-          p.write_text(updated)
-          PY
-          # Refresh the recorded evidence table so the comment never outlives
-          # the versions it describes.
-          python3 - "$CANDIDATE" <<'PY'
-          import pathlib, re, sys
-          candidate = sys.argv[1]
-          p = pathlib.Path("images/rust.Dockerfile")
-          text = p.read_text()
-          text = re.sub(
+          # Keep the recorded evidence table from outliving the version it describes.
+          updated = re.sub(
               r"(#   )[0-9]+\.[0-9]+\.[0-9]+(  classified as rust )[0-9]+\.[0-9]+\.[0-9]+(   <- newest that works)",
               rf"\g<1>{candidate}\g<2>{candidate}\g<3>",
-              text,
+              updated,
               count=1,
           )
-          p.write_text(text)
+          p.write_text(updated)
           PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -220,16 +252,17 @@ jobs:
           git add images/rust.Dockerfile
           git commit -m "chore(rust): certify and pin toolchain ${CANDIDATE}"
           git push origin "HEAD:refs/heads/${BRANCH}"
+
           # Body goes through a file: a multi-line shell string here would have
           # to start at column 0 and would terminate the YAML block scalar.
           {
             printf '%s\n\n' "Automated weekly rust toolchain certification."
             printf 'Bumps `RUST_STABLE_PIN` in `images/rust.Dockerfile` from `%s` to `%s`.\n\n' \
               "$CURRENT" "$CANDIDATE"
-            printf '%s\n\n' "The candidate was built through \`RUST_VERSION=stable\` — the same resolution path every consumer uses — and passed the identical certification the release pipeline runs, with the same checksum-pinned Syft and Grype:"
+            printf '%s\n\n' "The candidate was built through \`RUST_VERSION=stable\` — the same resolution path every consumer uses — on **both linux/amd64 and linux/arm64**, and passed the identical certification the release pipeline runs on each, with the same checksum-pinned Syft and Grype:"
             printf '%s\n' "- \`infra/scripts/grype-scan-image.sh\` with \`binary-classifier-cataloger:rust\`, proving the toolchain is still inventoried in the SBOM and that no fixable HIGH/CRITICAL is present"
             printf '%s\n\n' "- \`tests/validation/test-language-terminal-stages.sh\`"
-            printf '%s\n' "The pin is only ever moved by this workflow, and only after that passes, so rust can never get ahead of what the scanner can see."
+            printf '%s\n' "The pin is only ever moved by this workflow, and only after every published architecture certifies, so rust can never get ahead of what the scanner can see."
           } > /tmp/rust-pr-body.md
 
           if gh pr create \
@@ -237,7 +270,7 @@ jobs:
             --title "chore(rust): certify and pin toolchain ${CANDIDATE}" \
             --body-file /tmp/rust-pr-body.md; then
             {
-              echo "### Rust ${CANDIDATE} certified"
+              echo "### Rust ${CANDIDATE} certified on amd64 + arm64"
               echo
               echo "Opened a PR bumping the pin from \`${CURRENT}\` to \`${CANDIDATE}\`."
             } >> "$GITHUB_STEP_SUMMARY"

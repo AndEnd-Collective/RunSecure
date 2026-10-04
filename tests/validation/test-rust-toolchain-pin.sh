@@ -27,21 +27,22 @@ RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PASS=0
 FAIL=0
 
-while IFS=$'\t' read -r status message; do
-    [ -z "${status:-}" ] && continue
-    if [ "$status" = "PASS" ]; then
-        echo "  PASS: $message"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: $message"
-        FAIL=$((FAIL + 1))
-    fi
-done < <(python3 - \
+# Results go through a temp file rather than `while read ... < <(python3 <<EOF)`.
+# Combining process substitution with a heredoc breaks on bash 3.2 — which is
+# what /bin/bash is on macOS, so running this via its shebang silently produced
+# zero assertions and still exited 0. A test that reports "PASSED: 0 tests" is
+# worse than one that fails.
+RESULTS_FILE=$(mktemp)
+trap 'rm -f "$RESULTS_FILE"' EXIT
+
+python3 - \
     "${RUNSECURE_ROOT}/images/rust.Dockerfile" \
-    "${RUNSECURE_ROOT}/.github/workflows/weekly-rust-toolchain.yml" <<'PY'
+    "${RUNSECURE_ROOT}/.github/workflows/weekly-rust-toolchain.yml" > "$RESULTS_FILE" <<'PY'
 import pathlib
 import re
 import sys
+
+import yaml
 
 dockerfile = pathlib.Path(sys.argv[1]).read_text()
 workflow = pathlib.Path(sys.argv[2]).read_text()
@@ -99,19 +100,62 @@ check(
     "weekly certification builds the candidate through the pin",
 )
 check(
-    "steps.certify.outcome == 'success'" in workflow,
-    "the pin-bump PR is gated on the certification passing",
+    "needs.certify.result == 'success'" in workflow,
+    "the pin-bump PR is gated on the certify job succeeding",
+)
+
+# The release publishes and scans both architectures, so certifying one would
+# let an arch-specific regression through to publish. Require both.
+doc = yaml.safe_load(workflow)
+matrix = (
+    doc.get("jobs", {})
+    .get("certify", {})
+    .get("strategy", {})
+    .get("matrix", {})
+    .get("include", [])
+)
+platforms = {entry.get("platform") for entry in matrix}
+check(
+    platforms == {"linux/amd64", "linux/arm64"},
+    f"certification covers every published architecture (got {sorted(p for p in platforms if p)})",
+)
+check(
+    "setup-qemu-action" in workflow,
+    "certification sets up QEMU so the non-native arch can actually be built",
+)
+check(
+    doc.get("jobs", {}).get("bump", {}).get("needs") == ["resolve", "certify"],
+    "the bump job depends on resolve and certify",
 )
 
 for status, message in results:
     print(f"{status}\t{message}")
 PY
-)
+
+if [ ! -s "$RESULTS_FILE" ]; then
+    echo "FAIL: the assertion script produced no results" >&2
+    exit 1
+fi
+
+while IFS=$'\t' read -r status message; do
+    [ -z "${status:-}" ] && continue
+    if [ "$status" = "PASS" ]; then
+        echo "  PASS: $message"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $message"
+        FAIL=$((FAIL + 1))
+    fi
+done < "$RESULTS_FILE"
 
 echo ""
 echo "=== Rust Toolchain Pin Contract ==="
 echo ""
-if [[ $FAIL -gt 0 ]]; then
+if [ "$PASS" -eq 0 ]; then
+    echo "FAILED: no assertions ran"
+    exit 1
+fi
+if [ "$FAIL" -gt 0 ]; then
     echo "FAILED: $PASS passed, $FAIL failed"
     exit 1
 else
