@@ -220,6 +220,40 @@ jobs:
           jobs_by_id = {job["id"]: job for job in jobs}
           missing = set(jobs_by_id)
           log_evidence: dict[int, dict[str, object]] = {}
+          github_token = os.environ["GH_TOKEN"]
+
+          def fetch_job_log(repository: str, job_id: int, token: str) -> bytes:
+              """Per-job log bytes, empty on any failure.
+
+              curl follows the API's 302 to blob storage and, unlike a hand
+              rolled redirect, does not resend the Authorization header to
+              another origin (Azure answers 401 if it is). The credential goes
+              in on stdin via --config so it never lands in argv.
+              """
+              api_url = (
+                  f"https://api.github.com/repos/{repository}"
+                  f"/actions/jobs/{job_id}/logs"
+              )
+              config = (
+                  f'header = "Authorization: Bearer {token}"\n'
+                  'header = "Accept: application/vnd.github+json"\n'
+                  'header = "X-GitHub-Api-Version: 2022-11-28"\n'
+                  'user-agent = "runsecure-live-acceptance"\n'
+                  'location\n'
+                  'silent\n'
+                  'show-error\n'
+                  'fail\n'
+              )
+              result = subprocess.run(
+                  ["curl", "--config", "-", api_url],
+                  input=config.encode(),
+                  check=False,
+                  capture_output=True,
+              )
+              if result.returncode != 0:
+                  return b""
+              return result.stdout
+
           deadline = time.monotonic() + 120
           while missing and time.monotonic() < deadline:
               for job_id in tuple(missing):
@@ -234,38 +268,23 @@ jobs:
                       f"RUNSECURE_LIVE_COMPLETE scope={expected_scope} "
                       f"slot={slot} spawn={spawn_id}"
                   ).encode()
-                  # NOT `gh api .../jobs/<id>/logs`: that endpoint answers with
-                  # a 302 to blob storage and `gh api` does not follow it, so
-                  # stdout is always EMPTY and the marker could never be found —
-                  # this gate could not pass at all, for any release. Verified
-                  # against a job whose log definitely holds the marker:
-                  #   gh api -X GET .../logs            -> 0 bytes
-                  #   gh run view --job <id> --log -R   -> 15471 bytes, marker present
-                  # Following the redirect by hand is not an option either: the
-                  # Authorization header rides along to Azure, which answers 401.
-                  # `gh run view --log` resolves the blob URL itself and needs no
-                  # checkout because -R names the repository.
-                  result = subprocess.run(
-                      [
-                          "gh",
-                          "run",
-                          "view",
-                          "--job",
-                          str(job_id),
-                          "--log",
-                          "-R",
-                          repository,
-                      ],
-                      check=False,
-                      capture_output=True,
-                  )
-                  if (
-                      result.returncode == 0
-                      and len(result.stdout) > 0
-                      and expected_marker in result.stdout
-                  ):
+                  # Fetching these logs is fiddly, and two obvious approaches
+                  # are both wrong:
+                  #   gh api -X GET .../jobs/<id>/logs
+                  #     the endpoint 302s to blob storage and gh api does not
+                  #     surface the body -> always 0 bytes, marker never found.
+                  #   gh run view --job <id> --log
+                  #     needs the WHOLE run to be finished, and this job runs
+                  #     inside the same run -> always empty here.
+                  # The per-job REST endpoint does work mid-run, as long as the
+                  # redirect is followed WITHOUT forwarding the Authorization
+                  # header (Azure answers 401 if it is resent). So: ask the API
+                  # without following redirects, then fetch the pre-signed blob
+                  # URL unauthenticated.
+                  body = fetch_job_log(repository, job_id, github_token)
+                  if len(body) > 0 and expected_marker in body:
                       log_evidence[job_id] = {
-                          "bytes": len(result.stdout),
+                          "bytes": len(body),
                           "completion_marker": expected_marker.decode(),
                           "verified": True,
                       }
