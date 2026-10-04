@@ -82,9 +82,28 @@ verify_script = verify["steps"][0]["run"]
 # log definitely contained the marker, while `gh run view --job <id> --log -R`
 # returned 15471 bytes with it present. Following the redirect manually is not a
 # fix either: the Authorization header rides along to Azure, which answers 401.
-assert "actions/jobs/{job_id}/logs" not in verify_script, (
-    "verify must not fetch logs through gh api; that endpoint redirects and "
-    "returns an empty body"
+# Two approaches are known-broken and must not come back:
+#   `gh api -X GET .../jobs/<id>/logs` — the endpoint 302s to blob storage and
+#   gh api does not surface the body, so stdout is always empty (measured:
+#   0 bytes for a job whose log definitely contained the marker).
+#   `gh run view --job <id> --log` — requires the WHOLE run to be finished, but
+#   verify runs inside that same run, so it is always empty there. This one
+#   passes a local test against a completed run and still fails in CI, which is
+#   exactly how it slipped through once.
+# `gh api` is still fine for the job LIST; it is log fetching that must not go
+# through gh. Requiring fetch_job_log/_NoRedirect above already forces the
+# urllib path, so here just ban the gh run view form outright.
+# Match the argv form only — the prose comment above the fetch deliberately
+# names both broken approaches, and must not trip this.
+assert '"--log"' not in verify_script, (
+    "verify must not use gh run view --log; it cannot read logs mid-run"
+)
+assert "--config" in verify_script and "location" in verify_script, (
+    "verify must fetch per-job logs with curl --config so the 302 is followed "
+    "without resending the Authorization header and the token stays out of argv"
+)
+assert "Bearer {token}" in verify_script and "-H" not in verify_script, (
+    "the token must be passed via curl --config on stdin, never as an argv -H"
 )
 
 for required in (
@@ -94,10 +113,12 @@ for required in (
     "expected 4 runtime jobs",
     "four distinct JIT runners",
     "maximum parallelism",
-    # Logs must be read with `gh run view --log`.
-    '"--log",',
-    '"-R",',
-    "len(result.stdout) > 0",
+    # Logs must be fetched per-job via the REST endpoint, following the 302 to
+    # blob storage WITHOUT resending the Authorization header.
+    "def fetch_job_log(",
+    '["curl", "--config", "-", api_url]',
+    "/actions/jobs/{job_id}/logs",
+    "len(body) > 0",
     "RUNSECURE_LIVE_COMPLETE scope={expected_scope}",
     "never contained their exact runtime completion",
     '"schema_version": 1',
@@ -189,21 +210,6 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'SH'
 #!/bin/bash
 set -euo pipefail
-# `gh run view --job <id> --log -R <repo>` for logs, `gh api` for the job list.
-if [[ "${1:-}" == "run" && "${2:-}" == "view" ]]; then
-  job_id=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --job) job_id="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  if [[ -z "$job_id" ]]; then
-    echo "gh stub: run view called without --job" >&2; exit 2
-  fi
-  cat "$GH_STUB_LOG_DIR/${job_id}.log"
-  exit 0
-fi
 endpoint="${!#}"
 case "$endpoint" in
   */runs/*/jobs\?*) cat "$GH_STUB_JOBS" ;;
@@ -211,6 +217,21 @@ case "$endpoint" in
 esac
 SH
 chmod +x "$tmp/bin/gh"
+
+# curl stub: drains the --config payload from stdin (so the real token never
+# matters here) and serves the job log named by the API URL.
+cat > "$tmp/bin/curl" <<'SH'
+#!/bin/bash
+set -euo pipefail
+cat >/dev/null
+url="${!#}"
+job_id=${url%/logs}
+job_id=${job_id##*/}
+log="$GH_STUB_LOG_DIR/${job_id}.log"
+[[ -f "$log" ]] || { echo "curl stub: no log for $job_id" >&2; exit 22; }
+cat "$log"
+SH
+chmod +x "$tmp/bin/curl"
 
 receipt="$tmp/receipt.json"
 env \
@@ -220,6 +241,7 @@ env \
   EXPECTED_RUNNER_IMAGE_REF=ghcr.io/andend-collective/runsecure/node@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   EXPECTED_SCOPE=release-v2-1-9 \
   EXPECTED_VERSION=2.1.9 \
+  GH_TOKEN=stub-token-not-used \
   GH_STUB_JOBS="$tmp/jobs.json" \
   GH_STUB_LOG_DIR="$tmp/logs" \
   PATH="$tmp/bin:$PATH" \
