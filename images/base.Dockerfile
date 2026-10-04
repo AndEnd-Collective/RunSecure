@@ -48,8 +48,7 @@ ARG RUNNER_SHA256_AMD64=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d00
 # 11.21.0 declares `^20.17.0 || >=22.9.0` and covers both runtimes.
 #
 # Nothing is given up by staying on 11.x here: 11.21.0 vendors exactly the
-# same versions of the three CVE-tracked transitive deps as 12.2.0 does
-# (tar 7.5.22, brace-expansion 5.0.9, undici 6.28.0), asserted below. The
+# same versions of the CVE-tracked transitive deps as 12.2.0 does. The
 # workflow-facing npm in images/node.Dockerfile runs on NodeSource Node 24
 # and is pinned to 12.2.0 there.
 #
@@ -58,6 +57,26 @@ ARG RUNNER_SHA256_AMD64=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d00
 # (https://registry.npmjs.org/npm/-/npm-11.21.0.tgz).
 ARG NPM_VERSION=11.21.0
 ARG NPM_SHA256=783e7c92bf73b442fb800c2d6ef3921e86da8894a700fed45140e37916877482
+# Two of npm's own bundled dependencies lag behind their security fixes, in
+# EVERY npm release including the current `latest` (12.2.0 bundles the same
+# versions as 11.21.0). Refreshing npm alone is therefore not enough — these
+# are HIGH findings with fixes available, so the Grype gate blocks the publish:
+#
+#   undici 6.28.0          GHSA-rfgv-xxqx-mfg5  (>=6.7.0 <6.28.1)  WebSocket DoS
+#   brace-expansion 5.0.9  GHSA-6j4f-fj2g-mc7p  (>=4.0.0 <5.0.10)  recursion DoS
+#                          GHSA-qhr7-859c-m2p7  (>=4.0.0 <5.0.11)  recursion DoS
+#
+# So the same checksum-pinned overwrite the npm payload already gets is applied
+# one level down, to these two packages inside npm's node_modules. Both are
+# patch-level bumps within the major npm depends on, and each image carries
+# exactly one copy of each (verified with `find` in the built images), so there
+# is no nested copy left behind at an older version.
+# Re-evaluate on every npm bump: if npm catches up, drop these and let the
+# bundled versions stand.
+ARG UNDICI_VERSION=6.29.0
+ARG UNDICI_SHA256=b7d888586625c1508c0e17463bac86aecd22ed6053bc945372aed8cae14406fc
+ARG BRACE_EXPANSION_VERSION=5.0.12
+ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 # GH_CLI_VERSION 2.102.0 — latest stable, and the first pin in this file built
 #   with go1.27.1 (verified: `go version` on the released linux_amd64 binary
 #   reports go1.27.1). That clears GO-2026-4970 / CVE-2026-39822 ("os symlink
@@ -150,6 +169,14 @@ RUN ARCH=$(dpkg --print-architecture) \
          "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz" \
          -o /tmp/npm.tgz \
     && echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/undici/-/undici-${UNDICI_VERSION}.tgz" \
+         -o /tmp/undici.tgz \
+    && echo "${UNDICI_SHA256}  /tmp/undici.tgz" | sha256sum -c - \
+    && curl -fsSL \
+         "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
+         -o /tmp/brace-expansion.tgz \
+    && echo "${BRACE_EXPANSION_SHA256}  /tmp/brace-expansion.tgz" | sha256sum -c - \
     && for NODE_RUNTIME in node20 node24; do \
          NODE_PREFIX="/home/runner/actions-runner/externals/${NODE_RUNTIME}"; \
          rm -rf "${NODE_PREFIX}/lib/node_modules/npm"; \
@@ -158,6 +185,15 @@ RUN ARCH=$(dpkg --print-architecture) \
            --strip-components=1 \
            --no-same-owner \
            -C "${NODE_PREFIX}/lib/node_modules/npm"; \
+         NPM_MODULES="${NODE_PREFIX}/lib/node_modules/npm/node_modules"; \
+         for VENDORED in undici brace-expansion; do \
+           rm -rf "${NPM_MODULES}/${VENDORED}"; \
+           mkdir -p "${NPM_MODULES}/${VENDORED}"; \
+           tar xzf "/tmp/${VENDORED}.tgz" \
+             --strip-components=1 \
+             --no-same-owner \
+             -C "${NPM_MODULES}/${VENDORED}"; \
+         done; \
          test "$("${NODE_PREFIX}/bin/node" \
            "${NODE_PREFIX}/lib/node_modules/npm/bin/npm-cli.js" --version)" \
            = "${NPM_VERSION}"; \
@@ -166,12 +202,12 @@ RUN ARCH=$(dpkg --print-architecture) \
            = "7.5.22"; \
          test "$("${NODE_PREFIX}/bin/node" -p \
            "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/brace-expansion/package.json').version")" \
-           = "5.0.9"; \
+           = "${BRACE_EXPANSION_VERSION}"; \
          test "$("${NODE_PREFIX}/bin/node" -p \
            "require('${NODE_PREFIX}/lib/node_modules/npm/node_modules/undici/package.json').version")" \
-           = "6.28.0"; \
+           = "${UNDICI_VERSION}"; \
        done \
-    && rm /tmp/runner.tar.gz /tmp/npm.tgz \
+    && rm /tmp/runner.tar.gz /tmp/npm.tgz /tmp/undici.tgz /tmp/brace-expansion.tgz \
     && chown -R runner:0 /home/runner/actions-runner
 
 # ---- Install runner dependencies (.NET runtime libs) ------------------------

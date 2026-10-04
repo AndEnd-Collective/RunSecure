@@ -46,10 +46,43 @@ for name, dockerfile in (("base", base), ("node", node)):
     )
     assert digest.group(1) == expected_sha256, f"{name} npm checksum drifted"
     assert 'echo "${NPM_SHA256}  /tmp/npm.tgz" | sha256sum -c -' in dockerfile
-    for package_version in ("7.5.22", "5.0.9", "6.28.0"):
-        assert package_version in dockerfile, (
-            f"{name} image no longer asserts fixed npm dependency {package_version}"
+    # tar is asserted as a literal (npm bundles a fixed version); undici and
+    # brace-expansion are asserted through ARGs because npm ships versions
+    # behind their security fixes and the images overwrite them.
+    assert "7.5.22" in dockerfile, f"{name} image no longer asserts fixed npm tar"
+    for arg, version in (("UNDICI", "6.29.0"), ("BRACE_EXPANSION", "5.0.12")):
+        assert f"ARG {arg}_VERSION={version}" in dockerfile, (
+            f"{name} image must pin {arg}_VERSION={version}"
         )
+        assert re.search(rf"^ARG {arg}_SHA256=[0-9a-f]{{64}}$", dockerfile, re.MULTILINE), (
+            f"{name} image must pin the {arg} tarball SHA-256"
+        )
+        assert f'= "${{{arg}_VERSION}}"' in dockerfile, (
+            f"{name} image must assert the installed {arg} version from the ARG"
+        )
+        assert f'echo "${{{arg}_SHA256}}' in dockerfile, (
+            f"{name} image must checksum-verify the {arg} tarball"
+        )
+
+# Both images must overwrite the same versions, or the runner's npm and the
+# workflow-facing npm drift apart.
+for arg in ("UNDICI", "BRACE_EXPANSION"):
+    base_pin = re.search(rf"^ARG {arg}_VERSION=(\S+)$", base, re.MULTILINE)
+    node_pin = re.search(rf"^ARG {arg}_VERSION=(\S+)$", node, re.MULTILINE)
+    assert base_pin and node_pin and base_pin.group(1) == node_pin.group(1), (
+        f"{arg}_VERSION differs between the base and node images"
+    )
+
+# These three advisories are why the overwrite exists. They must never be
+# suppressed in .grype.yaml instead of fixed.
+for advisory in (
+    "GHSA-rfgv-xxqx-mfg5",
+    "GHSA-6j4f-fj2g-mc7p",
+    "GHSA-qhr7-859c-m2p7",
+):
+    assert advisory not in grype, (
+        f"npm bundled-dependency advisory must be fixed, not ignored: {advisory}"
+    )
 
 # Guard the compatibility reasoning itself: if someone bumps base to npm 12+
 # the node20 external silently gets an npm that cannot run, and nothing else

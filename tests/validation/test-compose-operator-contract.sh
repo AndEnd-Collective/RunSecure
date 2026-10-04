@@ -324,9 +324,21 @@ assert os.path.normpath(mounts["/host-auth-secret"]["source"]) == key_source
 assert mounts["/host-auth-secret"]["read_only"] is True
 assert init["environment"]["RUNSECURE_AUTH_SECRET_NAME"] == "runsecure-app-private-key"
 
-# Nothing in the rendered config may reference a PAT path for an app scope.
-blob = json.dumps(rendered)
-assert "runsecure-pat" not in blob, "app scope still references a PAT secret"
+# No bind source and no environment value may point at a PAT for an app
+# scope. Deliberately not a blanket substring search over the whole rendered
+# document: auth-secret-init's entrypoint legitimately contains the literal
+# allowlist "runsecure-pat|runsecure-app-private-key", which is the guard that
+# stops an arbitrary secret name, not a PAT reference.
+for svc_name, svc in rendered["services"].items():
+    for mount in svc.get("volumes", []) or []:
+        src = str(mount.get("source", ""))
+        assert "pat" not in src.rsplit("/", 1)[-1].lower(), (
+            f"{svc_name} binds a PAT-looking source for a github_app scope: {src}"
+        )
+    for key, value in (svc.get("environment") or {}).items():
+        assert str(value) != "runsecure-pat", (
+            f"{svc_name} env {key} names the PAT secret for a github_app scope"
+        )
 PY
 
 # A github_app scope with no private key must fail closed, naming the right
