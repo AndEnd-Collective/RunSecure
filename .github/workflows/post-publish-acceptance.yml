@@ -38,10 +38,10 @@ jobs:
       build_sha: ${{ steps.verify.outputs.build_sha }}
       publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download manifest from the triggering Publish Images run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-image-manifest-*
           path: .publish-manifest
@@ -115,7 +115,7 @@ jobs:
           PY
 
       - name: Preserve the verified acceptance input
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-publish-manifest-${{ steps.verify.outputs.publish_run_id }}
           path: .publish-manifest/release-images.json
@@ -152,12 +152,12 @@ jobs:
       LANG_VERSION: ${{ matrix.lang_version }}
       MANIFEST_KEY: ${{ matrix.manifest_key }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-manifest.outputs.build_sha }}
 
       - name: Download verified immutable manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-publish-manifest-${{ needs.resolve-manifest.outputs.publish_run_id }}
           path: .verified-manifest
@@ -176,7 +176,7 @@ jobs:
           PY
 
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -260,7 +260,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Code Scanning
         if: always() && hashFiles('tests/acceptance/_sarif/acceptance-*.sarif') != ''
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: tests/acceptance/_sarif/
           category: "acceptance-${{ matrix.lang }}-${{ matrix.lang_version }}"
