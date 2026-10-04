@@ -234,13 +234,27 @@ jobs:
                       f"RUNSECURE_LIVE_COMPLETE scope={expected_scope} "
                       f"slot={slot} spawn={spawn_id}"
                   ).encode()
+                  # NOT `gh api .../jobs/<id>/logs`: that endpoint answers with
+                  # a 302 to blob storage and `gh api` does not follow it, so
+                  # stdout is always EMPTY and the marker could never be found —
+                  # this gate could not pass at all, for any release. Verified
+                  # against a job whose log definitely holds the marker:
+                  #   gh api -X GET .../logs            -> 0 bytes
+                  #   gh run view --job <id> --log -R   -> 15471 bytes, marker present
+                  # Following the redirect by hand is not an option either: the
+                  # Authorization header rides along to Azure, which answers 401.
+                  # `gh run view --log` resolves the blob URL itself and needs no
+                  # checkout because -R names the repository.
                   result = subprocess.run(
                       [
                           "gh",
-                          "api",
-                          "-X",
-                          "GET",
-                          f"repos/{repository}/actions/jobs/{job_id}/logs",
+                          "run",
+                          "view",
+                          "--job",
+                          str(job_id),
+                          "--log",
+                          "-R",
+                          repository,
                       ],
                       check=False,
                       capture_output=True,

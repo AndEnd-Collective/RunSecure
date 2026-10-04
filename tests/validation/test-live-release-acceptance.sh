@@ -75,6 +75,18 @@ assert verify["runs-on"] == "ubuntu-latest"
 assert verify["permissions"] == {"actions": "read"}
 assert len(verify["steps"]) == 2
 verify_script = verify["steps"][0]["run"]
+# `gh api repos/.../actions/jobs/<id>/logs` answers with a 302 to blob storage
+# and `gh api` does not follow it, so stdout is empty and the completion marker
+# can never be found — the gate was unpassable for every release until this was
+# changed. Verified: `gh api -X GET .../logs` returned 0 bytes for a job whose
+# log definitely contained the marker, while `gh run view --job <id> --log -R`
+# returned 15471 bytes with it present. Following the redirect manually is not a
+# fix either: the Authorization header rides along to Azure, which answers 401.
+assert "actions/jobs/{job_id}/logs" not in verify_script, (
+    "verify must not fetch logs through gh api; that endpoint redirects and "
+    "returns an empty body"
+)
+
 for required in (
     "expected_parallelism must be between 1 and 4",
     "runtime job is missing a lifecycle timestamp",
@@ -82,7 +94,9 @@ for required in (
     "expected 4 runtime jobs",
     "four distinct JIT runners",
     "maximum parallelism",
-    "/actions/jobs/{job_id}/logs",
+    # Logs must be read with `gh run view --log`.
+    '"--log",',
+    '"-R",',
     "len(result.stdout) > 0",
     "RUNSECURE_LIVE_COMPLETE scope={expected_scope}",
     "never contained their exact runtime completion",
@@ -175,14 +189,24 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'SH'
 #!/bin/bash
 set -euo pipefail
+# `gh run view --job <id> --log -R <repo>` for logs, `gh api` for the job list.
+if [[ "${1:-}" == "run" && "${2:-}" == "view" ]]; then
+  job_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --job) job_id="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -z "$job_id" ]]; then
+    echo "gh stub: run view called without --job" >&2; exit 2
+  fi
+  cat "$GH_STUB_LOG_DIR/${job_id}.log"
+  exit 0
+fi
 endpoint="${!#}"
 case "$endpoint" in
   */runs/*/jobs\?*) cat "$GH_STUB_JOBS" ;;
-  */jobs/*/logs)
-    job_id=${endpoint%/logs}
-    job_id=${job_id##*/}
-    cat "$GH_STUB_LOG_DIR/${job_id}.log"
-    ;;
   *) echo "unexpected gh endpoint: $endpoint" >&2; exit 2 ;;
 esac
 SH
