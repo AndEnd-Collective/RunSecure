@@ -65,9 +65,12 @@ ARG NPM_SHA256=783e7c92bf73b442fb800c2d6ef3921e86da8894a700fed45140e37916877482
 #   a justified allow in .grype.yaml. Those go-stdlib allows are removed in
 #   this change — if a future gh release regresses to an older Go, the Grype
 #   gate will fail loudly rather than pass on a stale ignore.
+#   These are the checksums of the .deb packages (what the install step below
+#   downloads), NOT the .tar.gz archives — the release publishes both and they
+#   differ.
 ARG GH_CLI_VERSION=2.102.0
-ARG GH_CLI_SHA256_AMD64=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
-ARG GH_CLI_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
+ARG GH_CLI_SHA256_AMD64=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0
+ARG GH_CLI_SHA256_ARM64=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237
 
 ARG TARGETARCH
 
