@@ -19,10 +19,16 @@ FROM ${BASE_REF} AS node-build
 
 ARG NODE_VERSION=24
 # Keep the workflow-facing npm independent from the version bundled by
-# NodeSource. npm 11.18.0 (2026-06-29, beyond the 48h freshness window) is
-# checksum-pinned and contains fixed tar, brace-expansion, and undici.
-ARG NPM_VERSION=11.18.0
-ARG NPM_SHA256=73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e
+# NodeSource. npm 12.2.0 is latest stable and checksum-pinned, and contains
+# fixed tar, brace-expansion, and undici.
+#
+# This can be 12.x while images/base.Dockerfile is held at 11.21.0 because
+# this image runs NodeSource Node 24, which satisfies npm 12's
+# `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0`. The base image installs
+# npm into the runner's externals/node20 (Node 20.20.2), which does not.
+# Both pins vendor the same three CVE-tracked deps asserted below.
+ARG NPM_VERSION=12.2.0
+ARG NPM_SHA256=6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Node.js Composition Stage"
@@ -70,13 +76,13 @@ RUN apt-get update \
     && test "$(npm --version)" = "${NPM_VERSION}" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/tar/package.json').version")" \
-         = "7.5.19" \
+         = "7.5.22" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/brace-expansion/package.json').version")" \
-         = "5.0.7" \
+         = "5.0.9" \
     && test "$(node -p \
          "require('${NPM_ROOT}/npm/node_modules/undici/package.json').version")" \
-         = "6.27.0"
+         = "6.28.0"
 
 # ---- BUILD-TIME ASSERTION ---------------------------------------------------
 # Fail the build if the installed Node major version does not match

@@ -49,15 +49,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # --- Single approval gate + version resolver ------------------------------
-  # Every push job (base, proxy, languages) depends on this. The
-  # `environment: ghcr-publish` clause forces one human approval per
-  # release; the rest of the pipeline runs unattended after that.
-  # Version is also computed here so proxy can build in parallel with
-  # base instead of waiting on it.
+  # --- Automated gate + version resolver ------------------------------------
+  # Every push job (base, proxy, languages) depends on this. Version is
+  # computed here so proxy can build in parallel with base instead of
+  # waiting on it.
+  #
+  # This job previously carried `environment: ghcr-publish`, which required a
+  # human approval per release. That gate silently broke the release train:
+  # the weekly bump tagged v2.1.11 through v2.1.20 and every one of those runs
+  # sat waiting for approval until it expired (v2.1.19 was cancelled after
+  # 168h, v2.1.20 idled 141h), so the newest published image stayed at v2.1.10
+  # from 2026-07-21 and ten weeks of no-cache Debian security rebuilds never
+  # shipped. A gate that blocks security patches by default is worse than no
+  # gate, so publication is now unattended.
+  #
+  # What still protects the registry, with no human in the loop:
+  #   - this workflow only publishes MUTABLE staging tags
+  #     (`<version>-canary`, `nightly`). The stable `<version>` and `latest`
+  #     tags are created only by promote-to-stable.yml, which is
+  #     workflow_dispatch-only and requires an operator to supply the
+  #     post-publish and live-acceptance run IDs by hand. An unattended
+  #     publish therefore can never move `latest`; the human decision was
+  #     always at promotion, and this gate only duplicated it.
+  #   - the "Prove the release tag is already merged to main" step below
+  #     rejects any tag whose commit is not an ancestor of main, so a pushed
+  #     tag cannot publish unreviewed code.
+  #   - the per-image Grype scan fails the run on any fixable HIGH/CRITICAL,
+  #     so a vulnerable image is never promoted.
   gate:
     runs-on: ubuntu-latest
-    environment: ghcr-publish
     permissions:
       contents: read
     outputs:
