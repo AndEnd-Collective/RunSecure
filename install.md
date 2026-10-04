@@ -143,7 +143,7 @@ same release contains the matching proxy and runner digest allowlist; mixing
 releases fails closed with `socket_proxy_denied`.
 
 ```sh
-RUNSECURE_RELEASE=2.1.8
+RUNSECURE_RELEASE=2.1.10
 RUNSECURE_RELEASE_MANIFEST="$HOME/.config/runsecure/runsecure-v${RUNSECURE_RELEASE}-release-images.json"
 gh release download "v${RUNSECURE_RELEASE}" \
   --repo AndEnd-Collective/RunSecure \

@@ -11,13 +11,13 @@
 image:
   orchestrator:
     repository: ghcr.io/andend-collective/runsecure/orchestrator
-    tag: "2.1.2"
-    digest: "sha256:cd5918ac59cc2b8261afecc1e6b43e3fcb14cd8b60329fc4088d99832c0155c5"
+    tag: "2.1.10"
+    digest: "sha256:dca28cce796ea6b05da390b39d7822ad0fe6bbb91bc3485de10324cbf75dca97"
     pullPolicy: Always
   proxy:
     repository: ghcr.io/andend-collective/runsecure/proxy
-    tag: "2.1.2"
-    digest: "sha256:653a28372741957135874c517b7a743a95ff27f7a7c3ffa293fd5cf2cf7dc3b0"
+    tag: "2.1.10"
+    digest: "sha256:6a4b8c633f72df64c93e8f9a6bf7b73b9b6aca11f49f354e5d0d91ec531d268e"
     pullPolicy: Always
   # Terminal runner images admitted by the Kubernetes backend. Each value is
   # rendered into the orchestrator environment as repository@digest; mutable
@@ -25,28 +25,28 @@ image:
   runners:
     default:
       repository: ghcr.io/andend-collective/runsecure/node
-      tag: "2.1.2-24"
-      digest: "sha256:84461b287a4dfd5862da4683f1860a774a4436cb5c1782b7dece5e9d33d130db"
+      tag: "2.1.10-24"
+      digest: "sha256:16ba3056c0ddc9bb067f3259b5c80008d1a07b5861ac211d355a4ca15fb84e79"
       pullPolicy: Always
     node:
       repository: ghcr.io/andend-collective/runsecure/node
-      tag: "2.1.2-24"
-      digest: "sha256:84461b287a4dfd5862da4683f1860a774a4436cb5c1782b7dece5e9d33d130db"
+      tag: "2.1.10-24"
+      digest: "sha256:16ba3056c0ddc9bb067f3259b5c80008d1a07b5861ac211d355a4ca15fb84e79"
       pullPolicy: Always
     python:
       repository: ghcr.io/andend-collective/runsecure/python
-      tag: "2.1.2-3.12"
-      digest: "sha256:eb4cc90f909ac420aff7d368ce4269e9cb540d21774fdd3d1eb2d86ddb2c02e2"
+      tag: "2.1.10-3.12"
+      digest: "sha256:01b5d486dc85632555ecaff96a996ea2ed9af558a570a6fda4d4515171e95dcb"
       pullPolicy: Always
     rust:
       repository: ghcr.io/andend-collective/runsecure/rust
-      tag: "2.1.2-stable"
-      digest: "sha256:c861102a49db8e1703787e93d84a8b383056ae5cc83b4e78d3f0c208589834b7"
+      tag: "2.1.10-stable"
+      digest: "sha256:a61b40e16f00821cd3620cd087acf60ad32fe7d405e99128b8c26b7d4e372deb"
       pullPolicy: Always
   socketProxy:
     repository: ghcr.io/andend-collective/runsecure/socket-proxy
-    tag: "2.1.2"
-    digest: "sha256:4a7af59d856a98a1f4515d67c6eb881f604bf01bd834ccd5bb8f2d91cfdc5778"
+    tag: "2.1.10"
+    digest: "sha256:e4d82bd7dc602a33d3520b6db5891299b128fbf0f5ecd1af68c7e56833067df6"
     pullPolicy: Always
 
 # ---------------------------------------------------------------------------
