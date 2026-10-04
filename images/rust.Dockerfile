@@ -19,6 +19,34 @@ FROM ${BASE_REF} AS rust-build
 
 ARG RUST_VERSION=stable
 
+# ---- Pinned toolchain that RUST_VERSION=stable resolves to ------------------
+# Rust was the one unpinned toolchain in the repo: `--default-toolchain stable`
+# installed whatever rustup served that day, so the image was not reproducible
+# and could change under us between two builds of the same commit.
+#
+# It also broke the release. Syft's binary-classifier-cataloger stopped
+# recognising rustc at 1.98.0, so the toolchain vanished from the SBOM and the
+# publish gate failed closed with
+#   ERROR: expected runtime presence inventory is missing:
+#          binary-classifier-cataloger:rust
+# meaning rust CVEs would not have been scannable at all. Verified against the
+# CI-pinned syft v1.48.0 by building this image at each version:
+#   1.99.0  not classified
+#   1.98.1  not classified
+#   1.97.1  classified as rust 1.97.1   <- newest that works
+#   1.96.1  classified as rust 1.96.1
+#
+# The pin lives here, not in the callers, because `stable` is passed in from
+# publish-images.yml, smoke-test.yml, the validation and acceptance suites and
+# infra/scripts/compose-image.sh (for a project asking for `runtime: rust:stable`).
+# Resolving it in one place means every one of those paths gets the pinned
+# toolchain without knowing the version, and consumer-facing tags stay `stable`.
+#
+# DO NOT bump this by hand. .github/workflows/weekly-rust-toolchain.yml tries
+# the latest stable every week, builds this image with it, and only opens a
+# bump PR once the scanner still inventories rust and the Grype gate passes.
+ARG RUST_STABLE_PIN=1.97.1
+
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Rust Composition Stage"
 LABEL org.opencontainers.image.description="Build-only Rust composition input. Contains package-manager functionality and must never be launched as a CI runner."
@@ -67,21 +95,38 @@ RUN ARCH=$(dpkg --print-architecture) \
          -o /tmp/rustup-init.sha256 \
     && cd /tmp && sha256sum -c rustup-init.sha256 \
     && chmod +x /tmp/rustup-init \
-    && /tmp/rustup-init -y --default-toolchain "${RUST_VERSION}" --profile minimal \
+    && if [ "${RUST_VERSION}" = "stable" ]; then \
+         TOOLCHAIN="${RUST_STABLE_PIN}"; \
+         echo "RUST_VERSION=stable resolves to pinned toolchain ${TOOLCHAIN}"; \
+       else \
+         TOOLCHAIN="${RUST_VERSION}"; \
+       fi \
+    && /tmp/rustup-init -y --default-toolchain "${TOOLCHAIN}" --profile minimal \
     && rm /tmp/rustup-init /tmp/rustup-init.sha256 \
     && . "$HOME/.cargo/env" \
     && rustc --version \
     && cargo --version
 
 # ---- BUILD-TIME ASSERTION ---------------------------------------------------
-# Fail the build if the installed rustc channel does not match RUST_VERSION.
-# Rust uses channel names (stable/beta/nightly) OR explicit versions like
-# 1.78.0; rustup reports the channel for named channels and the version
-# otherwise. We accept either form.
+# Fail the build if the installed toolchain is not the one we asked for.
+# RUST_VERSION=stable is resolved to RUST_STABLE_PIN above, so assert against
+# the resolved value — otherwise a `stable` build would compare "1.97.1"
+# against "stable" and always fail. For an explicit RUST_VERSION the two are
+# the same. rustup reports e.g. "1.97.1-aarch64-unknown-linux-gnu", so compare
+# on the leading version/channel component.
 RUN . "$HOME/.cargo/env" \
-    && CHANNEL=$(rustup show active-toolchain | awk '{print $1}' | cut -d'-' -f1) \
-    && if [ "$CHANNEL" != "${RUST_VERSION}" ] && ! echo "$CHANNEL" | grep -qE "^${RUST_VERSION}(\$|-)"; then \
-         echo "::error::Active rust toolchain is $CHANNEL but RUST_VERSION build-arg is ${RUST_VERSION}" >&2; \
+    && if [ "${RUST_VERSION}" = "stable" ]; then \
+         EXPECTED="${RUST_STABLE_PIN}"; \
+       else \
+         EXPECTED="${RUST_VERSION}"; \
+       fi \
+    && ACTIVE=$(rustup show active-toolchain | awk '{print $1}') \
+    && if ! echo "$ACTIVE" | grep -qE "^${EXPECTED}(\$|-)"; then \
+         echo "::error::Active rust toolchain is $ACTIVE but expected ${EXPECTED} (RUST_VERSION=${RUST_VERSION})" >&2; \
+         exit 1; \
+       fi \
+    && if ! rustc --version | grep -qF "${EXPECTED}"; then \
+         echo "::error::rustc --version does not report ${EXPECTED}: $(rustc --version)" >&2; \
          exit 1; \
        fi
 

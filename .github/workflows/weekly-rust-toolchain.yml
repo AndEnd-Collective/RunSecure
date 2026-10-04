@@ -1,0 +1,246 @@
+# ============================================================================
+# RunSecure — Weekly Rust Toolchain Certification
+# ============================================================================
+# Rust is the only toolchain we cannot simply follow. `--default-toolchain
+# stable` made the image non-reproducible, and worse, syft's
+# binary-classifier-cataloger stopped recognising rustc at 1.98.0 — so the
+# toolchain disappeared from the SBOM, rust CVEs became unscannable, and the
+# publish gate failed closed on every release.
+#
+# images/rust.Dockerfile therefore pins RUST_STABLE_PIN to the newest rustc the
+# scanner can still inventory. This workflow is what moves that pin: every
+# Sunday it tries the current upstream stable, builds the image with it, and
+# runs the same certification the release pipeline runs. The pin is bumped ONLY
+# if that certification passes, via a PR — never silently, and never ahead of
+# the scanner.
+#
+# Scheduled Sunday so a passing bump PR can be reviewed and merged before
+# weekly-version-bump tags on Monday 02:30 UTC, i.e. the toolchain is certified
+# before it is published.
+#
+# A failed certification is a NORMAL outcome: it means upstream rust is ahead
+# of the pinned syft. The run still succeeds and reports why the pin was not
+# moved, so this does not generate a weekly red run that everyone learns to
+# ignore. The only hard failures here are infrastructure problems.
+# ============================================================================
+
+name: weekly-rust-toolchain
+
+on:
+  schedule:
+    # Sunday 02:30 UTC — 24h before the weekly version bump.
+    - cron: '30 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      rust_version:
+        description: 'Certify this exact rust version instead of upstream stable'
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Resolve candidate and current pin
+        id: versions
+        env:
+          REQUESTED: ${{ github.event.inputs.rust_version }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(awk -F= '$1=="ARG RUST_STABLE_PIN"{print $2; exit}' images/rust.Dockerfile)
+          if [ -z "$CURRENT" ]; then
+            echo "::error::could not read ARG RUST_STABLE_PIN from images/rust.Dockerfile"
+            exit 1
+          fi
+          if [ -n "$REQUESTED" ]; then
+            CANDIDATE="$REQUESTED"
+          else
+            # The stable channel manifest reports the cargo version in its
+            # `version` field, so take the rustc version from the rustc package.
+            CANDIDATE=$(curl --proto '=https' --tlsv1.2 -sSf \
+              https://static.rust-lang.org/dist/channel-rust-stable.toml \
+              | awk '/^\[pkg\.rustc\]/{f=1} f&&/^version = /{print $3; exit}' \
+              | tr -d '"')
+          fi
+          if ! echo "$CANDIDATE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::could not resolve a concrete rust version (got '${CANDIDATE}')"
+            exit 1
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "Current pin: $CURRENT"
+          echo "Candidate:   $CANDIDATE"
+
+      - name: Skip when already current
+        id: gate
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          if [ "$CURRENT" = "$CANDIDATE" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Pin is already at the latest stable ($CURRENT); nothing to certify." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.gate.outputs.proceed == 'true'
+
+      - name: Install checksum-pinned Syft + Grype
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          infra/scripts/install-pinned-scanners.sh /usr/local/bin
+
+      - name: Build base and candidate rust image
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          docker build -f images/base.Dockerfile -t runner-base:latest .
+          # Build through RUST_VERSION=stable with the candidate supplied as the
+          # pin, so this exercises the exact resolution path every consumer
+          # uses rather than a one-off explicit-version build.
+          docker build -f images/rust.Dockerfile \
+            --build-arg RUST_VERSION=stable \
+            --build-arg "RUST_STABLE_PIN=${CANDIDATE}" \
+            -t runner-rust:candidate .
+          docker run --rm --entrypoint sh runner-rust:candidate -c 'rustc --version'
+
+      # --- The certification ----------------------------------------------
+      # Same script, same arguments, same pinned scanners as the rust jobs in
+      # publish-images.yml. If this cannot pass, the release cannot either.
+      #
+      # Certified on linux/amd64 only (the native runner arch). syft's binary
+      # classifier keys off the rustc binary's version strings, not the
+      # architecture — when 1.98.0+ stopped being recognised it failed on amd64
+      # and arm64 identically — so one arch is a sound proxy and avoids a QEMU
+      # cross-build on every weekly run. The publish pipeline still scans both.
+      - name: Certify — Grype gate + rust inventory presence
+        id: certify
+        if: steps.gate.outputs.proceed == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          bash infra/scripts/grype-scan-image.sh \
+            runner-rust:candidate \
+            rust-candidate.sarif \
+            ca-certificates '' '' \
+            binary-classifier-cataloger rust
+
+      - name: Certify — rust terminal-stage hardening contract
+        id: certify_hardening
+        if: steps.gate.outputs.proceed == 'true' && steps.certify.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          bash tests/validation/test-language-terminal-stages.sh
+
+      - name: Report a failed certification and stop
+        if: steps.gate.outputs.proceed == 'true' && (steps.certify.outcome != 'success' || steps.certify_hardening.outcome != 'success')
+        env:
+          CURRENT: ${{ steps.versions.outputs.current }}
+          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+          GATE_OUTCOME: ${{ steps.certify.outcome }}
+          HARDENING_OUTCOME: ${{ steps.certify_hardening.outcome }}
+        run: |
+          {
+            echo "### Rust ${CANDIDATE} NOT adopted"
+            echo
+            echo "The pin stays at **${CURRENT}**."
+            echo
+            echo "| check | result |"
+            echo "|---|---|"
+            echo "| Grype gate + \`binary-classifier-cataloger:rust\` presence | ${GATE_OUTCOME} |"
+            echo "| rust terminal-stage hardening | ${HARDENING_OUTCOME} |"
+            echo
+            echo "This is expected when upstream rust is ahead of the pinned syft:"
+            echo "the toolchain would not appear in the SBOM, so rust CVEs would not"
+            echo "be scannable and the publish gate would fail closed."
+            echo
+            echo "Nothing to do — the next bump of \`SYFT_VERSION\` in"
+            echo "\`infra/scripts/install-pinned-scanners.sh\` may unblock it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the pin-bump PR
+        if: steps.gate.outputs.proceed == 'true' && steps.certify.outcome == 'success' && steps.certify_hardening.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+          CANDIDATE: ${{ steps.versions.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          BRANCH="bot/rust-toolchain-${CANDIDATE}"
+          python3 - "$CURRENT" "$CANDIDATE" <<'PY'
+          import pathlib, re, sys
+          current, candidate = sys.argv[1], sys.argv[2]
+          p = pathlib.Path("images/rust.Dockerfile")
+          text = p.read_text()
+          updated, n = re.subn(
+              rf"^ARG RUST_STABLE_PIN={re.escape(current)}$",
+              f"ARG RUST_STABLE_PIN={candidate}",
+              text,
+              flags=re.MULTILINE,
+          )
+          if n != 1:
+              raise SystemExit(f"expected exactly one RUST_STABLE_PIN={current} line, replaced {n}")
+          p.write_text(updated)
+          PY
+          # Refresh the recorded evidence table so the comment never outlives
+          # the versions it describes.
+          python3 - "$CANDIDATE" <<'PY'
+          import pathlib, re, sys
+          candidate = sys.argv[1]
+          p = pathlib.Path("images/rust.Dockerfile")
+          text = p.read_text()
+          text = re.sub(
+              r"(#   )[0-9]+\.[0-9]+\.[0-9]+(  classified as rust )[0-9]+\.[0-9]+\.[0-9]+(   <- newest that works)",
+              rf"\g<1>{candidate}\g<2>{candidate}\g<3>",
+              text,
+              count=1,
+          )
+          p.write_text(text)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          git add images/rust.Dockerfile
+          git commit -m "chore(rust): certify and pin toolchain ${CANDIDATE}"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          # Body goes through a file: a multi-line shell string here would have
+          # to start at column 0 and would terminate the YAML block scalar.
+          {
+            printf '%s\n\n' "Automated weekly rust toolchain certification."
+            printf 'Bumps `RUST_STABLE_PIN` in `images/rust.Dockerfile` from `%s` to `%s`.\n\n' \
+              "$CURRENT" "$CANDIDATE"
+            printf '%s\n\n' "The candidate was built through \`RUST_VERSION=stable\` — the same resolution path every consumer uses — and passed the identical certification the release pipeline runs, with the same checksum-pinned Syft and Grype:"
+            printf '%s\n' "- \`infra/scripts/grype-scan-image.sh\` with \`binary-classifier-cataloger:rust\`, proving the toolchain is still inventoried in the SBOM and that no fixable HIGH/CRITICAL is present"
+            printf '%s\n\n' "- \`tests/validation/test-language-terminal-stages.sh\`"
+            printf '%s\n' "The pin is only ever moved by this workflow, and only after that passes, so rust can never get ahead of what the scanner can see."
+          } > /tmp/rust-pr-body.md
+
+          if gh pr create \
+            --base main --head "$BRANCH" \
+            --title "chore(rust): certify and pin toolchain ${CANDIDATE}" \
+            --body-file /tmp/rust-pr-body.md; then
+            {
+              echo "### Rust ${CANDIDATE} certified"
+              echo
+              echo "Opened a PR bumping the pin from \`${CURRENT}\` to \`${CANDIDATE}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::pin bump pushed to ${BRANCH} but PR creation failed"
+          fi
