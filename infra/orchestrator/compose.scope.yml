@@ -91,13 +91,22 @@ services:
       - egress-configs:/data
     security_opt: ["no-new-privileges:true"]
 
-  pat-init:
-    # The operator requires a host PAT owned by the invoking user at mode 0400.
-    # UID 65532 in the orchestrator cannot read that bind mount on native Linux,
-    # so copy it into an owned named volume before the service starts. The host
-    # file remains read-only and is never exposed through the environment.
+  auth-secret-init:
+    # Delivers the scope's GitHub credential to the orchestrator. This is the
+    # single init path for BOTH auth types: a PAT (auth.type: pat) or an App
+    # private key (auth.type: github_app). The operator supplies a host file
+    # owned by the invoking user at mode 0400; UID 65532 in the orchestrator
+    # cannot read that bind mount on native Linux, so it is copied into an
+    # owned named volume before the service starts. The host file remains
+    # read-only and is never exposed through the environment.
+    #
+    # Which host file and which in-volume filename are used is decided by
+    # infra/scripts/orchestrator-compose.sh from auth.type in the scope YAML,
+    # and passed in as RUNSECURE_AUTH_SECRET_FILE / RUNSECURE_AUTH_SECRET_NAME.
+    # Nothing here is PAT-specific, so a github_app scope no longer has to
+    # supply an unrelated PAT (issue #64).
     image: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
-    container_name: rs-orch-${RUNSECURE_SCOPE}-pat-init
+    container_name: rs-orch-${RUNSECURE_SCOPE}-auth-secret-init
     restart: "no"
     read_only: true
     user: "0:0"
@@ -107,38 +116,46 @@ services:
       # Set only by infra/scripts/orchestrator-compose.sh after an os.lstat
       # host check. Requiring it makes an accidental raw Compose launch fail
       # closed; it is not a security boundary against a malicious operator.
-      RUNSECURE_PAT_HOST_VALIDATED: ${RUNSECURE_PAT_HOST_VALIDATED:?launch with infra/scripts/orchestrator-compose.sh}
+      RUNSECURE_AUTH_SECRET_HOST_VALIDATED: ${RUNSECURE_AUTH_SECRET_HOST_VALIDATED:?launch with infra/scripts/orchestrator-compose.sh}
+      # Basename written into the secret volume. Constrained to the two known
+      # values by the wrapper and re-checked below, so a stray value cannot
+      # make this init write an arbitrary path into the volume.
+      RUNSECURE_AUTH_SECRET_NAME: ${RUNSECURE_AUTH_SECRET_NAME:?RUNSECURE_AUTH_SECRET_NAME is required}
     entrypoint:
       - sh
       - -euc
       - |
         fail() { echo "[RunSecure] ERROR: $$*" >&2; exit 1; }
-        [ "$$RUNSECURE_PAT_HOST_VALIDATED" = "runsecure-host-pat-v1" ] \
-          || fail "host PAT validation sentinel is invalid"
-        [ -f /host-pat ] && [ ! -L /host-pat ] \
-          || fail "mounted PAT source must be a regular non-symlink file"
-        [ "$$(stat -c '%a' /host-pat)" = "400" ] \
-          || fail "mounted PAT source must be mode 0400"
+        [ "$$RUNSECURE_AUTH_SECRET_HOST_VALIDATED" = "runsecure-host-auth-secret-v1" ] \
+          || fail "host auth-secret validation sentinel is invalid"
+        case "$$RUNSECURE_AUTH_SECRET_NAME" in
+          runsecure-pat|runsecure-app-private-key) ;;
+          *) fail "unsupported auth secret name" ;;
+        esac
+        [ -f /host-auth-secret ] && [ ! -L /host-auth-secret ] \
+          || fail "mounted auth secret source must be a regular non-symlink file"
+        [ "$$(stat -c '%a' /host-auth-secret)" = "400" ] \
+          || fail "mounted auth secret source must be mode 0400"
 
         # Replace the destination through a new inode. A previous successful
         # run leaves the old file UID 65532-owned and mode 0400; copying over
         # that inode is not restart-safe with this init's reduced capability
         # set. The volume root remains root-owned and writable by this one-shot
         # init, so atomically renaming the prepared inode over the old name
-        # works without CAP_FOWNER and never exposes a partially-written PAT.
-        target=/secret/runsecure-pat
-        staged=/secret/.runsecure-pat.new
+        # works without CAP_FOWNER and never exposes a partially-written secret.
+        target="/secret/$$RUNSECURE_AUTH_SECRET_NAME"
+        staged="/secret/.$$RUNSECURE_AUTH_SECRET_NAME.new"
         rm -f "$$staged"
         trap 'rm -f "$$staged"' EXIT
         umask 077
-        cp /host-pat "$$staged"
+        cp /host-auth-secret "$$staged"
         chmod 400 "$$staged"
         chown 65532:65532 "$$staged"
         mv -f "$$staged" "$$target"
         trap - EXIT
     volumes:
-      - ${RUNSECURE_PAT_FILE:?RUNSECURE_PAT_FILE is required}:/host-pat:ro
-      - pat-secret:/secret
+      - ${RUNSECURE_AUTH_SECRET_FILE:?RUNSECURE_AUTH_SECRET_FILE is required}:/host-auth-secret:ro
+      - auth-secret:/secret
     security_opt: ["no-new-privileges:true"]
 
   orchestrator:
@@ -165,7 +182,7 @@ services:
         condition: service_started
       egress-init:
         condition: service_completed_successfully
-      pat-init:
+      auth-secret-init:
         condition: service_completed_successfully
     environment:
       RUNSECURE_SCOPE_FILE: /etc/runsecure/scope.yml
@@ -189,7 +206,7 @@ services:
       # variables are required so `docker compose config` fails before launch
       # instead of silently substituting a file that cannot serve the scope.
       - ${RUNSECURE_SCOPE_FILE_HOST:?RUNSECURE_SCOPE_FILE_HOST is required}:/etc/runsecure/scope.yml:ro
-      - pat-secret:/run/secrets:ro
+      - auth-secret:/run/secrets:ro
       # Shared egress-configs volume: orchestrator writes per-spawn configs (rw);
       # the daemon mounts the same volume read-only into each proxy container.
       - egress-configs:/var/run/runsecure/egress:rw
@@ -248,8 +265,8 @@ services:
 volumes:
   egress-configs:
     name: ${RUNSECURE_SCOPE}-egress-configs
-  pat-secret:
-    name: ${RUNSECURE_SCOPE}-pat-secret
+  auth-secret:
+    name: ${RUNSECURE_SCOPE}-auth-secret
 
 networks:
   orch-internal:

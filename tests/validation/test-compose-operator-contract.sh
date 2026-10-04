@@ -65,7 +65,15 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
-touch "${tmp}/scope.yml"
+# The wrapper reads auth.type from the scope file to decide which credential
+# to require, so the scope file can no longer be empty.
+cat > "${tmp}/scope.yml" <<'EOF'
+apiVersion: runsecure.io/v1alpha1
+name: pat-scope
+auth:
+  type: pat
+  pat_file: /run/secrets/runsecure-pat
+EOF
 printf 'first-test-token\n' > "${tmp}/pat"
 chmod 0400 "${tmp}/pat"
 mkdir "${tmp}/projects"
@@ -79,14 +87,19 @@ export RUNSECURE_SOCKET_PROXY_IMAGE=example.invalid/runsecure/socket-proxy:test
 export RUNSECURE_PROXY_IMAGE=example.invalid/runsecure/proxy:test
 export RUNSECURE_RUNNER_IMAGE_DEFAULT=example.invalid/runsecure/python:test
 
-if env -u RUNSECURE_PAT_HOST_VALIDATED docker compose -f "$COMPOSE_FILE" config \
+# Raw `docker compose` is driven directly in the block below, so it needs the
+# generic variables the wrapper would normally compute from auth.type.
+export RUNSECURE_AUTH_SECRET_FILE="${tmp}/pat"
+export RUNSECURE_AUTH_SECRET_NAME=runsecure-pat
+
+if env -u RUNSECURE_AUTH_SECRET_HOST_VALIDATED docker compose -f "$COMPOSE_FILE" config \
     >"${tmp}/missing-validation.out" 2>"${tmp}/missing-validation.err"; then
-  echo "FAIL: raw Compose accepted a missing host PAT validation sentinel" >&2
+  echo "FAIL: raw Compose accepted a missing host auth-secret validation sentinel" >&2
   exit 1
 fi
 grep -q 'launch with infra/scripts/orchestrator-compose.sh' \
   "${tmp}/missing-validation.err"
-export RUNSECURE_PAT_HOST_VALIDATED=runsecure-host-pat-v1
+export RUNSECURE_AUTH_SECRET_HOST_VALIDATED=runsecure-host-auth-secret-v1
 
 if env -u RUNSECURE_SCOPE_FILE_HOST docker compose -f "$COMPOSE_FILE" config \
     >"${tmp}/missing-scope.out" 2>"${tmp}/missing-scope.err"; then
@@ -102,12 +115,19 @@ if env -u RUNSECURE_PROJECTS_ROOT docker compose -f "$COMPOSE_FILE" config \
 fi
 grep -q 'RUNSECURE_PROJECTS_ROOT is required' "${tmp}/missing-projects.err"
 
-if env -u RUNSECURE_PAT_FILE docker compose -f "$COMPOSE_FILE" config \
-    >"${tmp}/missing-pat.out" 2>"${tmp}/missing-pat.err"; then
-  echo "FAIL: Compose accepted a missing RUNSECURE_PAT_FILE" >&2
+if env -u RUNSECURE_AUTH_SECRET_FILE docker compose -f "$COMPOSE_FILE" config \
+    >"${tmp}/missing-secret.out" 2>"${tmp}/missing-secret.err"; then
+  echo "FAIL: Compose accepted a missing RUNSECURE_AUTH_SECRET_FILE" >&2
   exit 1
 fi
-grep -q 'RUNSECURE_PAT_FILE is required' "${tmp}/missing-pat.err"
+grep -q 'RUNSECURE_AUTH_SECRET_FILE is required' "${tmp}/missing-secret.err"
+
+if env -u RUNSECURE_AUTH_SECRET_NAME docker compose -f "$COMPOSE_FILE" config \
+    >"${tmp}/missing-name.out" 2>"${tmp}/missing-name.err"; then
+  echo "FAIL: Compose accepted a missing RUNSECURE_AUTH_SECRET_NAME" >&2
+  exit 1
+fi
+grep -q 'RUNSECURE_AUTH_SECRET_NAME is required' "${tmp}/missing-name.err"
 
 env -u RUNSECURE_ORCHESTRATOR_HEALTH_PORT \
     -u RUNSECURE_ORCHESTRATOR_STATE_PORT \
@@ -134,7 +154,7 @@ pat_source = os.path.abspath(sys.argv[5])
 orchestrator = rendered["services"]["orchestrator"]
 operator_relay = rendered["services"]["operator-relay"]
 socket_proxy = rendered["services"]["socket-proxy"]
-pat_init = rendered["services"]["pat-init"]
+auth_secret_init = rendered["services"]["auth-secret-init"]
 
 assert orchestrator["stop_grace_period"] == "1m30s"
 assert str(orchestrator["environment"]["RUNSECURE_DRAIN_SECONDS"]) == "60"
@@ -171,28 +191,29 @@ assert mounts["/projects"]["read_only"] is True
 assert mounts["/run/secrets"]["type"] == "volume"
 assert mounts["/run/secrets"]["read_only"] is True
 
-pat_mounts = {mount["target"]: mount for mount in pat_init["volumes"]}
-assert os.path.normpath(pat_mounts["/host-pat"]["source"]) == pat_source
-assert pat_mounts["/host-pat"]["read_only"] is True
-assert pat_mounts["/secret"]["type"] == "volume"
-assert pat_init["read_only"] is True
-assert "ALL" in pat_init["cap_drop"]
-assert set(pat_init["cap_add"]) == {"CHOWN", "DAC_OVERRIDE"}
-assert pat_init["environment"]["RUNSECURE_PAT_HOST_VALIDATED"] == (
-    "runsecure-host-pat-v1"
+init_mounts = {mount["target"]: mount for mount in auth_secret_init["volumes"]}
+assert os.path.normpath(init_mounts["/host-auth-secret"]["source"]) == pat_source
+assert init_mounts["/host-auth-secret"]["read_only"] is True
+assert init_mounts["/secret"]["type"] == "volume"
+assert auth_secret_init["read_only"] is True
+assert "ALL" in auth_secret_init["cap_drop"]
+assert set(auth_secret_init["cap_add"]) == {"CHOWN", "DAC_OVERRIDE"}
+assert auth_secret_init["environment"]["RUNSECURE_AUTH_SECRET_HOST_VALIDATED"] == (
+    "runsecure-host-auth-secret-v1"
 )
-pat_init_script = pat_init["entrypoint"][2]
-assert "[ -f /host-pat ] && [ ! -L /host-pat ]" in pat_init_script
-assert "stat -c '%a' /host-pat" in pat_init_script
-assert pat_init_script.index('rm -f "$$staged"') < pat_init_script.index(
-    'cp /host-pat "$$staged"'
+assert auth_secret_init["environment"]["RUNSECURE_AUTH_SECRET_NAME"] == "runsecure-pat"
+init_script = auth_secret_init["entrypoint"][2]
+assert "[ -f /host-auth-secret ] && [ ! -L /host-auth-secret ]" in init_script
+assert "stat -c '%a' /host-auth-secret" in init_script
+assert init_script.index('rm -f "$$staged"') < init_script.index(
+    'cp /host-auth-secret "$$staged"'
 )
-assert pat_init_script.index('chmod 400 "$$staged"') < pat_init_script.index(
+assert init_script.index('chmod 400 "$$staged"') < init_script.index(
     'chown 65532:65532 "$$staged"'
 )
-assert 'mv -f "$$staged" "$$target"' in pat_init_script
-assert "FOWNER" not in pat_init["cap_add"]
-assert orchestrator["depends_on"]["pat-init"]["condition"] == "service_completed_successfully"
+assert 'mv -f "$$staged" "$$target"' in init_script
+assert "FOWNER" not in auth_secret_init["cap_add"]
+assert orchestrator["depends_on"]["auth-secret-init"]["condition"] == "service_completed_successfully"
 
 def assert_loopback_ports(config: dict, expected: dict[int, str]) -> None:
     ports = config["services"]["operator-relay"]["ports"]
@@ -244,19 +265,116 @@ if RUNSECURE_PAT_FILE="${tmp}/pat-link" \
   echo "FAIL: Compose wrapper accepted a symlink PAT" >&2
   exit 1
 fi
-grep -q 'PAT source must not be a symlink' "${tmp}/symlink.err"
+grep -q 'auth secret source must not be a symlink' "${tmp}/symlink.err"
+
+# --- issue #64: a github_app scope must launch with NO PAT present ----------
+# Before this, compose.scope.yml unconditionally required RUNSECURE_PAT_FILE
+# and always ran a PAT init, so a valid app-auth scope could not start through
+# the supported wrapper without also supplying an unrelated PAT.
+cat > "${tmp}/app-scope.yml" <<'EOF'
+apiVersion: runsecure.io/v1alpha1
+name: app-scope
+auth:
+  type: github_app
+  app_id: 123456
+  installation_id: 7890123
+  private_key_file: /run/secrets/runsecure-app-private-key
+EOF
+printf -- '-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n' \
+  > "${tmp}/app-key.pem"
+chmod 0400 "${tmp}/app-key.pem"
+
+app_env="${tmp}/app.env"
+cat > "$app_env" <<EOF
+COMPOSE_PROJECT_NAME=runsecure-app-validation-$$
+RUNSECURE_SCOPE=app-validation-$$
+RUNSECURE_SCOPE_FILE_HOST=${tmp}/app-scope.yml
+RUNSECURE_PROJECTS_ROOT=$RUNSECURE_PROJECTS_ROOT
+RUNSECURE_APP_PRIVATE_KEY_FILE=${tmp}/app-key.pem
+RUNSECURE_ORCHESTRATOR_IMAGE=$RUNSECURE_ORCHESTRATOR_IMAGE
+RUNSECURE_SOCKET_PROXY_IMAGE=$RUNSECURE_SOCKET_PROXY_IMAGE
+RUNSECURE_PROXY_IMAGE=$RUNSECURE_PROXY_IMAGE
+RUNSECURE_RUNNER_IMAGE_DEFAULT=$RUNSECURE_RUNNER_IMAGE_DEFAULT
+EOF
+
+# Scrub every PAT-related variable from the environment so this proves the
+# app path needs no PAT at all, rather than inheriting one from above.
+env -u RUNSECURE_PAT_FILE \
+    -u RUNSECURE_AUTH_SECRET_FILE \
+    -u RUNSECURE_AUTH_SECRET_NAME \
+    -u RUNSECURE_AUTH_SECRET_HOST_VALIDATED \
+    -u RUNSECURE_SCOPE_FILE_HOST \
+    "$COMPOSE_WRAPPER" --env-file "$app_env" config --format json \
+    >"${tmp}/app-rendered.json"
+
+python3 - "${tmp}/app-rendered.json" "${tmp}/app-key.pem" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+rendered = json.loads(pathlib.Path(sys.argv[1]).read_text())
+key_source = os.path.abspath(sys.argv[2])
+init = rendered["services"]["auth-secret-init"]
+mounts = {mount["target"]: mount for mount in init["volumes"]}
+
+# The App key is bound, not a PAT, and the in-volume name matches what the
+# scope's private_key_file points at.
+assert os.path.normpath(mounts["/host-auth-secret"]["source"]) == key_source
+assert mounts["/host-auth-secret"]["read_only"] is True
+assert init["environment"]["RUNSECURE_AUTH_SECRET_NAME"] == "runsecure-app-private-key"
+
+# Nothing in the rendered config may reference a PAT path for an app scope.
+blob = json.dumps(rendered)
+assert "runsecure-pat" not in blob, "app scope still references a PAT secret"
+PY
+
+# A github_app scope with no private key must fail closed, naming the right
+# variable rather than asking for a PAT.
+sed '/RUNSECURE_APP_PRIVATE_KEY_FILE/d' "$app_env" > "${tmp}/app-nokey.env"
+if env -u RUNSECURE_PAT_FILE -u RUNSECURE_APP_PRIVATE_KEY_FILE \
+      -u RUNSECURE_SCOPE_FILE_HOST \
+      "$COMPOSE_WRAPPER" --env-file "${tmp}/app-nokey.env" config \
+      >"${tmp}/app-nokey.out" 2>"${tmp}/app-nokey.err"; then
+  echo "FAIL: wrapper accepted a github_app scope with no private key" >&2
+  exit 1
+fi
+grep -q 'RUNSECURE_APP_PRIVATE_KEY_FILE is required' "${tmp}/app-nokey.err"
+
+# A mode-0644 private key must be rejected exactly like a mode-0644 PAT.
+chmod 0644 "${tmp}/app-key.pem"
+if env -u RUNSECURE_PAT_FILE -u RUNSECURE_SCOPE_FILE_HOST \
+      "$COMPOSE_WRAPPER" --env-file "$app_env" config \
+      >"${tmp}/app-mode.out" 2>"${tmp}/app-mode.err"; then
+  echo "FAIL: wrapper accepted a mode-0644 App private key" >&2
+  exit 1
+fi
+grep -q 'must be mode 0400 (got 0644)' "${tmp}/app-mode.err"
+chmod 0400 "${tmp}/app-key.pem"
+
+# An unknown auth.type must fail closed instead of silently defaulting to PAT.
+sed 's/type: github_app/type: oauth_device/' "${tmp}/app-scope.yml" \
+  > "${tmp}/bad-scope.yml"
+sed "s#${tmp}/app-scope.yml#${tmp}/bad-scope.yml#" "$app_env" > "${tmp}/bad.env"
+if env -u RUNSECURE_PAT_FILE -u RUNSECURE_SCOPE_FILE_HOST \
+      "$COMPOSE_WRAPPER" --env-file "${tmp}/bad.env" config \
+      >"${tmp}/bad.out" 2>"${tmp}/bad.err"; then
+  echo "FAIL: wrapper accepted an unknown auth.type" >&2
+  exit 1
+fi
+grep -q "auth.type must be 'pat' or 'github_app'" "${tmp}/bad.err"
 
 if docker info >/dev/null 2>&1; then
-  run_pat_init() {
+  run_auth_secret_init() {
     "$COMPOSE_WRAPPER" --env-file "$operator_env" \
       up --no-deps --force-recreate --abort-on-container-exit \
-      --exit-code-from pat-init pat-init >/dev/null
+      --exit-code-from auth-secret-init auth-secret-init >/dev/null
   }
 
   assert_secret() {
     local expected=$1
     docker run --rm \
-      -v "${RUNSECURE_SCOPE}-pat-secret:/secret:ro" \
+      -v "${RUNSECURE_SCOPE}-auth-secret:/secret:ro" \
       alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601 \
       sh -euc \
       'test -f /secret/runsecure-pat
@@ -266,16 +384,16 @@ if docker info >/dev/null 2>&1; then
       sh "$expected"
   }
 
-  run_pat_init
+  run_auth_secret_init
   assert_secret first-test-token
 
   chmod 0600 "${tmp}/pat"
   printf 'second-test-token\n' > "${tmp}/pat"
   chmod 0400 "${tmp}/pat"
-  run_pat_init
+  run_auth_secret_init
   assert_secret second-test-token
 else
-  echo "SKIP: Docker daemon unavailable; pat-init restart exercise not run"
+  echo "SKIP: Docker daemon unavailable; auth-secret-init restart exercise not run"
 fi
 
-echo "PASS: Compose validates host PATs, restarts pat-init, and preserves operator isolation"
+echo "PASS: Compose validates PAT and GitHub App credentials, restarts auth-secret-init, and preserves operator isolation"
