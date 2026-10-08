@@ -80,6 +80,13 @@ LOG_UPLOAD_TIMEOUT="${RUNSECURE_LOG_UPLOAD_TIMEOUT:-30}"
 # emitted even when a remote upload failed, so it is a local drain marker, not
 # a remote-delivery receipt. See tests/discovery/findings.md.
 LOG_UPLOAD_MARKER="${RUNSECURE_LOG_UPLOAD_MARKER:-All queue process tasks have been stopped, and all queues are drained.}"
+# Opt-in hard failure when GitHub did not accept the job logs. Default is a
+# loud warning: a log-delivery failure does not invalidate the job's result,
+# and failing closed by default would break every runner behind a TLS
+# inspecting proxy. Operators who treat CI logs as audit evidence should set
+# RUNSECURE_REQUIRE_LOG_DELIVERY=1.
+REQUIRE_LOG_DELIVERY="${RUNSECURE_REQUIRE_LOG_DELIVERY:-0}"
+LOG_DELIVERY_EXIT_CODE=75
 
 # --- Start the runner as a foreground child ---
 echo "[RunSecure] Starting ephemeral runner..."
@@ -132,6 +139,49 @@ else
     if (( $(date +%s) >= DEADLINE )); then
         echo "[RunSecure] WARNING: local upload-queue drain marker was not observed after ${LOG_UPLOAD_TIMEOUT}s."
         echo "[RunSecure] _diag/ is host-mounted; logs are recoverable from the host."
+    fi
+fi
+
+# --- Did GitHub actually accept the logs? ------------------------------------
+# The marker above is a LOCAL drain signal: JobServerQueue emits it from
+# ShutdownAsync() whether or not the remote upload worked. The real outcome is
+# logged separately as
+#   Tried to upload N file(s) to results, success rate: X/N
+# so X < N means the job succeeded, the queues "drained", and GitHub still has
+# no archived log for the job. That combination is invisible without this
+# check, and it is exactly how weeks of log loss went unnoticed: a job whose
+# logs never arrive looks identical to one whose logs did.
+#
+# Observed cause: TLS interception of *.blob.core.windows.net (where the
+# Results service stores job logs) by a proxy whose CA is absent from this
+# image's trust store. The runner reports
+#   AuthenticationException: ... certificate chain: UntrustedRoot
+#   Tried to upload 4 file(s) to results, success rate: 0/4
+# GitHub-hosted endpoints keep working, so only the archived log is lost.
+LOG_DELIVERY_FAILED=0
+if [[ -n "${WORKER_LOG}" ]]; then
+    RESULTS_LINE=$(grep -oE 'Tried to upload [0-9]+ file\(s\) to results, success rate: [0-9]+/[0-9]+' \
+        "${WORKER_LOG}" 2>/dev/null | tail -n1 || true)
+    if [[ -z "${RESULTS_LINE}" ]]; then
+        echo "[RunSecure] No results-upload outcome recorded by the runner; log delivery unverified."
+    else
+        RATE="${RESULTS_LINE##*: }"
+        DELIVERED="${RATE%%/*}"
+        ATTEMPTED="${RATE##*/}"
+        if [[ "${ATTEMPTED}" -gt 0 && "${DELIVERED}" -lt "${ATTEMPTED}" ]]; then
+            LOG_DELIVERY_FAILED=1
+            echo "::error::RunSecure: GitHub accepted only ${DELIVERED}/${ATTEMPTED} job log file(s); this job's log will be missing from GitHub."
+            echo "[RunSecure] Most likely a TLS-inspecting proxy on the path to the"
+            echo "[RunSecure] Results service (*.blob.core.windows.net) presenting a"
+            echo "[RunSecure] certificate this image does not trust. Check _diag/ for"
+            echo "[RunSecure] 'UntrustedRoot' or other TLS errors from JobServerQueue."
+            if [[ "${REQUIRE_LOG_DELIVERY}" == "1" ]]; then
+                echo "[RunSecure] RUNSECURE_REQUIRE_LOG_DELIVERY=1 — failing the runner."
+                exit "${LOG_DELIVERY_EXIT_CODE}"
+            fi
+        else
+            echo "[RunSecure] GitHub accepted ${DELIVERED}/${ATTEMPTED} job log file(s)."
+        fi
     fi
 fi
 
