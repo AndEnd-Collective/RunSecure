@@ -185,6 +185,57 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Test 4c: results-upload delivery is checked, not assumed
+# ----------------------------------------------------------------------------
+# The drain marker is emitted by JobServerQueue.ShutdownAsync() even when every
+# remote upload failed, so it proves nothing about GitHub having the log. The
+# entrypoint must additionally parse
+#   Tried to upload N file(s) to results, success rate: X/N
+# and shout when X < N. This is the real-world text captured from a runner
+# whose Results uploads were blocked by TLS interception of
+# *.blob.core.windows.net (UntrustedRoot): the job succeeded, the queues
+# "drained", and GitHub had no archived log at all.
+for required in \
+    'Tried to upload [0-9]+ file' \
+    'RUNSECURE_REQUIRE_LOG_DELIVERY' \
+    'GitHub accepted only'
+do
+    if grep -qE -- "$required" "$REAL_ENTRYPOINT"; then
+        pass "entrypoint checks results-upload delivery ($required)"
+    else
+        fail "entrypoint is missing the results-delivery check ($required)"
+    fi
+done
+
+D_DIR="$WORK/delivery-check"
+mkdir -p "$D_DIR"
+printf '%s\n' \
+  '[JobServerQueue] Tried to upload 4 file(s) to results, success rate: 0/4.' \
+  '[JobServerQueue] All queue process tasks have been stopped, and all queues are drained.' \
+  > "$D_DIR/fail.log"
+printf '%s\n' \
+  '[JobServerQueue] Tried to upload 4 file(s) to results, success rate: 4/4.' \
+  '[JobServerQueue] All queue process tasks have been stopped, and all queues are drained.' \
+  > "$D_DIR/ok.log"
+
+# Extract the exact rate-parsing logic from the entrypoint and exercise it, so
+# this test fails if the parsing stops matching the runner's real wording.
+delivery_rate() {
+    grep -oE 'Tried to upload [0-9]+ file\(s\) to results, success rate: [0-9]+/[0-9]+' \
+        "$1" 2>/dev/null | tail -n1 | sed 's/.*: //'
+}
+if [[ "$(delivery_rate "$D_DIR/fail.log")" == "0/4" ]]; then
+    pass "delivery rate parsed from a failed upload (0/4)"
+else
+    fail "could not parse the failed-upload rate"
+fi
+if [[ "$(delivery_rate "$D_DIR/ok.log")" == "4/4" ]]; then
+    pass "delivery rate parsed from a successful upload (4/4)"
+else
+    fail "could not parse the successful-upload rate"
+fi
+
+# ----------------------------------------------------------------------------
 # Test 5: Optional gh api check (operator-side post-real-run validation)
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
