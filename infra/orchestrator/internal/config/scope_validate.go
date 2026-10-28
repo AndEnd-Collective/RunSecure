@@ -258,7 +258,15 @@ func validatePodSettings(settings *backend.KubePodSettings, arch string) error {
 	if settings.NodeSelector == nil {
 		settings.NodeSelector = map[string]string{}
 	}
-	if len(settings.NodeSelector) > 16 || len(settings.Tolerations) > 16 {
+	// Count the final placement map before inserting defaults. The 16-entry
+	// bound includes both mandatory keys and must hold on every validation.
+	normalizedSelectors := len(settings.NodeSelector)
+	for _, key := range []string{"kubernetes.io/arch", "kubernetes.io/os"} {
+		if _, present := settings.NodeSelector[key]; !present {
+			normalizedSelectors++
+		}
+	}
+	if normalizedSelectors > 16 || len(settings.Tolerations) > 16 {
 		return errors.New("kubernetes placement exceeds 16 entries")
 	}
 	for key, value := range settings.NodeSelector {

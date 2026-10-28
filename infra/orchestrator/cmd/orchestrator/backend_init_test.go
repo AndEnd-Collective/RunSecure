@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
@@ -230,4 +231,50 @@ func TestInitializeSharedBackendAcceptsValidEffectivePolicyAndTCP(t *testing.T) 
 	require.NoError(t, err)
 	require.NotEmpty(t, cs.Actions())
 	require.Equal(t, []int64{42}, gh.deletedIDs, "valid policy permits normal recovery")
+}
+
+func TestInitializeSharedBackendRevalidatesNormalizedSelectorBoundary(t *testing.T) {
+	for _, explicitMandatory := range []bool{false, true} {
+		for _, customCount := range []int{14, 15} {
+			t.Run(fmt.Sprintf("custom-%d-explicit-%t", customCount, explicitMandatory), func(t *testing.T) {
+				setValidKubeImages(t)
+				s := approvedStartupScope(t)
+				selectors := map[string]string{}
+				for i := 0; i < customCount; i++ {
+					selectors[fmt.Sprintf("custom-%d", i)] = "ci"
+				}
+				if explicitMandatory {
+					selectors["kubernetes.io/arch"] = "amd64"
+					selectors["kubernetes.io/os"] = "linux"
+				}
+				s.Repos[0].Kubernetes.NodeSelector = selectors
+				firstValidation := s.Validate()
+				cs := fake.NewSimpleClientset()
+				gh := &fakeColdStartGitHub{}
+				constructorCalls := 0
+				initialize := func() error {
+					_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, nil, func() (backend.Backend, error) {
+						constructorCalls++
+						return backendkube.NewForProjects(kube.NewClient(cs), s.Name, s.ProjectNamespaces())
+					})
+					return err
+				}
+				if customCount > 14 {
+					require.ErrorContains(t, firstValidation, "placement exceeds 16")
+					require.ErrorContains(t, initialize(), "placement exceeds 16")
+					require.Zero(t, constructorCalls)
+					require.Empty(t, cs.Actions())
+					require.Empty(t, gh.listedRepos)
+					require.Empty(t, gh.deletedIDs)
+					return
+				}
+				require.NoError(t, firstValidation)
+				require.Len(t, selectors, 16)
+				require.NoError(t, initialize(), "production initializes a previously validated boundary scope")
+				require.Equal(t, 1, constructorCalls)
+				require.NotEmpty(t, cs.Actions())
+				require.Equal(t, []string{"acme/alpha"}, gh.listedRepos)
+			})
+		}
+	}
 }

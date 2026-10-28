@@ -449,3 +449,37 @@ func TestSharedScopeChecksLiteralDestinationsWithEffectivePolicy(t *testing.T) {
 	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_private_cidrs": []any{"10.0.0.0/8", "169.254.169.254/32"}}
 	require.NoError(t, s.Validate(), "scope-authorized project exceptions use resolved effective policy")
 }
+
+func TestSharedScopeSelectorLimitUsesNormalizedTotalAndIsIdempotent(t *testing.T) {
+	for _, customCount := range []int{13, 14, 15, 16} {
+		for _, mandatoryCount := range []int{0, 1, 2} {
+			t.Run(fmt.Sprintf("custom-%d-explicit-mandatory-%d", customCount, mandatoryCount), func(t *testing.T) {
+				s := sharedScope(t, approvedProject)
+				selectors := map[string]string{}
+				for i := 0; i < customCount; i++ {
+					selectors[fmt.Sprintf("custom-%d", i)] = "ci"
+				}
+				if mandatoryCount >= 1 {
+					selectors["kubernetes.io/arch"] = "arm64"
+				}
+				if mandatoryCount >= 2 {
+					selectors["kubernetes.io/os"] = "linux"
+				}
+				s.Repos[0].Kubernetes.NodeSelector = selectors
+				if customCount > 14 {
+					require.ErrorContains(t, s.Validate(), "placement exceeds 16")
+					require.ErrorContains(t, s.Validate(), "placement exceeds 16")
+					return
+				}
+				require.NoError(t, s.Validate())
+				require.Len(t, selectors, customCount+2)
+				normalized, err := yaml.Marshal(s)
+				require.NoError(t, err)
+				require.NoError(t, s.Validate())
+				repeated, err := yaml.Marshal(s)
+				require.NoError(t, err)
+				require.Equal(t, string(normalized), string(repeated), "accepted scope normalization must be idempotent")
+			})
+		}
+	}
+}
