@@ -306,10 +306,8 @@ func uniqueJSONValue(dec *json.Decoder, depth int) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			key, ok := token.(string)
-			if !ok {
-				return nil, errors.New("object key must be a string")
-			}
+			// Token rejects non-string object keys before returning a token.
+			key := token.(string)
 			folded := strings.Map(func(r rune) rune {
 				minimum := r
 				for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {

@@ -313,6 +313,8 @@ func TestServer_ContainerCreate_StrictBoundary(t *testing.T) {
 		"unfinished array":             `{"Env":[`,
 		"unfinished nested object":     `{"Labels":{"key":"value"`,
 		"unfinished nested array":      `{"Env":["value"`,
+		"mismatched object terminator": `{"Labels":{]}}`,
+		"mismatched array terminator":  `{"Env":[}}`,
 		"malformed object key":         `{"Labels":{1:2}}`,
 		"invalid utf8":                 string([]byte{'{', '"', 0xff, '"', ':', '1', '}'}),
 		"deep nested arrays":           strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66),
