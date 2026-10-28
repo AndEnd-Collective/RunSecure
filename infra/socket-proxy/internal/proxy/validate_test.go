@@ -290,7 +290,7 @@ func TestValidateContainerCreate_RefusesForbiddenBinds(t *testing.T) {
 	}
 }
 
-func TestValidateContainerCreate_PermitsSafeBinds(t *testing.T) {
+func TestValidateContainerCreate_RefusesAllHostBinds(t *testing.T) {
 	for _, bind := range []string{
 		"/tmp/orch-egress/spawn-x:/etc/squid:ro",
 		"/var/folders/abc/T/runsecure/spawn-y:/etc/squid",
@@ -299,11 +299,7 @@ func TestValidateContainerCreate_PermitsSafeBinds(t *testing.T) {
 		t.Run(bind, func(t *testing.T) {
 			b := minimalValidBody()
 			b["HostConfig"].(map[string]any)["Binds"] = []any{bind}
-			// /var/folders is under /var/lib's prefix check? No — /var/lib only
-			// matches /var/lib and /var/lib/*; /var/folders is unrelated.
-			// But /var/run also matched as a prefix earlier — /var/folders is
-			// fine because /var alone is NOT in the prefix list.
-			require.NoError(t, validate(t, b))
+			require.ErrorIs(t, validate(t, b), ErrBindForbidden)
 		})
 	}
 }
@@ -328,10 +324,10 @@ func TestValidateContainerCreate_RefusesMalformedJSON(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestValidateContainerCreate_BindsNonStringElements_Ignored(t *testing.T) {
+func TestValidateContainerCreate_BindsNonStringElements_Refused(t *testing.T) {
 	b := minimalValidBody()
 	b["HostConfig"].(map[string]any)["Binds"] = []any{42, true}
-	require.NoError(t, validate(t, b))
+	require.Error(t, validate(t, b))
 }
 
 func TestValidateNetworkCreate_RequiresInternalBridge(t *testing.T) {
@@ -436,13 +432,18 @@ func TestValidateContainerCreate_EgressAttach_NetworkMode_Inert(t *testing.T) {
 	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "", ""))
 }
 
-func TestContainsString_NilSlice(t *testing.T) {
-	require.False(t, containsString(nil, "x"))
-	require.False(t, containsString(map[string]any{}, "x"))
-	require.False(t, containsString([]any{42}, "x")) // non-string element
+func TestCheckBinds_NilInput(t *testing.T) {
+	require.NoError(t, checkBinds(nil, "", ""))
 }
 
-func TestCheckBinds_NilInput(t *testing.T) {
-	require.NoError(t, checkBinds(nil))
-	require.NoError(t, checkBinds("not-a-slice"))
+func TestValidateContainerCreate_OptionalDefaults(t *testing.T) {
+	for _, user := range []string{"1001", "1001:0", "1001:1001"} {
+		t.Run(user, func(t *testing.T) {
+			body := minimalValidBody()
+			body["User"] = user
+			body["NetworkingConfig"] = nil
+			body["HostConfig"].(map[string]any)["IpcMode"] = "private"
+			require.NoError(t, validate(t, body))
+		})
+	}
 }

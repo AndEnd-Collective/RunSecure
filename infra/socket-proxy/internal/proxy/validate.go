@@ -1,10 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path"
+	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/imageallow"
 )
@@ -39,243 +48,354 @@ var (
 	ErrEgressVolumeDenied = errors.New("volume mount requires runsecure.role=proxy and must be the designated egress volume")
 )
 
-// Forbidden host-path prefixes for HostConfig.Binds source paths.
-//
-// Covers:
-//   - the docker socket itself (escape hatch)
-//   - /proc, /sys (kernel state)
-//   - /etc (host configuration)
-//   - /root, /home, /Users (user homes — macOS uses /Users; Linux /home + /root)
-//   - /var/run (docker socket variant), /var/lib (docker state, container runtimes)
-var forbiddenBindPrefixes = []string{
-	"/var/run/docker.sock",
-	"/var/run",
-	"/var/lib",
-	"/proc",
-	"/sys",
-	"/etc",
-	"/root",
-	"/home",
-	"/Users",
+// The create schemas intentionally cover the orchestrator's Docker client,
+// plus explicitly refused legacy fields. Unknown Docker options fail closed:
+// Mounts, VolumesFrom, Runtime, device requests and future daemon extensions
+// must never bypass the same policy by introducing another configuration path.
+type containerCreate struct {
+	Image            string
+	User             string
+	Env              []string
+	Cmd              []string
+	Entrypoint       []string
+	Labels           map[string]string
+	HostConfig       hostConfig
+	NetworkingConfig *networkingConfig
 }
 
-// Suffix-blocklist: any bind source path ending in one of these is refused,
-// regardless of its prefix. Covers user-relative sensitive folders that
-// could appear under arbitrary parents (e.g. ~/.ssh, ~/.aws, ~/.kube).
-var forbiddenBindSuffixes = []string{
-	"/.ssh",
-	"/.aws",
-	"/.kube",
-	"/.config/gh",
-	"/.docker",
-	"/.gnupg",
+type hostConfig struct {
+	Privileged     bool
+	CapAdd         []string
+	CapDrop        []string
+	Devices        []json.RawMessage
+	PidMode        string
+	NetworkMode    string
+	IpcMode        string
+	UTSMode        string
+	UsernsMode     string
+	Sysctls        map[string]string
+	SecurityOpt    []string
+	Binds          []string
+	Memory         int64
+	NanoCPUs       int64 `json:"NanoCpus"`
+	PidsLimit      int64
+	ReadonlyRootfs bool
+	AutoRemove     bool
+	Tmpfs          map[string]string
 }
 
-// ValidateContainerCreate parses body as Docker's containers/create request
-// and refuses it if any spec §7.2 rule fails.
-//
-// egressNet is the name of the designated egress network (read from
-// RUNSECURE_EGRESS_NETWORK at server init). When non-empty, any request that
-// attaches this network via NetworkingConfig.EndpointsConfig must carry
-// Labels["runsecure.role"]="proxy"; all other values, including the empty
-// string and "runner", are denied with ErrEgressAttachDenied. Pass "" to
-// disable the egress gate (development / test environments without an egress
-// network).
-//
-// egressVol is the name of the designated egress configs volume (read from
-// RUNSECURE_EGRESS_VOLUME at server init). Any HostConfig.Binds entry whose
-// source is a volume name (no leading "/") must be exactly egressVol AND the
-// request must carry Labels["runsecure.role"]="proxy"; everything else is
-// denied with ErrEgressVolumeDenied. Pass "" to deny ALL named-volume mounts
-// (the gate is fail-closed: an unset egressVol means no volume may be mounted).
-//
-// The function does NOT modify the body; it only validates.
+type networkingConfig struct {
+	EndpointsConfig map[string]endpointConfig
+}
+
+type endpointConfig struct {
+	Aliases []string
+}
+
+type networkCreate struct {
+	Name       string
+	Driver     string
+	Internal   bool
+	Attachable bool
+	Labels     map[string]string
+}
+
+// ValidateContainerCreate enforces the supported Docker create schema and
+// containment policy before forwarding the original body. Keys are unique
+// under case folding, schema field spelling is exact, and values are typed so
+// the proxy and daemon cannot interpret different effective configurations.
+// Only the designated egress volume may be bound, explicitly read-only, by a
+// role=proxy container. An empty egressVol denies every bind. The existing
+// egress network role gate is disabled only when egressNet is empty.
 func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNet string, egressVol string) error {
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return fmt.Errorf("malformed JSON: %w", err)
-	}
-
-	image, _ := req["Image"].(string)
-	if !images.Allows(image) {
-		return ErrImageNotAllowed
-	}
-
-	user, _ := req["User"].(string)
-	if user == "" {
-		return ErrUserRequired
-	}
-
-	hc, _ := req["HostConfig"].(map[string]any)
-	if hc == nil {
-		hc = map[string]any{}
-	}
-
-	if priv, _ := hc["Privileged"].(bool); priv {
-		return ErrPrivilegedDenied
-	}
-	if arr, ok := hc["CapAdd"].([]any); ok && len(arr) > 0 {
-		return ErrCapAddDenied
-	}
-	if !containsString(hc["CapDrop"], "ALL") {
-		return ErrCapDropMissingALL
-	}
-	if arr, ok := hc["Devices"].([]any); ok && len(arr) > 0 {
-		return ErrDevicesDenied
-	}
-	if s, _ := hc["PidMode"].(string); s == "host" {
-		return ErrPidModeDenied
-	}
-	if s, _ := hc["NetworkMode"].(string); s == "host" || s == "none" {
-		return ErrNetworkModeDenied
-	}
-	if s, _ := hc["IpcMode"].(string); s == "host" {
-		return ErrIpcModeDenied
-	}
-	if s, _ := hc["UTSMode"].(string); s == "host" {
-		return ErrUTSModeDenied
-	}
-	if s, _ := hc["UsernsMode"].(string); s == "host" {
-		return ErrUsernsModeDenied
-	}
-	if m, ok := hc["Sysctls"].(map[string]any); ok && len(m) > 0 {
-		return ErrSysctlsDenied
-	}
-	if !containsString(hc["SecurityOpt"], "no-new-privileges:true") {
-		return ErrSecurityOptMissingNoNewPrivs
-	}
-	if err := checkBinds(hc["Binds"]); err != nil {
+	var req containerCreate
+	if err := decodeCreate(body, &req); err != nil {
 		return err
 	}
-
-	// Egress-volume gate: any Bind whose source is a named volume (no leading
-	// "/") may only be the designated egress volume on a role=proxy container.
-	// checkBinds already cleared host-path Binds; this handles volume-name Binds
-	// which it deliberately ignores (no leading "/" never matches a forbidden
-	// prefix). Fail-closed: egressVol=="" denies every named-volume mount.
-	{
-		labels, _ := req["Labels"].(map[string]any)
-		role, _ := labels["runsecure.role"].(string)
-		if arr, ok := hc["Binds"].([]any); ok {
-			for _, item := range arr {
-				s, ok := item.(string)
-				if !ok {
-					continue
+	if !images.Allows(req.Image) {
+		return ErrImageNotAllowed
+	}
+	if !nonRootIdentity(req.User) {
+		return ErrUserRequired
+	}
+	hc := req.HostConfig
+	if hc.Privileged {
+		return ErrPrivilegedDenied
+	}
+	if len(hc.CapAdd) > 0 {
+		return ErrCapAddDenied
+	}
+	if !slices.Contains(hc.CapDrop, "ALL") {
+		return ErrCapDropMissingALL
+	}
+	if len(hc.Devices) > 0 {
+		return ErrDevicesDenied
+	}
+	if hc.PidMode != "" {
+		return ErrPidModeDenied
+	}
+	if hc.NetworkMode == "host" || hc.NetworkMode == "none" || strings.HasPrefix(hc.NetworkMode, "container:") {
+		return ErrNetworkModeDenied
+	}
+	if hc.IpcMode != "" && hc.IpcMode != "private" {
+		return ErrIpcModeDenied
+	}
+	if hc.UTSMode != "" {
+		return ErrUTSModeDenied
+	}
+	if hc.UsernsMode != "" {
+		return ErrUsernsModeDenied
+	}
+	if len(hc.Sysctls) > 0 {
+		return ErrSysctlsDenied
+	}
+	if !slices.Contains(hc.SecurityOpt, "no-new-privileges:true") {
+		return ErrSecurityOptMissingNoNewPrivs
+	}
+	// Docker's default seccomp profile remains active. The Engine API expects
+	// custom seccomp JSON, while the old file-path option never loaded a profile;
+	// accepting arbitrary JSON here would let a compromised controller disable
+	// the default. Custom seccomp and LSM overrides are unsupported.
+	if len(hc.SecurityOpt) != 1 {
+		return errors.New("unsupported HostConfig.SecurityOpt: custom seccomp and LSM overrides are denied")
+	}
+	if err := checkBinds(hc.Binds, egressVol, req.Labels["runsecure.role"]); err != nil {
+		return err
+	}
+	for target, options := range hc.Tmpfs {
+		if !cleanMountTarget(target) {
+			return errors.New("invalid HostConfig.Tmpfs target")
+		}
+		flags := strings.Split(options, ",")
+		if !slices.Contains(flags, "noexec") || !slices.Contains(flags, "nosuid") || !slices.Contains(flags, "nodev") {
+			return errors.New("HostConfig.Tmpfs requires noexec,nosuid,nodev")
+		}
+		seen := map[string]bool{}
+		for _, flag := range flags {
+			key, value, hasValue := strings.Cut(flag, "=")
+			if seen[key] {
+				return errors.New("duplicate HostConfig.Tmpfs option")
+			}
+			seen[key] = true
+			switch key {
+			case "noexec", "nosuid", "nodev":
+				if hasValue {
+					return errors.New("invalid HostConfig.Tmpfs flag")
 				}
-				parts := strings.SplitN(s, ":", 3)
-				src := parts[0]
-				if strings.HasPrefix(src, "/") {
-					continue // host path — already vetted by checkBinds
+			case "size", "uid", "gid", "mode":
+				if !hasValue || value == "" {
+					return errors.New("invalid HostConfig.Tmpfs option")
 				}
-				// Named-volume source: gate it.
-				if egressVol == "" || src != egressVol || role != "proxy" {
-					return ErrEgressVolumeDenied
-				}
-				// Mode check: must be explicitly ro.
-				mode := ""
-				if len(parts) == 3 {
-					mode = parts[2]
-				}
-				if !strings.Contains(mode, "ro") {
-					return ErrEgressVolumeDenied
-				}
+			default:
+				return errors.New("unsupported HostConfig.Tmpfs option")
 			}
 		}
 	}
-
-	// Egress-network gate: if RUNSECURE_EGRESS_NETWORK is configured, only
-	// containers with runsecure.role=proxy may attach it. Two attach paths
-	// exist in the Docker API and both must be gated:
-	//
-	//   1. NetworkingConfig.EndpointsConfig[egressNet] — the explicit endpoint
-	//      map used at container-create time.
-	//   2. HostConfig.NetworkMode=<egressNet> — the alternate form Docker uses
-	//      when the primary network is named directly via NetworkMode rather
-	//      than EndpointsConfig (Bypass 1 in the Task 7 fix brief).
-	//
-	// Default-deny: absent label, empty label, or any role that is not exactly
-	// "proxy" (including "runner") are all denied.
-	if egressNet != "" {
-		labels, _ := req["Labels"].(map[string]any)
-		role, _ := labels["runsecure.role"].(string)
-
-		nc, _ := req["NetworkingConfig"].(map[string]any)
-		eps, _ := nc["EndpointsConfig"].(map[string]any)
-		if _, attaches := eps[egressNet]; attaches {
-			if role != "proxy" {
+	if egressNet != "" && req.Labels["runsecure.role"] != "proxy" {
+		if req.NetworkingConfig != nil {
+			if _, attaches := req.NetworkingConfig.EndpointsConfig[egressNet]; attaches {
 				return ErrEgressAttachDenied
 			}
 		}
-
-		if nm, _ := hc["NetworkMode"].(string); nm == egressNet {
-			if role != "proxy" {
-				return ErrEgressAttachDenied
-			}
+		if hc.NetworkMode == egressNet {
+			return ErrEgressAttachDenied
 		}
 	}
-
 	return nil
 }
 
-// ValidateNetworkCreate enforces driver=bridge, Internal=true,
-// Attachable=false, and the ownership labels cold-start cleanup requires.
+// ValidateNetworkCreate applies the same parser contract as container creates,
+// then requires an internal, non-attachable bridge with ownership labels.
 func ValidateNetworkCreate(body []byte) error {
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return fmt.Errorf("malformed JSON: %w", err)
+	var req networkCreate
+	if err := decodeCreate(body, &req); err != nil {
+		return err
 	}
-	if drv, _ := req["Driver"].(string); drv != "bridge" {
-		return fmt.Errorf("Network Driver must be 'bridge', got %q", drv)
+	if req.Driver != "bridge" {
+		return fmt.Errorf("Network Driver must be 'bridge', got %q", req.Driver)
 	}
-	if internal, _ := req["Internal"].(bool); !internal {
+	if !req.Internal {
 		return errors.New("Network must have Internal: true")
 	}
-	if attachable, ok := req["Attachable"].(bool); ok && attachable {
+	if req.Attachable {
 		return errors.New("Network must have Attachable: false")
 	}
-	labels, _ := req["Labels"].(map[string]any)
 	for _, key := range []string{"runsecure.scope", "runsecure.repo", "runsecure.spawn_id"} {
-		if value, _ := labels[key].(string); value == "" {
+		if req.Labels[key] == "" {
 			return fmt.Errorf("Network Labels[%q] is required", key)
 		}
 	}
 	return nil
 }
 
-func containsString(v any, target string) bool {
-	arr, ok := v.([]any)
-	if !ok {
+var numericIdentity = regexp.MustCompile(`^[1-9][0-9]*(:([0-9]|[1-9][0-9]*))?$`)
+var volumeName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`)
+
+func nonRootIdentity(user string) bool {
+	if !numericIdentity.MatchString(user) {
 		return false
 	}
-	for _, item := range arr {
-		if s, ok := item.(string); ok && s == target {
-			return true
+	for _, id := range strings.Split(user, ":") {
+		if _, err := strconv.ParseUint(id, 10, 31); err != nil {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-func checkBinds(v any) error {
-	arr, ok := v.([]any)
-	if !ok {
+func cleanMountTarget(target string) bool {
+	return strings.HasPrefix(target, "/") && target != "/" && path.Clean(target) == target && !strings.ContainsAny(target, "\x00:")
+}
+
+func checkBinds(binds []string, egressVol, role string) error {
+	for _, bind := range binds {
+		parts := strings.Split(bind, ":")
+		if strings.HasPrefix(parts[0], "/") {
+			return ErrBindForbidden
+		}
+		if len(parts) != 3 || !volumeName.MatchString(parts[0]) || egressVol == "" || parts[0] != egressVol || role != "proxy" || !cleanMountTarget(parts[1]) || parts[2] != "ro" {
+			return ErrEgressVolumeDenied
+		}
+	}
+	return nil
+}
+
+// decodeCreate checks lexical ambiguity before any map or struct decoder can
+// discard duplicate keys. It also requires exact schema field names: Go's
+// default case-insensitive struct matching must not widen our supported API.
+func decodeCreate(body []byte, dst any) error {
+	if !utf8.Valid(body) {
+		return errors.New("JSON must be valid UTF-8")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	value, err := uniqueJSONValue(dec, 0)
+	if err != nil {
+		return fmt.Errorf("malformed or ambiguous JSON: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("JSON must contain one object")
+	}
+	if err := exactJSONFields(value, reflect.TypeOf(dst).Elem()); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
+		return fmt.Errorf("invalid create schema: %w", err)
+	}
+	return nil
+}
+
+func uniqueJSONValue(dec *json.Decoder, depth int) (any, error) {
+	if depth > 64 {
+		return nil, errors.New("JSON nesting exceeds limit")
+	}
+	token, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, container := token.(json.Delim)
+	if !container {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := map[string]any{}
+		seen := map[string]bool{}
+		for dec.More() {
+			token, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := token.(string)
+			if !ok {
+				return nil, errors.New("object key must be a string")
+			}
+			folded := strings.Map(func(r rune) rune {
+				minimum := r
+				for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+					if next < minimum {
+						minimum = next
+					}
+				}
+				return minimum
+			}, key)
+			if seen[folded] {
+				return nil, fmt.Errorf("duplicate JSON key %q", key)
+			}
+			seen[folded] = true
+			value, err := uniqueJSONValue(dec, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = value
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return object, nil
+	case '[':
+		var array []any
+		for dec.More() {
+			value, err := uniqueJSONValue(dec, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return array, nil
+	default:
+		return nil, errors.New("unexpected JSON delimiter")
+	}
+}
+
+func exactJSONFields(value any, schema reflect.Type) error {
+	if value == nil && schema.Kind() == reflect.Pointer {
 		return nil
 	}
-	for _, item := range arr {
-		s, ok := item.(string)
+	if schema.Kind() == reflect.Pointer {
+		schema = schema.Elem()
+	}
+	switch schema.Kind() {
+	case reflect.Struct:
+		object, ok := value.(map[string]any)
 		if !ok {
-			continue
+			return errors.New("create configuration must be an object")
 		}
-		// SplitN extracts the host path before the first ":mode" suffix.
-		// Removes the `i >= 0` boundary check (and its mutation surface).
-		src := strings.SplitN(s, ":", 2)[0]
-		for _, bad := range forbiddenBindPrefixes {
-			if src == bad || strings.HasPrefix(src, bad+"/") {
-				return fmt.Errorf("%w: %s", ErrBindForbidden, src)
+		fields := map[string]reflect.Type{}
+		for i := 0; i < schema.NumField(); i++ {
+			field := schema.Field(i)
+			name := field.Tag.Get("json")
+			if name == "" {
+				name = field.Name
+			}
+			fields[name] = field.Type
+		}
+		for key, child := range object {
+			field, ok := fields[key]
+			if !ok {
+				return fmt.Errorf("unsupported create field %q", key)
+			}
+			if err := exactJSONFields(child, field); err != nil {
+				return err
 			}
 		}
-		for _, bad := range forbiddenBindSuffixes {
-			if strings.HasSuffix(src, bad) {
-				return fmt.Errorf("%w: %s", ErrBindForbidden, src)
+	case reflect.Map:
+		if object, ok := value.(map[string]any); ok {
+			for _, child := range object {
+				if err := exactJSONFields(child, schema.Elem()); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Slice:
+		if array, ok := value.([]any); ok {
+			for _, child := range array {
+				if err := exactJSONFields(child, schema.Elem()); err != nil {
+					return err
+				}
 			}
 		}
 	}
