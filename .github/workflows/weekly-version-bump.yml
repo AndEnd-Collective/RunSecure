@@ -262,7 +262,7 @@ jobs:
             echo "::warning title=Go dependency PR requires operator action::Repository policy blocked PR creation. The dependency refresh remains on ${BRANCH}; open ${PR_URL}."
             {
               printf '### Go dependency refresh requires operator action\n\n'
-              printf -- '- Branch: `%s`\n' "$BRANCH"
+              printf -- "- Branch: \`%s\`\n" "$BRANCH"
               printf -- '- Open the PR: %s\n' "$PR_URL"
               printf -- '- Cause: repository policy blocks GitHub Actions from creating pull requests.\n\n'
               printf 'The release tag and image cascade remain valid. Review and merge this dependency refresh before the next release.\n'

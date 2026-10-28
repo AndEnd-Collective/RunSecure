@@ -257,7 +257,7 @@ jobs:
           # to start at column 0 and would terminate the YAML block scalar.
           {
             printf '%s\n\n' "Automated weekly rust toolchain certification."
-            printf 'Bumps `RUST_STABLE_PIN` in `images/rust.Dockerfile` from `%s` to `%s`.\n\n' \
+            printf "Bumps \`RUST_STABLE_PIN\` in \`images/rust.Dockerfile\` from \`%s\` to \`%s\`.\n\n" \
               "$CURRENT" "$CANDIDATE"
             printf '%s\n\n' "The candidate was built through \`RUST_VERSION=stable\` — the same resolution path every consumer uses — on **both linux/amd64 and linux/arm64**, and passed the identical certification the release pipeline runs on each, with the same checksum-pinned Syft and Grype:"
             printf '%s\n' "- \`infra/scripts/grype-scan-image.sh\` with \`binary-classifier-cataloger:rust\`, proving the toolchain is still inventoried in the SBOM and that no fixable HIGH/CRITICAL is present"
