@@ -60,6 +60,8 @@ cleanup() {
 trap cleanup EXIT
 
 CATALOGER_SELECTION='-binary-classifier-cataloger,-elf-binary-package-cataloger,-pe-binary-package-cataloger'
+# Bash 3.2 treats an empty array as unset under nounset. Guard the optional
+# expansion at each call so scans without --platform still execute fail-closed.
 SYFT_PLATFORM_ARGS=()
 if [[ -n "$SCAN_PLATFORM" ]]; then
     SYFT_PLATFORM_ARGS=(--platform "$SCAN_PLATFORM")
@@ -67,7 +69,7 @@ fi
 
 echo "Cataloguing ${IMAGE_REF} with ecosystem-aware Syft catalogers..."
 syft "$IMAGE_REF" \
-    "${SYFT_PLATFORM_ARGS[@]}" \
+    ${SYFT_PLATFORM_ARGS[@]+"${SYFT_PLATFORM_ARGS[@]}"} \
     --select-catalogers="$CATALOGER_SELECTION" \
     --output "syft-json=${SBOM_FILE}"
 
@@ -144,7 +146,7 @@ if [[ -n "$EXPECTED_PRESENCE_CATALOGER" ]]; then
         exit 1
     }
     syft "$IMAGE_REF" \
-        "${SYFT_PLATFORM_ARGS[@]}" \
+        ${SYFT_PLATFORM_ARGS[@]+"${SYFT_PLATFORM_ARGS[@]}"} \
         --select-catalogers="+${EXPECTED_PRESENCE_CATALOGER}" \
         --output "syft-json=${PRESENCE_SBOM_FILE}"
     jq -e \

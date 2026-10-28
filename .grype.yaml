@@ -4,27 +4,25 @@
 # Allowlist for vulnerabilities that we cannot fix directly because the
 # affected component is vendored inside an upstream release we pin.
 #
-# The list is currently EMPTY, and that is the goal state. Every published
-# image — base, node 22/24, python 3.12, rust stable, proxy, orchestrator and
-# socket-proxy — passes `grype --fail-on high --only-fixed` with no
-# suppressions at all, verified by building each image on linux/arm64 and
-# running infra/scripts/grype-scan-image.sh against it.
+# The list is currently EMPTY, and that is the goal state. Each image must
+# pass `grype --fail-on high --only-fixed` without suppressions using
+# infra/scripts/grype-scan-image.sh. Readiness claims require fresh build and
+# scan evidence for the actual image and architecture; this configuration
+# alone does not certify any published artifact.
 #
 # Ten entries were removed once the pins they were blocked on moved:
 #   - GO-2026-4610 (docker/cli vendored in gh) and GO-2026-4970 /
-#     CVE-2026-39822 (go stdlib "os" symlink escape). gh 2.102.0 is built with
-#     go1.27.1 and vendors docker/cli 29.7.2, and Grype no longer reports
-#     either against the base image.
+#     CVE-2026-39822 (go stdlib "os" symlink escape). gh 2.102.0 originally
+#     cleared these findings. gh 2.103.3 replaces its bundled Go/x/net versions
+#     to address the subsequent HTTP/2 advisories without adding ignores.
 #   - eight CPython findings (CVE-2026-7210, -4224, -3644, -6100, -9669,
 #     -15308, -3298, -4786). These were justified on "3.12.13 is the latest
 #     3.12, there is nothing to upgrade to". 3.12.14 and 3.12.15 shipped;
-#     images/python.Dockerfile installs 3.12.15 and none of the eight is
-#     reported any more.
+#     images/python.Dockerfile now pins 3.12.16 from standalone 20261026.
 #
-# Prefer fixing over ignoring. Two npm-bundled packages (undici,
-# brace-expansion) ship behind their security fixes in every current npm
-# release; rather than suppress those advisories, images/base.Dockerfile and
-# images/node.Dockerfile overwrite them with checksum-pinned patched versions.
+# Prefer fixing over ignoring. npm still bundles undici behind its security
+# fixes; brace-expansion required the same repair previously. The base and
+# Node Dockerfiles retain aligned checksum-pinned patched dependency payloads.
 # tests/validation/test-npm-payload-refresh.sh fails if those advisory IDs ever
 # appear in this file.
 #
