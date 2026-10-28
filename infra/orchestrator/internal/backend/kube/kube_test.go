@@ -908,3 +908,194 @@ func containsStr(s, sub string) bool {
 			return false
 		}())
 }
+
+func TestSharedProjectsRouteAndRecoverWithinApprovedNamespaces(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	mapping := map[string]string{"owner/one": "project-one", "owner/two": "project-two"}
+	b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", mapping)
+	require.NoError(t, err)
+	mapping["owner/one"] = "unapproved"
+	for i, repo := range []string{"owner/one", "owner/two"} {
+		in := testInput(t, fmt.Sprintf("shared-%d", i))
+		in.Scope, in.Repo = "controller", repo
+		h, spawnErr := b.Spawn(ctx, in)
+		require.NoError(t, spawnErr)
+		ns := []string{"project-one", "project-two"}[i]
+		require.Equal(t, ns, h.Refs["namespace"])
+		require.Equal(t, "controller", h.Refs["scope"])
+		require.Equal(t, repo, h.Refs["repo"])
+		pod, getErr := cs.CoreV1().Pods(ns).Get(ctx, h.Refs["runner_pod"], metav1.GetOptions{})
+		require.NoError(t, getErr)
+		require.Equal(t, "controller", pod.Labels[kube.LabelScope])
+		require.Equal(t, "http://rs-proxy-svc-"+in.SpawnID+"."+ns+".svc:3128", envMap(pod.Spec.Containers[0].Env)["HTTP_PROXY"])
+	}
+	partial := kube.ProxyService(backend.SpawnInput{Scope: "controller", Repo: "owner/one", Namespace: "project-one", SpawnID: "partial"})
+	_, err = cs.CoreV1().Services("project-one").Create(ctx, partial, metav1.CreateOptions{})
+	require.NoError(t, err)
+	foreign := kube.SpawnSecret(backend.SpawnInput{Scope: "controller", Repo: "owner/one", Namespace: "unenrolled", SpawnID: "foreign"}, nil, nil, nil)
+	_, err = cs.CoreV1().Secrets("unenrolled").Create(ctx, foreign, metav1.CreateOptions{})
+	require.NoError(t, err)
+	b, err = backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one", "owner/two": "project-two"})
+	require.NoError(t, err)
+	cs.ClearActions()
+	handles, err := b.Reconcile(ctx, "controller")
+	require.NoError(t, err)
+	require.Len(t, handles, 3)
+	for _, h := range handles {
+		require.NoError(t, b.Teardown(ctx, h, true))
+	}
+	for _, action := range cs.Actions() {
+		require.Contains(t, []string{"project-one", "project-two"}, action.GetNamespace())
+		require.NotEqual(t, "namespaces", action.GetResource().Resource)
+	}
+	_, err = cs.CoreV1().Secrets("unenrolled").Get(ctx, "rs-secret-foreign", metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestSharedProjectsRejectForgedRoutingWithoutAPIAccess(t *testing.T) {
+	for _, mutate := range []func(*backend.SpawnInput){
+		func(in *backend.SpawnInput) { in.Repo = "owner/unknown" },
+		func(in *backend.SpawnInput) { in.Namespace = "project-two" },
+		func(in *backend.SpawnInput) { in.Scope = "other" },
+	} {
+		cs := fake.NewSimpleClientset()
+		b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one", "owner/two": "project-two"})
+		require.NoError(t, err)
+		in := testInput(t, "rejected")
+		in.Scope, in.Repo = "controller", "owner/one"
+		mutate(&in)
+		_, err = b.Spawn(context.Background(), in)
+		require.Error(t, err)
+		require.Empty(t, cs.Actions())
+	}
+	for _, key := range []string{"scope", "repo", "namespace", "repo_label", "secret", "runner_pod", "proxy_pod"} {
+		t.Run(key, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one", "owner/two": "project-two"})
+			require.NoError(t, err)
+			in := testInput(t, "valid")
+			in.Scope, in.Repo = "controller", "owner/one"
+			h, err := b.Spawn(context.Background(), in)
+			require.NoError(t, err)
+			h.Refs[key] = "forged"
+			cs.ClearActions()
+			require.Error(t, b.Teardown(context.Background(), h, true))
+			code, timedOut := b.WaitForExit(context.Background(), h, time.Second)
+			require.Equal(t, 1, code)
+			require.False(t, timedOut)
+			require.Empty(t, cs.Actions())
+			_, statErr := os.Stat(in.EgressConfigDir)
+			require.NoError(t, statErr, "forged handles must not remove local config")
+		})
+	}
+}
+
+func TestSharedProjectsRollbackDebtRetainsRouting(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, errors.New("pod denied") })
+	failDelete := true
+	cs.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failDelete {
+			return true, nil, errors.New("delete denied")
+		}
+		return false, nil, nil
+	})
+	b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one"})
+	require.NoError(t, err)
+	in := testInput(t, "debt")
+	in.Scope, in.Repo = "controller", "owner/one"
+	h, err := b.Spawn(context.Background(), in)
+	require.ErrorContains(t, err, "rollback spawn")
+	require.Equal(t, "project-one", h.Refs["namespace"])
+	require.Equal(t, "controller", h.Refs["scope"])
+	require.Equal(t, "owner/one", h.Refs["repo"])
+	failDelete = false
+	require.NoError(t, b.Teardown(context.Background(), h, true))
+}
+
+func TestSharedProjectsRejectInvalidEnrollment(t *testing.T) {
+	for _, mapping := range []map[string]string{
+		nil, {}, {"owner/one": ""}, {"owner/one": "INVALID"},
+		{"owner/one": "same", "owner/two": "same"},
+		{"owner/one": "runsecure-controller"}, {"owner/one": "kube-system"},
+		{"owner_one/repo": "one", "owner/one_repo": "two"}, {"invalid": "one"},
+	} {
+		cs := fake.NewSimpleClientset()
+		_, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", mapping)
+		require.Error(t, err)
+		require.Empty(t, cs.Actions())
+	}
+}
+
+func TestSharedProjectsRejectInvalidSpawnBeforeAPIAccess(t *testing.T) {
+	for _, id := range []string{"", "INVALID", "invalid/id"} {
+		cs := fake.NewSimpleClientset()
+		b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one"})
+		require.NoError(t, err)
+		in := testInput(t, id)
+		in.Scope, in.Repo = "controller", "owner/one"
+		_, err = b.Spawn(context.Background(), in)
+		require.Error(t, err)
+		require.Empty(t, cs.Actions())
+	}
+}
+
+func TestSharedProjectsReconcileRejectsConflictingOwnership(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		cs := fake.NewSimpleClientset()
+		for i, repo := range []string{"owner/one", "owner/two"} {
+			if !duplicate && i == 0 {
+				repo = "owner/unknown"
+			}
+			secret := kube.SpawnSecret(backend.SpawnInput{Scope: "controller", Repo: repo, Namespace: []string{"project-one", "project-two"}[i], SpawnID: "one"}, nil, nil, nil)
+			_, err := cs.CoreV1().Secrets(secret.Namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
+		b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one", "owner/two": "project-two"})
+		require.NoError(t, err)
+		_, err = b.Reconcile(context.Background(), "controller")
+		require.Error(t, err)
+		cs.ClearActions()
+		_, err = b.Reconcile(context.Background(), "other")
+		require.Error(t, err)
+		require.Empty(t, cs.Actions())
+	}
+}
+
+func TestSharedProjectsReconcilePropagatesAPIFailure(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, errors.New("list denied") })
+	b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one"})
+	require.NoError(t, err)
+	_, err = b.Reconcile(context.Background(), "controller")
+	require.ErrorContains(t, err, "list denied")
+}
+
+func TestLegacyBackendRejectsUnenrolledExplicitNamespace(t *testing.T) {
+	b, cs := newBackend(t)
+	in := testInput(t, "legacy")
+	in.Namespace = "unapproved"
+	_, err := b.Spawn(context.Background(), in)
+	require.Error(t, err)
+	require.Empty(t, cs.Actions())
+}
+
+func TestSharedProjectsWaitForOwnedRunner(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	b, err := backendkube.NewForProjects(kube.NewClient(cs), "controller", map[string]string{"owner/one": "project-one"})
+	require.NoError(t, err)
+	in := testInput(t, "done")
+	in.Scope, in.Repo = "controller", "owner/one"
+	h, err := b.Spawn(ctx, in)
+	require.NoError(t, err)
+	pod, err := cs.CoreV1().Pods("project-one").Get(ctx, "rs-runner-done", metav1.GetOptions{})
+	require.NoError(t, err)
+	pod.Status.Phase = corev1.PodSucceeded
+	_, err = cs.CoreV1().Pods("project-one").UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	code, timedOut := b.WaitForExit(ctx, h, time.Second)
+	require.Zero(t, code)
+	require.False(t, timedOut)
+}

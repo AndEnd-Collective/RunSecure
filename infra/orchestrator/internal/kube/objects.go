@@ -77,6 +77,14 @@ func Namespace(scope string) string {
 	return "runsecure-" + scope
 }
 
+// executionNamespace keeps execution placement independent from controller ownership.
+func executionNamespace(in backend.SpawnInput) string {
+	if in.Namespace != "" {
+		return in.Namespace
+	}
+	return Namespace(in.Scope)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Labels
 // ──────────────────────────────────────────────────────────────────────────────
@@ -183,7 +191,7 @@ func spawnResourceName(kind, spawnID string) string {
 // cascades (via ownerReferences set on other objects) to remove all per-spawn
 // resources.
 func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte) *corev1.Secret {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	name := spawnResourceName("secret", in.SpawnID)
 	labels := Labels(in, RoleProxy)
 
@@ -221,7 +229,7 @@ func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte)
 // with mode 0o440 using KeyToPath projection (jit-config is NOT projected here;
 // the runner pod mounts that key separately).
 func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	// Secret volume projects only the proxy config keys (not jit-config).
@@ -338,7 +346,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 //   - RUNNER_JIT_CONFIG_FILE points to the projected jit-config key.
 //   - restartPolicy: Never (one-shot CI runner; GH Actions expects exit code).
 func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev1.Pod {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleRunner)
 
 	proxyURL := fmt.Sprintf("http://%s:%d", proxyServiceDNS, proxyPort)
@@ -451,7 +459,7 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 //   - 53/TCP+UDP — dnsmasq (only when EnableDNSMasq is true).
 //   - Each port in TCPEgressPorts (e.g. 443 for direct TLS passthrough).
 func ProxyService(in backend.SpawnInput) *corev1.Service {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	selector := map[string]string{
@@ -560,7 +568,7 @@ func DefaultDenyNetworkPolicy(scope string) *networkingv1.NetworkPolicy {
 // All other egress from the runner is denied by the DefaultDenyNetworkPolicy.
 // No Ingress rule is created — the runner must not accept inbound connections.
 func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleRunner)
 
 	// Build the list of ports the runner may use to reach the proxy.
@@ -653,7 +661,7 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 // TODO(egress): when internal/egress exposes resolved CIDRs (Phase 2 Task 5),
 // replace the 0.0.0.0/0 peer with the explicit CIDR list for defence-in-depth.
 func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	tcpProto := corev1.ProtocolTCP
@@ -764,7 +772,7 @@ func clusterDNSPeers(in backend.SpawnInput) []networkingv1.NetworkPolicyPeer {
 //   - Ports mirror ProxyService: 3128/TCP always, 53/UDP+TCP when EnableDNSMasq
 //     is true, plus each TCPEgressPort from the input.
 func ProxyIngressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	tcpProto := corev1.ProtocolTCP

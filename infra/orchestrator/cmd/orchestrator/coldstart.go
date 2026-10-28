@@ -99,11 +99,28 @@ func cleanupRecoveredKubeSpawns(
 	be backend.Backend,
 	gh coldStartGitHub,
 ) error {
+	return cleanupRecoveredKubeSpawnsValidated(ctx, scope, configuredRepos, be, gh, func(handles []backend.Handle) (map[string]bool, error) {
+		return validateRecoveredKubeHandles(scope, configuredRepos, handles)
+	})
+}
+
+// cleanupRecoveredKubeSpawnsForProjects retains exact enrolled routing at restart.
+func cleanupRecoveredKubeSpawnsForProjects(ctx context.Context, scope string, namespaces map[string]string, be backend.Backend, gh coldStartGitHub) error {
+	repos := make([]string, 0, len(namespaces))
+	for repo := range namespaces {
+		repos = append(repos, repo)
+	}
+	return cleanupRecoveredKubeSpawnsValidated(ctx, scope, repos, be, gh, func(handles []backend.Handle) (map[string]bool, error) {
+		return validateRecoveredKubeHandlesForProjects(scope, namespaces, handles)
+	})
+}
+
+func cleanupRecoveredKubeSpawnsValidated(ctx context.Context, scope string, configuredRepos []string, be backend.Backend, gh coldStartGitHub, validate func([]backend.Handle) (map[string]bool, error)) error {
 	handles, err := be.Reconcile(ctx, scope)
 	if err != nil {
 		return fmt.Errorf("cold-start: reconcile recovered kube spawns: %w", err)
 	}
-	wanted, err := validateRecoveredKubeHandles(scope, configuredRepos, handles)
+	wanted, err := validate(handles)
 	if err != nil {
 		return err
 	}
@@ -141,6 +158,29 @@ func validateRecoveredKubeHandles(
 			handle.Refs["secret"] != "rs-secret-"+spawnID ||
 			handle.Refs["runner_pod"] != "rs-runner-"+spawnID ||
 			!allowedRepoLabels[handle.Refs["repo_label"]] {
+			return nil, fmt.Errorf("cold-start: recovered kube spawn %q has invalid ownership", spawnID)
+		}
+		seen[spawnID] = true
+		wanted["rs-"+spawnID+"-runner"] = true
+	}
+	return wanted, nil
+}
+
+// validateRecoveredKubeHandlesForProjects checks scope, repository and execution
+// namespace together before any recovered runner or Kubernetes resource is deleted.
+func validateRecoveredKubeHandlesForProjects(scope string, namespaces map[string]string, handles []backend.Handle) (map[string]bool, error) {
+	wanted := make(map[string]bool, len(handles))
+	seen := make(map[string]bool, len(handles))
+	for _, handle := range handles {
+		spawnID := handle.SpawnID
+		repo := handle.Refs["repo"]
+		ns, enrolled := namespaces[repo]
+		if !enrolled || ns == "" || handle.Backend != "kube" || spawnID == "" || seen[spawnID] ||
+			handle.Refs["scope"] != scope || handle.Refs["namespace"] != ns ||
+			handle.Refs["repo_label"] != kube.RepoLabel(repo) ||
+			handle.Refs["secret"] != "rs-secret-"+spawnID ||
+			handle.Refs["runner_pod"] != "rs-runner-"+spawnID ||
+			(handle.Refs["proxy_pod"] != "" && handle.Refs["proxy_pod"] != "rs-proxy-"+spawnID) {
 			return nil, fmt.Errorf("cold-start: recovered kube spawn %q has invalid ownership", spawnID)
 		}
 		seen[spawnID] = true
