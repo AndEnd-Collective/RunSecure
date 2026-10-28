@@ -46,26 +46,6 @@ log()  { echo "[k8s-test] $*"; }
 pass() { PASS=$((PASS + 1)); echo "[PASS] $*"; }
 fail() { FAIL=$((FAIL + 1)); echo "[FAIL] $*"; }
 
-# assert_succeeds <description> <cmd...>
-assert_succeeds() {
-  local desc="$1"; shift
-  if "$@" 2>/dev/null; then
-    pass "${desc}"
-  else
-    fail "${desc} — command failed: $*"
-  fi
-}
-
-# assert_fails <description> <cmd...>
-assert_fails() {
-  local desc="$1"; shift
-  if "$@" 2>/dev/null; then
-    fail "${desc} — expected failure but command SUCCEEDED: $*"
-  else
-    pass "${desc}"
-  fi
-}
-
 # wait_for_pod_ready <namespace> <pod-name> <timeout-seconds>
 wait_for_pod_ready() {
   local ns="$1" pod="$2" timeout="$3"
@@ -87,15 +67,14 @@ log "Prerequisites: kind $(kind version --short 2>/dev/null || kind version), ku
 # ─────────────────────────────────────────────────────────────────────────────
 # Trap: always tear down the cluster on EXIT (unless SKIP_CLEANUP=1)
 # ─────────────────────────────────────────────────────────────────────────────
-cleanup() {
+trap '
   if [[ "${SKIP_CLEANUP:-0}" == "1" ]]; then
-    log "SKIP_CLEANUP=1 — cluster '${CLUSTER_NAME}' left running for debugging"
-    return
+    log "SKIP_CLEANUP=1 — cluster ${CLUSTER_NAME} left running for debugging"
+  else
+    log "Tearing down kind cluster ${CLUSTER_NAME}..."
+    kind delete cluster --name "${CLUSTER_NAME}" 2>/dev/null || true
   fi
-  log "Tearing down kind cluster '${CLUSTER_NAME}'..."
-  kind delete cluster --name "${CLUSTER_NAME}" 2>/dev/null || true
-}
-trap cleanup EXIT
+' EXIT
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 1: Create kind cluster + install Calico
@@ -309,9 +288,11 @@ HELM_RBAC_MANIFEST=$(helm template rs-itest "${CHART_DIR}" \
 if [[ -z "${HELM_RBAC_MANIFEST}" ]]; then
   fail "RBAC: helm template produced empty output"
 else
-  echo "${HELM_RBAC_MANIFEST}" | kubectl apply -f - 2>/dev/null && \
-    pass "RBAC: helm-rendered SA + Role + RoleBinding applied successfully" || \
+  if echo "${HELM_RBAC_MANIFEST}" | kubectl apply -f - 2>/dev/null; then
+    pass "RBAC: helm-rendered SA + Role + RoleBinding applied successfully"
+  else
     fail "RBAC: failed to apply helm-rendered RBAC objects"
+  fi
 fi
 
 # Derive SA name from helm template output (release=rs-itest, chart=runsecure-orchestrator)
@@ -574,6 +555,51 @@ if [[ "${RUNTIME_WIRING_OK}" -eq 1 ]]; then
   pass "Helm: Kubernetes runtime wiring is Docker-free, immutable, readable, and readiness-aware"
 else
   fail "Helm: Kubernetes runtime wiring contract is incomplete"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 8: Shared-controller lifecycle and isolation against the real API/CNI.
+# The existing backend supplies every object and policy; test-only process
+# probes replace executable payloads so GitHub registration is not a dependency.
+# ─────────────────────────────────────────────────────────────────────────────
+log "=== Step 8: Shared controller, two projects and an unenrolled namespace ==="
+SHARED_ARCH=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.kubernetes\.io/arch}')
+case "${SHARED_ARCH}" in
+  arm64) SHARED_RUNNER_ARCH=ARM64 ;;
+  amd64) SHARED_RUNNER_ARCH=X64 ;;
+  *) fail "Unsupported test node architecture: ${SHARED_ARCH}"; SHARED_RUNNER_ARCH=invalid ;;
+esac
+SHARED_REPOS=$(cat <<EOF
+[
+  {"repo":"owner/alpha","namespace":"rs-shared-alpha","maxConcurrent":1,
+   "runnerConfig":{"runtime":"node","labels":["self-hosted","Linux","${SHARED_RUNNER_ARCH}","container"],
+    "resources":{"memory":"256m","cpus":1,"pids":128}}},
+  {"repo":"owner/beta","namespace":"rs-shared-beta","maxConcurrent":1,
+   "runnerConfig":{"runtime":"node","labels":["self-hosted","Linux","${SHARED_RUNNER_ARCH}","container"],
+    "resources":{"memory":"256m","cpus":1,"pids":128}}}
+]
+EOF
+)
+if ! SHARED_RBAC=$(helm template rs-shared "${CHART_DIR}" \
+  -f "${MANIFESTS}/helm-test-values.yaml" --set scope.name=shared \
+  --set-json "scope.repos=${SHARED_REPOS}" \
+  -s templates/namespace.yaml -s templates/rbac.yaml \
+  -s templates/serviceaccount.yaml -s templates/networkpolicy-default-deny.yaml 2>&1) ||
+   ! printf '%s\n' "${SHARED_RBAC}" | kubectl apply -f - >/dev/null; then
+  fail "Shared chart namespace/RBAC provisioning failed: ${SHARED_RBAC}"
+else
+  kubectl create namespace rs-shared-unenrolled --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  SHARED_KUBECONFIG=$(mktemp)
+  chmod 600 "${SHARED_KUBECONFIG}"
+  if kind get kubeconfig --name "${CLUSTER_NAME}" >"${SHARED_KUBECONFIG}" && \
+     (cd "${REPO_ROOT}/infra/orchestrator" && \
+      RUNSECURE_TEST_KUBECONFIG="${SHARED_KUBECONFIG}" \
+      go test ./internal/backend/kube -run '^TestSharedControllerLive$' -count=1 -v); then
+    pass "Shared controller: enrolled-only authority, two-project CNI isolation, restart recovery and zero idle job pods"
+  else
+    fail "Shared controller live lifecycle/isolation test failed"
+  fi
+  rm -f "${SHARED_KUBECONFIG}"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
