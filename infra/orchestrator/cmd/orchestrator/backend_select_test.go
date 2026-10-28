@@ -16,6 +16,7 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/state"
 	"github.com/stretchr/testify/require"
 )
@@ -396,4 +397,21 @@ tcp_egress:
 	_, err := pd.RunnerYML("o/r")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "egress")
+}
+
+func TestSharedRunnerConfigNeverUsesContentsAPI(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.Error(w, "must not fetch", 500) }))
+	defer srv.Close()
+	pin := "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	approved := &runneryml.Runner{Runtime: "python:3.12", Labels: []string{"self-hosted", "ARM64"}}
+	pd := &productionDeps{gh: makeGHClient(t, srv.URL), st: state.New(), scopeRef: &config.Scope{Backend: "kube", Repos: []config.RepoBlock{{Repo: "o/r", Namespace: "project-alpha", RunnerConfig: approved, RunnerImage: pin}}}}
+	snap, err := pd.RunnerYML("o/r")
+	require.NoError(t, err)
+	require.Equal(t, "python:3.12", snap.YML.Runtime)
+	require.Equal(t, pin, snap.ImageDigest)
+	require.Zero(t, calls)
+	_, err = pd.RunnerYML("other/repo")
+	require.ErrorContains(t, err, "unknown repo")
+	require.Zero(t, calls)
 }

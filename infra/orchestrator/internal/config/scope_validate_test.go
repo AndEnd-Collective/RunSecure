@@ -3,9 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func makeScope(t *testing.T, mut func(*Scope)) *Scope {
@@ -304,4 +306,56 @@ func TestValidate_GitHubApp_KubeSecretMode0440(t *testing.T) {
 		s.Repos[0].ProjectDir = ""
 	})
 	require.NoError(t, s.Validate())
+}
+
+func sharedScope(t *testing.T, projects string) *Scope {
+	t.Helper()
+	s := makeScope(t, func(s *Scope) { s.Backend = "kube"; require.NoError(t, os.Chmod(s.Auth.PATFile, 0o440)) })
+	require.NoError(t, yaml.Unmarshal([]byte("repos:\n"+projects), s))
+	return s
+}
+
+const approvedProject = `  - repo: acme/alpha
+    namespace: project-alpha
+    max_concurrent: 2
+    runner_config:
+      runtime: node:24
+      labels: [self-hosted, Linux, ARM64, container]
+      resources: {memory: 2g, cpus: 2, pids: 256}
+`
+
+func TestSharedScopeApprovedConfig(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	require.NoError(t, s.Validate())
+	b, err := yaml.Marshal(s.Repos[0])
+	require.NoError(t, err)
+	require.Contains(t, string(b), "kubernetes.io/arch: arm64")
+	require.Contains(t, string(b), "ephemeral_storage: 10Gi")
+}
+
+func TestSharedScopeRejectsInvalidProjects(t *testing.T) {
+	cases := map[string]string{
+		"missing config":       strings.Replace(approvedProject, "    runner_config:", "    ignored_config:", 1),
+		"reserved namespace":   strings.Replace(approvedProject, "project-alpha", "kube-system", 1),
+		"controller namespace": strings.Replace(approvedProject, "project-alpha", "runsecure-test", 1),
+		"invalid namespace":    strings.Replace(approvedProject, "project-alpha", "Bad/Space", 1),
+		"invalid repo":         strings.Replace(approvedProject, "acme/alpha", "alpha", 1),
+		"runtime":              strings.Replace(approvedProject, "node:24", "bogus:999", 1),
+		"zero cpu":             strings.Replace(approvedProject, "cpus: 2", "cpus: 0", 1),
+		"memory":               strings.Replace(approvedProject, "memory: 2g", "memory: 2gBAD", 1),
+		"invalid label":        strings.Replace(approvedProject, "container]", "'bad label\n']", 1),
+		"duplicate label":      strings.Replace(approvedProject, "container]", "container, container]", 1),
+		"image":                approvedProject + "    runner_image: registry.example/runner:latest\n",
+		"mixed namespaces":     approvedProject + "  - repo: acme/beta\n    max_concurrent: 1\n",
+		"duplicate repo":       approvedProject + strings.Replace(approvedProject, "project-alpha", "project-beta", 1),
+		"duplicate namespace":  approvedProject + strings.Replace(approvedProject, "acme/alpha", "acme/beta", 1),
+		"disk":                 approvedProject + "    kubernetes: {ephemeral_storage: -1Gi}\n",
+		"proxy cpu":            approvedProject + "    kubernetes: {proxy_resources: {cpu: \"0\"}}\n",
+		"selector":             approvedProject + "    kubernetes: {node_selector: {'bad key': value}}\n",
+		"architecture":         approvedProject + "    kubernetes: {node_selector: {kubernetes.io/arch: amd64}}\n",
+		"toleration":           approvedProject + "    kubernetes: {tolerations: [{key: dedicated, operator: Bogus}]}\n",
+	}
+	for name, projects := range cases {
+		t.Run(name, func(t *testing.T) { require.Error(t, sharedScope(t, projects).Validate()) })
+	}
 }

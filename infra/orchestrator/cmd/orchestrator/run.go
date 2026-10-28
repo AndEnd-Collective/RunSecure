@@ -98,7 +98,7 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 	// constructing a Docker client there made a valid Helm deployment fail
 	// before the in-cluster backend was selected.
 	be, dc, err := initializeBackend(
-		ctx, s, repoNames, gh, docker.NewClient, productionKubeCtor,
+		ctx, s, repoNames, gh, docker.NewClient, func() (backend.Backend, error) { return productionKubeCtorForScope(s) },
 	)
 	if err != nil {
 		return fmt.Errorf("orchestrator: backend init: %w", err)
@@ -488,6 +488,20 @@ func (p *productionDeps) RunnerYMLContext(
 		if r.Repo != repo {
 			continue
 		}
+
+		if p.scopeRef.SharedKubernetes() {
+			if r.RunnerConfig == nil {
+				return nil, errors.New("shared Kubernetes requires approved runner_config")
+			}
+			image := r.RunnerImage
+			if image == "" {
+				image = p.RunnerImageDigestFor(r.RunnerConfig.Runtime)
+			}
+			if err := validateImmutableImageRef("runner_image", image); err != nil {
+				return nil, err
+			}
+			return &orchestrator.RunnerYMLSnapshot{YML: r.RunnerConfig, ImageDigest: image, Kubernetes: r.Kubernetes}, nil
+		}
 		if p.scopeRef.Backend == "kube" {
 			snapshot, err := loadRunnerYMLFromAPI(ctx, p.gh, p.st, repo)
 			if errors.Is(err, errRunnerYMLNotModified) {
@@ -843,11 +857,15 @@ func nextSeq() int64 { return seq.Add(1) }
 // kube.NewInCluster() (requires in-cluster service-account credentials) and
 // wraps the resulting client in the kube backend.
 func productionKubeCtor() (backend.Backend, error) {
+	return productionKubeCtorForScope(&config.Scope{})
+}
+
+func productionKubeCtorForScope(s *config.Scope) (backend.Backend, error) {
 	c, err := kube.NewInCluster()
 	if err != nil {
 		return nil, fmt.Errorf("kube: in-cluster init: %w", err)
 	}
-	return backendkube.New(c), nil
+	return configureKubeBackend(c, s)
 }
 
 // selectBackend constructs the spawn backend indicated by scope.Backend.
@@ -867,4 +885,11 @@ func selectBackend(s *config.Scope, dc docker.Client, kubeCtor func() (backend.B
 		return nil, errors.New("compose backend requires a Docker client")
 	}
 	return compose.New(dc), nil
+}
+
+func configureKubeBackend(c *kube.Client, s *config.Scope) (backend.Backend, error) {
+	if s.SharedKubernetes() {
+		return backendkube.NewForProjects(c, s.Name, s.ProjectNamespaces())
+	}
+	return backendkube.New(c), nil
 }

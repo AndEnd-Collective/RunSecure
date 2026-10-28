@@ -1401,3 +1401,45 @@ func TestProxyEgressNetworkPolicy_ApprovedCIDR_NotBlockedByWorldExcept(t *testin
 		}
 	}
 }
+
+func TestProjectPodPlacementAndResourceBounds(t *testing.T) {
+	in := testInput()
+	in.Kubernetes = backend.KubePodSettings{NodeSelector: map[string]string{"kubernetes.io/arch": "arm64", "dedicated": "ci"}, Tolerations: []backend.KubeToleration{{Key: "dedicated", Operator: "Equal", Value: "ci", Effect: "NoSchedule"}}, EphemeralStorage: "20Gi", ProxyResources: backend.KubeProxyResources{CPU: "500m", Memory: "512Mi", EphemeralStorage: "2Gi"}}
+	for _, pod := range []*corev1.Pod{kube.RunnerPod(in, "secret", "proxy"), kube.ProxyPod(in, "secret")} {
+		if pod.Spec.NodeSelector["kubernetes.io/arch"] != "arm64" || pod.Spec.NodeSelector["dedicated"] != "ci" || len(pod.Spec.Tolerations) != 1 {
+			t.Fatalf("placement not applied to %s: %+v", pod.Name, pod.Spec)
+		}
+		resources := pod.Spec.Containers[0].Resources
+		for _, key := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
+			requested, limited := resources.Requests[key], resources.Limits[key]
+			if requested.Sign() <= 0 || requested.Cmp(limited) != 0 {
+				t.Fatalf("missing or unequal bounds for %s on %s", key, pod.Name)
+			}
+		}
+		expected := "20Gi"
+		if pod.Spec.Containers[0].Name == "proxy" {
+			expected = "2Gi"
+			if resources.Limits.Cpu().String() != "500m" || resources.Limits.Memory().String() != "512Mi" {
+				t.Fatal("proxy resource overrides lost")
+			}
+		}
+		storage := resources.Limits[corev1.ResourceEphemeralStorage]
+		if storage.String() != expected {
+			t.Fatalf("disk=%s expected %s", storage.String(), expected)
+		}
+	}
+}
+
+func TestDefaultPodStorageAndProxyBounds(t *testing.T) {
+	in := testInput()
+	for _, pod := range []*corev1.Pod{kube.RunnerPod(in, "secret", "proxy"), kube.ProxyPod(in, "secret")} {
+		resources := pod.Spec.Containers[0].Resources
+		disk := resources.Limits[corev1.ResourceEphemeralStorage]
+		if disk.Sign() <= 0 {
+			t.Fatalf("%s has no disk bound", pod.Name)
+		}
+		if pod.Spec.Containers[0].Name == "proxy" && (resources.Limits.Cpu().IsZero() || resources.Limits.Memory().IsZero()) {
+			t.Fatal("proxy missing CPU or memory limit")
+		}
+	}
+}

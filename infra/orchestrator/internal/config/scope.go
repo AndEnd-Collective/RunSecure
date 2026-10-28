@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,9 +43,13 @@ type OrchEgressBlock struct {
 }
 
 type RepoBlock struct {
-	Repo          string `yaml:"repo"`        // "owner/name"
-	ProjectDir    string `yaml:"project_dir"` // Compose-only (bind-mount)
-	MaxConcurrent int    `yaml:"max_concurrent"`
+	Namespace     string                  `yaml:"namespace,omitempty"`
+	RunnerConfig  *runneryml.Runner       `yaml:"runner_config,omitempty"`
+	RunnerImage   string                  `yaml:"runner_image,omitempty"`
+	Kubernetes    backend.KubePodSettings `yaml:"kubernetes,omitempty"`
+	Repo          string                  `yaml:"repo"`        // "owner/name"
+	ProjectDir    string                  `yaml:"project_dir"` // Compose-only (bind-mount)
+	MaxConcurrent int                     `yaml:"max_concurrent"`
 }
 
 // Load reads and parses a scope YAML. Does NOT validate semantically — see
@@ -64,4 +70,26 @@ func Load(path string) (*Scope, error) {
 		return nil, fmt.Errorf("config: %s: unsupported apiVersion %q (expected %s)", path, s.APIVersion, SupportedAPIVersion)
 	}
 	return &s, nil
+}
+
+// SharedKubernetes reports whether explicit project namespace enrollment is in use.
+func (s *Scope) SharedKubernetes() bool {
+	for _, r := range s.Repos {
+		if r.Namespace != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ProjectNamespaces returns the operator-approved mapping for shared mode.
+func (s *Scope) ProjectNamespaces() map[string]string {
+	if !s.SharedKubernetes() {
+		return nil
+	}
+	out := make(map[string]string, len(s.Repos))
+	for _, r := range s.Repos {
+		out[r.Repo] = r.Namespace
+	}
+	return out
 }

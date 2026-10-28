@@ -198,6 +198,7 @@ func (w *SpawnWorker) Execute(ctx context.Context, intent SpawnIntent) error {
 	}
 
 	spawnIn := backend.SpawnInput{
+		Kubernetes:           snapshot.Kubernetes,
 		Scope:                intent.Scope,
 		Repo:                 intent.Repo,
 		SpawnID:              intent.SpawnID,

@@ -36,6 +36,7 @@ const RunnerEntrypoint = "/home/runner/entrypoint.sh"
 // SpawnInput is everything a backend needs to create one per-spawn stack.
 type SpawnInput struct {
 	Scope, Repo, SpawnID    string
+	Kubernetes              KubePodSettings
 	Namespace               string // explicit Kubernetes execution namespace; empty retains legacy scope routing
 	Version, BuildSHA       string
 	RunnerImage, ProxyImage string // digest-pinned
@@ -91,4 +92,27 @@ type Backend interface {
 	Teardown(ctx context.Context, h Handle, force bool) error
 	Reconcile(ctx context.Context, scope string) ([]Handle, error)
 	Name() string
+}
+
+// KubePodSettings exposes only operator-controlled placement and resource bounds.
+// It cannot supply a Pod manifest or relax the fixed workload security context.
+type KubePodSettings struct {
+	NodeSelector     map[string]string  `yaml:"node_selector,omitempty"`
+	Tolerations      []KubeToleration   `yaml:"tolerations,omitempty"`
+	EphemeralStorage string             `yaml:"ephemeral_storage,omitempty"`
+	ProxyResources   KubeProxyResources `yaml:"proxy_resources,omitempty"`
+}
+
+type KubeToleration struct {
+	Key               string `yaml:"key"`
+	Operator          string `yaml:"operator,omitempty"`
+	Value             string `yaml:"value,omitempty"`
+	Effect            string `yaml:"effect"`
+	TolerationSeconds *int64 `yaml:"toleration_seconds,omitempty"`
+}
+
+type KubeProxyResources struct {
+	CPU              string `yaml:"cpu,omitempty"`
+	Memory           string `yaml:"memory,omitempty"`
+	EphemeralStorage string `yaml:"ephemeral_storage,omitempty"`
 }

@@ -313,6 +313,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		Image:           in.ProxyImage,
 		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: hardContainerSecCtx(),
+		Resources:       proxyResourceBounds(in.Kubernetes),
 		Env:             proxyEnv,
 		VolumeMounts:    mounts,
 		Ports:           ports,
@@ -321,6 +322,8 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: objectMeta(spawnResourceName("proxy", in.SpawnID), ns, labels),
 		Spec: corev1.PodSpec{
+			NodeSelector:                 in.Kubernetes.NodeSelector,
+			Tolerations:                  podTolerations(in.Kubernetes),
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: ptr(false),
 			HostNetwork:                  false,
@@ -422,12 +425,14 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		SecurityContext: runnerContainerSecCtx(),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    cpu,
-				corev1.ResourceMemory: memory,
+				corev1.ResourceEphemeralStorage: quantityOrDefault(in.Kubernetes.EphemeralStorage, "10Gi"),
+				corev1.ResourceCPU:              cpu,
+				corev1.ResourceMemory:           memory,
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    cpu,
-				corev1.ResourceMemory: memory,
+				corev1.ResourceEphemeralStorage: quantityOrDefault(in.Kubernetes.EphemeralStorage, "10Gi"),
+				corev1.ResourceCPU:              cpu,
+				corev1.ResourceMemory:           memory,
 			},
 		},
 		Env:          runnerEnv,
@@ -437,6 +442,8 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 	return &corev1.Pod{
 		ObjectMeta: objectMeta(spawnResourceName("runner", in.SpawnID), ns, labels),
 		Spec: corev1.PodSpec{
+			NodeSelector:                 in.Kubernetes.NodeSelector,
+			Tolerations:                  podTolerations(in.Kubernetes),
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: ptr(false),
 			HostNetwork:                  false,
@@ -862,4 +869,28 @@ func OwnerRef(secret *corev1.Secret) metav1.OwnerReference {
 func ptrIntStr(port int32) *intstr.IntOrString {
 	v := intstr.FromInt32(port)
 	return &v
+}
+
+func quantityOrDefault(value, fallback string) resource.Quantity {
+	if value == "" {
+		value = fallback
+	}
+	return resource.MustParse(value)
+}
+
+func proxyResourceBounds(settings backend.KubePodSettings) corev1.ResourceRequirements {
+	bounds := corev1.ResourceList{
+		corev1.ResourceCPU:              quantityOrDefault(settings.ProxyResources.CPU, "250m"),
+		corev1.ResourceMemory:           quantityOrDefault(settings.ProxyResources.Memory, "256Mi"),
+		corev1.ResourceEphemeralStorage: quantityOrDefault(settings.ProxyResources.EphemeralStorage, "1Gi"),
+	}
+	return corev1.ResourceRequirements{Requests: bounds.DeepCopy(), Limits: bounds}
+}
+
+func podTolerations(settings backend.KubePodSettings) []corev1.Toleration {
+	out := make([]corev1.Toleration, 0, len(settings.Tolerations))
+	for _, tol := range settings.Tolerations {
+		out = append(out, corev1.Toleration{Key: tol.Key, Operator: corev1.TolerationOperator(tol.Operator), Value: tol.Value, Effect: corev1.TaintEffect(tol.Effect), TolerationSeconds: tol.TolerationSeconds})
+	}
+	return out
 }
