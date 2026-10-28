@@ -37,8 +37,9 @@ For the Compose backend (Linux/macOS host with Docker), see
 
 ### Optional
 
-- **cert-manager** — required only when `tls.enabled: true`. If you are not
-  using TLS on the orchestrator→socket-proxy hop, cert-manager is not needed.
+- **cert-manager** — required only to emit the optional compatibility certificate
+  resources when `tls.enabled: true`. Kubernetes has no Docker socket-proxy hop;
+  these resources do not establish an additional runtime mTLS channel.
 
 ### Local tools
 

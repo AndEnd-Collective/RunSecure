@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
 	"k8s.io/apimachinery/pkg/api/resource"
 	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 	"os"
@@ -143,6 +144,20 @@ func (s *Scope) validateProjects() error {
 	if shared && (len(kubevalidation.IsDNS1123Label("runsecure-"+s.Name)) != 0) {
 		return errors.New("config: invalid controller namespace")
 	}
+	var base security.Policy
+	if shared {
+		// The operator controls every scope override. Reuse the same resolver as
+		// spawn rendering so startup cannot accept malformed effective policy.
+		keys := make([]string, 0, len(s.SecurityOverrides))
+		for key := range s.SecurityOverrides {
+			keys = append(keys, key)
+		}
+		var err error
+		base, err = security.ApplyProjectOverrides(security.Defaults(s.SecurityProfile), keys, s.SecurityOverrides)
+		if err != nil {
+			return fmt.Errorf("config: scope security overrides: %w", err)
+		}
+	}
 	repos, namespaces := map[string]bool{}, map[string]bool{}
 	for i := range s.Repos {
 		r := &s.Repos[i]
@@ -160,6 +175,16 @@ func (s *Scope) validateProjects() error {
 		namespaces[r.Namespace] = true
 		if err := validateApprovedRunner(r); err != nil {
 			return fmt.Errorf("config: repos[%d]: %w", i, err)
+		}
+		policy, err := security.ApplyProjectOverrides(base, s.AllowProjectOverrides, r.RunnerConfig.Orchestrator.SecurityOverrides)
+		if err != nil {
+			return fmt.Errorf("config: repos[%d] security overrides: %w", i, err)
+		}
+		hosts := make([]string, 0, len(r.RunnerConfig.TCPEgress)+len(r.RunnerConfig.ResolvedHTTPEgress()))
+		hosts = append(hosts, r.RunnerConfig.TCPEgress...)
+		hosts = append(hosts, r.RunnerConfig.ResolvedHTTPEgress()...)
+		if err := security.CheckEgressIPLiterals(hosts, policy); err != nil {
+			return fmt.Errorf("config: repos[%d] egress policy: %w", i, err)
 		}
 	}
 	return nil

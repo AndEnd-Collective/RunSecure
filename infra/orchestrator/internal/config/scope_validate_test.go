@@ -412,3 +412,40 @@ func TestSharedScopeMaximumBoundsAndTolerationDefaults(t *testing.T) {
 	legacy := makeScope(t, nil)
 	require.Nil(t, legacy.ProjectNamespaces())
 }
+
+func TestSharedScopeResolvesApprovedSecurityBeforeStartup(t *testing.T) {
+	for name, mutate := range map[string]func(*Scope){
+		"project override": func(s *Scope) {
+			s.AllowProjectOverrides = []string{"allow_wildcards"}
+			s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": 123}
+		},
+		"scope override": func(s *Scope) { s.SecurityOverrides = map[string]any{"allow_imds": "invalid"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := sharedScope(t, approvedProject)
+			mutate(s)
+			require.ErrorContains(t, s.Validate(), "security")
+		})
+	}
+	s := sharedScope(t, approvedProject)
+	s.SecurityOverrides = map[string]any{"allow_imds": false}
+	s.AllowProjectOverrides = []string{"allow_wildcards"}
+	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": []any{"*.example.org"}, "allow_kube_api": "unpermitted and ignored"}
+	require.NoError(t, s.Validate())
+	legacy := makeScope(t, nil)
+	legacy.SecurityOverrides = map[string]any{"allow_imds": "deferred legacy validation"}
+	require.NoError(t, legacy.Validate())
+}
+
+func TestSharedScopeChecksLiteralDestinationsWithEffectivePolicy(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	s.Repos[0].RunnerConfig.HTTPEgress = []string{"10.1.2.3"}
+	require.ErrorContains(t, s.Validate(), "literal IP")
+	s.SecurityOverrides = map[string]any{"allow_private_cidrs": []any{"10.0.0.0/8"}}
+	require.NoError(t, s.Validate())
+	s.Repos[0].RunnerConfig.TCPEgress = []string{"169.254.169.254:5432"}
+	require.ErrorContains(t, s.Validate(), "literal IP")
+	s.AllowProjectOverrides = []string{"allow_private_cidrs"}
+	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_private_cidrs": []any{"10.0.0.0/8", "169.254.169.254/32"}}
+	require.NoError(t, s.Validate(), "scope-authorized project exceptions use resolved effective policy")
+}

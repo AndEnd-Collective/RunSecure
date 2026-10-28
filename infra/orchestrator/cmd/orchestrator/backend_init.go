@@ -34,6 +34,13 @@ func initializeBackend(
 ) (backend.Backend, docker.Client, error) {
 	switch s.Backend {
 	case "kube":
+		// Keep this startup boundary fail-closed even for direct callers: shared
+		// approved policy must be resolved before recovery can mutate either API.
+		if s.SharedKubernetes() {
+			if err := s.Validate(); err != nil {
+				return nil, nil, err
+			}
+		}
 		if err := validateKubeEnvironment(); err != nil {
 			return nil, nil, err
 		}

@@ -186,3 +186,12 @@ func TestValidateEgress(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateEgressTCPNumericBoundsAndCanonicalPorts(t *testing.T) {
+	for _, ports := range [][]string{{"db.example.com:0"}, {"db.example.com:65536"}, {"db.example.com:080"}, {"db.example.com:00443"}, {"a:5432", "b:05432"}, {"db.example.com:00022"}} {
+		t.Run(ports[0], func(t *testing.T) { require.Error(t, (&Runner{TCPEgress: ports}).ValidateEgress()) })
+	}
+	for _, ports := range [][]string{{"db.example.com:1", "cache.example.com:65535"}, {"db:5432", "redis:6379"}} {
+		require.NoError(t, (&Runner{TCPEgress: ports}).ValidateEgress())
+	}
+}

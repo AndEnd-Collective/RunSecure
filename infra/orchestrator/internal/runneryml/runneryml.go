@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -106,21 +107,28 @@ var (
 )
 
 // ValidateEgress checks tcp_egress and http_egress for validity:
-// - TCP entries must be host:port format with no duplicated ports
+// - TCP entries require canonical decimal ports 1-65535 with no duplicates
 // - Ports 80 and 443 are reserved for HTTP(S)
 // - HTTP domain format must be valid (no injection characters)
 func (r *Runner) ValidateEgress() error {
-	seen := map[string]bool{}
+	seen := map[int]bool{}
 	for _, e := range r.TCPEgress {
 		if !reHostPort.MatchString(e) {
 			return fmt.Errorf("invalid tcp_egress entry %q (want host:port, no metacharacters)", e)
 		}
-		port := e[strings.LastIndex(e, ":")+1:]
-		if port == "80" || port == "443" {
-			return fmt.Errorf("tcp_egress port %s reserved; use http_egress", port)
+		text := e[strings.LastIndex(e, ":")+1:]
+		port, err := strconv.Atoi(text)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid tcp_egress port %q (want 1-65535)", text)
+		}
+		if port == 80 || port == 443 {
+			return fmt.Errorf("tcp_egress port %d reserved; use http_egress", port)
+		}
+		if text != strconv.Itoa(port) {
+			return fmt.Errorf("invalid tcp_egress port %q (want canonical decimal without leading zeros)", text)
 		}
 		if seen[port] {
-			return fmt.Errorf("tcp_egress port %s duplicated (one backend per port)", port)
+			return fmt.Errorf("tcp_egress port %d duplicated (one backend per port)", port)
 		}
 		seen[port] = true
 	}
