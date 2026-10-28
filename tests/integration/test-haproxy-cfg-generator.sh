@@ -8,8 +8,8 @@
 #        (10.11.12.13), never 0.0.0.0.
 #
 #   M3:  a `resolvers` section is always emitted when tcp_egress is
-#        non-empty, regardless of dns.host. Every backend references
-#        it via `resolvers <name>`.
+#        non-empty, regardless of dns.host. Every frontend resolves through
+#        it before checking and setting the exact connection destination.
 #
 #   M9:  generate-egress-conf.sh fails-closed on malformed YAML — must
 #        not produce a partial or empty haproxy.cfg.
@@ -34,7 +34,7 @@ fail() { RESULTS+=("FAIL: $1 — $2"); FAIL=$((FAIL + 1)); }
 
 # Scratch dir for project fixtures + restore the existing haproxy.cfg
 # at exit so we don't leave the tree dirty for other tests.
-WORK=$(mktemp -d -p "${HOME:-/tmp}" runsecure-haproxy-test-XXXXXX)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/runsecure-haproxy-test-XXXXXX") || exit 1
 HAPROXY_CFG="${RUNSECURE_ROOT}/infra/squid/haproxy.cfg"
 HAPROXY_CFG_BACKUP=""
 DNSMASQ_CONF="${RUNSECURE_ROOT}/infra/squid/dnsmasq.conf"
@@ -61,14 +61,13 @@ if [[ -f "$RUNTIME_COMPOSE" ]]; then
     cp "$RUNTIME_COMPOSE" "$RUNTIME_COMPOSE_BACKUP"
 fi
 
-cleanup() {
+trap '
     [[ -n "$HAPROXY_CFG_BACKUP"     ]] && cp "$HAPROXY_CFG_BACKUP"     "$HAPROXY_CFG"
     [[ -n "$DNSMASQ_CONF_BACKUP"    ]] && cp "$DNSMASQ_CONF_BACKUP"    "$DNSMASQ_CONF"
     [[ -n "$RUNTIME_CONF_BACKUP"    ]] && cp "$RUNTIME_CONF_BACKUP"    "$RUNTIME_CONF"
     [[ -n "$RUNTIME_COMPOSE_BACKUP" ]] && cp "$RUNTIME_COMPOSE_BACKUP" "$RUNTIME_COMPOSE"
     rm -rf "$WORK"
-}
-trap cleanup EXIT
+' EXIT
 
 # Build a project dir with a runner.yml of the given content.
 make_project() {
@@ -104,10 +103,10 @@ if bash "$GENERATE" "$PROJ1" >/dev/null 2>&1 && [[ -f "$HAPROXY_CFG" ]]; then
     else
         fail "M3" "resolvers default_dns / parse-resolv-conf section not found"
     fi
-    if grep -qE 'server srv_5432 .* resolvers default_dns' "$HAPROXY_CFG"; then
-        pass "M3: backend references resolvers default_dns"
+    if grep -qF 'do-resolve(sess.rs_dst,default_dns,ipv4) str(postgres.example.com)' "$HAPROXY_CFG"; then
+        pass "M3: frontend resolves per connection through default_dns"
     else
-        fail "M3" "backend missing 'resolvers default_dns' on server line"
+        fail "M3" "frontend missing per-connection default_dns resolution"
     fi
 else
     fail "generator" "generator failed for dns.host:true case (no haproxy.cfg produced)"
@@ -133,10 +132,10 @@ if bash "$GENERATE" "$PROJ2" >/dev/null 2>&1 && [[ -f "$HAPROXY_CFG" ]]; then
     else
         fail "M3" "dnsmasq_local resolvers / nameserver line not found"
     fi
-    if grep -qE 'server srv_5432 .* resolvers dnsmasq_local' "$HAPROXY_CFG"; then
-        pass "M3: backend references resolvers dnsmasq_local"
+    if grep -qF 'do-resolve(sess.rs_dst,dnsmasq_local,ipv4) str(postgres.example.com)' "$HAPROXY_CFG"; then
+        pass "M3: frontend resolves per connection through dnsmasq_local"
     else
-        fail "M3" "backend missing 'resolvers dnsmasq_local'"
+        fail "M3" "frontend missing per-connection dnsmasq_local resolution"
     fi
     if grep -qE 'bind 10\.11\.12\.13:5432' "$HAPROXY_CFG"; then
         pass "H13: bind uses proxy IP (dns.host:false)"

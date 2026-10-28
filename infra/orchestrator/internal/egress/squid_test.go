@@ -10,7 +10,19 @@ import (
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
+	"github.com/stretchr/testify/require"
 )
+
+func TestRenderSquid_CONNECTPortGuardPrecedesEveryAllow(t *testing.T) {
+	p := security.Defaults("strict")
+	p.AllowedPrivateCIDRs = []*net.IPNet{mustParseCIDR("172.31.249.10/32")}
+	out := string(RenderSquid(&runneryml.Runner{HTTPEgress: []string{"public.test"}}, p))
+	require.Contains(t, out, "acl SSL_ports port 443\n")
+	require.Contains(t, out, "acl CONNECT method CONNECT\n")
+	guard := strings.Index(out, "http_access deny CONNECT !SSL_ports\n")
+	require.GreaterOrEqual(t, guard, 0)
+	require.Less(t, guard, strings.Index(out, "http_access allow "))
+}
 
 // mustParseCIDR is a test helper that parses a CIDR string and panics on error.
 func mustParseCIDR(s string) *net.IPNet {

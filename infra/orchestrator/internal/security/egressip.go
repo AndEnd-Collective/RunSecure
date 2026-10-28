@@ -32,6 +32,12 @@ func init() {
 	blockedRanges = mustBuildBlockedRanges(parseCIDRFn, builtinBlockedCIDRs)
 }
 
+// BlockedEgressCIDRs returns the same destination ranges used by literal-IP
+// validation, for enforcement by the proxies after DNS resolution.
+func BlockedEgressCIDRs() []string {
+	return append([]string(nil), builtinBlockedCIDRs...)
+}
+
 // mustBuildBlockedRanges parses cidrs using parseFn and returns the resulting
 // []*net.IPNet slice. Panics on parse failure — all callers pass hard-coded
 // literals so failure must never occur in production.
