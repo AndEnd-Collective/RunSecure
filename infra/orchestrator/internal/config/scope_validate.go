@@ -150,7 +150,7 @@ func (s *Scope) validateProjects() error {
 			continue
 		}
 		identity := strings.ToLower(r.Repo)
-		if !repoIdentity.MatchString(r.Repo) || len(kubevalidation.IsValidLabelValue(strings.ReplaceAll(r.Repo, "/", "_"))) != 0 || repos[identity] {
+		if !repoIdentity.MatchString(r.Repo) || repos[identity] {
 			return fmt.Errorf("config: invalid or duplicate repo %q", r.Repo)
 		}
 		repos[identity] = true

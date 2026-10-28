@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ func New(c *kube.Client) backend.Backend {
 	return &kubeBackend{c: c}
 }
 
+var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
 // NewForProjects binds one controller scope to immutable, explicit project namespaces.
 func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) (backend.Backend, error) {
 	if c == nil || scope == "" || len(kubevalidation.IsValidLabelValue(scope)) != 0 || len(namespaces) == 0 {
@@ -47,7 +50,7 @@ func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) 
 	for repo, ns := range namespaces {
 		parts := strings.Split(repo, "/")
 		label := kube.RepoLabel(repo)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" || len(kubevalidation.IsValidLabelValue(label)) != 0 || seenLabels[label] {
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" || !validProjectRepo.MatchString(repo) || len(kubevalidation.IsValidLabelValue(label)) != 0 || seenLabels[label] {
 			return nil, fmt.Errorf("kube backend: invalid or conflicting repository %q", repo)
 		}
 		if len(kubevalidation.IsDNS1123Label(ns)) != 0 || ns == "default" || strings.HasPrefix(ns, "kube-") || ns == kube.Namespace(scope) || seenNamespaces[ns] {

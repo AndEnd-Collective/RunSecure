@@ -736,18 +736,10 @@ func (p *productionDeps) RunnerImageDigestFor(runtime string) string {
 	return os.Getenv("RUNSECURE_RUNNER_IMAGE_DEFAULT")
 }
 func (p *productionDeps) SeccompProfileHostPath(name string) string {
-	// Empty name → no seccomp profile applied (defense in depth on top of
-	// cap_drop:ALL + no-new-privileges, not load-bearing).
-	//
-	// When set, the path must be a JSON-encoded profile that dockerd can
-	// read at container-start time. Note: Docker's SecurityOpt API expects
-	// the JSON CONTENTS, not a file path — passing a path triggers
-	// "Decoding seccomp profile failed". A path-based wiring requires the
-	// orchestrator to read the file and inject the JSON inline, which
-	// requires bind-mounting the seccomp dir into the orchestrator. That
-	// integration is deferred; for now an explicit profile name is treated
-	// as a no-op until the bind-mount is wired (next: read the file in
-	// productionDeps and pass JSON inline).
+	// Empty selects Docker's default seccomp. Explicit legacy profile names
+	// remain visible to the socket-proxy, which rejects custom seccomp options.
+	// A host path was never valid Engine API inline seccomp JSON. Shared kube
+	// config rejects these overrides at startup and always uses RuntimeDefault.
 	if name == "" {
 		return ""
 	}

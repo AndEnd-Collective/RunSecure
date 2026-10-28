@@ -21,7 +21,11 @@
 package kube
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
+	"net/netip"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -102,9 +106,15 @@ func Labels(in backend.SpawnInput, role string) map[string]string {
 }
 
 // RepoLabel returns the canonical Kubernetes label value for a GitHub
-// repository identity.
+// repository identity. Existing valid labels are retained; long or otherwise
+// invalid label values receive a deterministic 224-bit hash fallback.
 func RepoLabel(repo string) string {
-	return strings.ReplaceAll(repo, "/", "_")
+	label := strings.ReplaceAll(repo, "/", "_")
+	if len(kubevalidation.IsValidLabelValue(label)) == 0 {
+		return label
+	}
+	digest := sha256.Sum256([]byte(repo))
+	return fmt.Sprintf("repo-%x", digest[:28])
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -650,8 +660,8 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 // ProxyEgressNetworkPolicy returns a NetworkPolicy that allows the proxy Pod to:
 //
 //  1. Reach kube-dns on port 53 (TCP+UDP) for DNS resolution.
-//  2. Reach the external internet on any port (0.0.0.0/0) so Squid can proxy
-//     runner CONNECT requests.
+//  2. Reach external IPv4 destinations on any port except the canonical blocked
+//     ranges, so Squid can proxy runner CONNECT requests.
 //
 // # Security rationale for the broad internet egress rule
 //
@@ -662,8 +672,9 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 //     RunnerEgressNetworkPolicy; it cannot bypass the proxy to reach the
 //     internet directly.
 //   - The proxy's Squid config (rendered by internal/egress) enforces L7
-//     allow-lists; any attempt by a compromised proxy process to reach a
-//     non-allow-listed domain is rejected by Squid itself.
+//     allow-lists for runner requests. A compromised proxy process can bypass
+//     its own L7 filter and remains a trusted domain-filtering boundary. A compromised
+//     proxy process can bypass its own L7 filter; it is trusted for domain filtering.
 //
 // TODO(egress): when internal/egress exposes resolved CIDRs (Phase 2 Task 5),
 // replace the 0.0.0.0/0 peer with the explicit CIDR list for defence-in-depth.
@@ -683,20 +694,16 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 		},
 	}
 
-	// Rule 2: internet egress (all IPs minus private RFC1918 ranges to avoid
-	// routing cluster traffic via this rule).
+	// Rule 2: external IPv4 egress excludes the canonical private and
+	// special-use destination ranges, including metadata/link-local.
 	// The Squid L7 allow-list is the authoritative control; this rule provides
 	// network-layer reachability.
 	internetRule := networkingv1.NetworkPolicyEgressRule{
 		To: []networkingv1.NetworkPolicyPeer{
 			{
 				IPBlock: &networkingv1.IPBlock{
-					CIDR: worldCIDR,
-					Except: []string{
-						"10.0.0.0/8",
-						"172.16.0.0/12",
-						"192.168.0.0/16",
-					},
+					CIDR:   worldCIDR,
+					Except: blockedIPv4EgressCIDRs(),
 				},
 			},
 		},
@@ -891,6 +898,16 @@ func podTolerations(settings backend.KubePodSettings) []corev1.Toleration {
 	out := make([]corev1.Toleration, 0, len(settings.Tolerations))
 	for _, tol := range settings.Tolerations {
 		out = append(out, corev1.Toleration{Key: tol.Key, Operator: corev1.TolerationOperator(tol.Operator), Value: tol.Value, Effect: corev1.TaintEffect(tol.Effect), TolerationSeconds: tol.TolerationSeconds})
+	}
+	return out
+}
+
+func blockedIPv4EgressCIDRs() []string {
+	out := []string{}
+	for _, cidr := range security.BlockedEgressCIDRs() {
+		if netip.MustParsePrefix(cidr).Addr().Is4() {
+			out = append(out, cidr)
+		}
 	}
 	return out
 }

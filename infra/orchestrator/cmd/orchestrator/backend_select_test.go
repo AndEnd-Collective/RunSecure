@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/state"
 	"github.com/stretchr/testify/require"
@@ -414,4 +416,36 @@ func TestSharedRunnerConfigNeverUsesContentsAPI(t *testing.T) {
 	_, err = pd.RunnerYML("other/repo")
 	require.ErrorContains(t, err, "unknown repo")
 	require.Zero(t, calls)
+}
+
+func TestConfigureSharedKubeBackendRejectsInvalidMapBeforeClient(t *testing.T) {
+	_, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/alpha", Namespace: "project-alpha"}, {Repo: "acme/beta", Namespace: "project-alpha"}}})
+	require.Error(t, err)
+	be, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/alpha", Namespace: "project-alpha"}}})
+	require.NoError(t, err)
+	require.Equal(t, "kube", be.Name())
+	_, err = be.Spawn(context.Background(), backend.SpawnInput{Scope: "shared", Repo: "unapproved/repo", SpawnID: "unapproved"})
+	require.ErrorContains(t, err, "unapproved")
+}
+
+func TestSharedRunnerConfigRequiresConfigAndImmutableFallback(t *testing.T) {
+	pd := &productionDeps{scopeRef: &config.Scope{Backend: "kube", Repos: []config.RepoBlock{{Repo: "o/r", Namespace: "project-alpha"}}}}
+	_, err := pd.RunnerYML("o/r")
+	require.ErrorContains(t, err, "runner_config")
+	pd.scopeRef.Repos[0].RunnerConfig = &runneryml.Runner{Runtime: "node:24"}
+	t.Setenv("RUNSECURE_RUNNER_IMAGE_NODE", "mutable:latest")
+	_, err = pd.RunnerYML("o/r")
+	require.ErrorContains(t, err, "immutable")
+	t.Setenv("RUNSECURE_RUNNER_IMAGE_NODE", "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	snapshot, err := pd.RunnerYML("o/r")
+	require.NoError(t, err)
+	require.Contains(t, snapshot.ImageDigest, "@sha256:")
+}
+
+func TestConfigureKubeBackendAcceptsLongRepositoryWithoutAPI(t *testing.T) {
+	be, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/" + strings.Repeat("a", 100), Namespace: "project-alpha"}}})
+	require.NoError(t, err)
+	require.Equal(t, "kube", be.Name())
+	_, err = configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/bad*repo", Namespace: "project-alpha"}}})
+	require.Error(t, err)
 }

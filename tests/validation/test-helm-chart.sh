@@ -471,6 +471,61 @@ else
     fail "Kubernetes network: API peer rendering introduced a CIDR/port cross-product"
 fi
 
+# Shared mode provisions exactly the enrolled namespaces and binds the one
+# management ServiceAccount independently in each project namespace.
+SHARED_PROJECTS='[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":2,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"2g","cpus":2,"pids":256}}},{"repo":"acme/beta","namespace":"project-beta","maxConcurrent":1,"runnerConfig":{"runtime":"python:3.12","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":256}}}]'
+SHARED_CONTROLLER_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+if render_chart --set-json "scope.repos=${SHARED_PROJECTS}" &>/dev/null; then
+    fail "Shared projects: bundled legacy controller image was accepted"
+else
+    pass "Shared projects: bundled legacy controller image rejected"
+fi
+render_shared_chart() {
+    render_chart --set "image.orchestrator.digest=${SHARED_CONTROLLER_DIGEST}" "$@"
+}
+SHARED_RENDERED=$(render_shared_chart --set-json "scope.repos=${SHARED_PROJECTS}" 2>/dev/null || echo "")
+if [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: Namespace$') -eq 3 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: Role$') -eq 2 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: RoleBinding$') -eq 2 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^  name: default-deny-all$') -eq 3 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c 'pod-security.kubernetes.io/enforce: restricted') -eq 3 ]] &&
+   ! echo "${SHARED_RENDERED}" | grep -qE '^kind: ClusterRole(Binding)?$'; then
+    pass "Shared projects: restricted namespaces, default deny and per-project Roles bind one controller"
+else
+    fail "Shared projects: namespace or RBAC provisioning is incomplete"
+fi
+if [[ -n "$SHARED_RENDERED" && -n "$KUBECONFORM_BIN" ]] &&
+   echo "${SHARED_RENDERED}" | "$KUBECONFORM_BIN" -strict -summary -kubernetes-version 1.29.0 >/dev/null; then
+    pass "Shared projects: strict Kubernetes schema validation"
+else
+    fail "Shared projects: Kubernetes schema validation failed"
+fi
+for invalid_projects in \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1}]' \
+ '[{"repo":"acme/alpha","namespace":"kube-system","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"runsecure-ci-scope","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}},{"repo":"acme/beta","maxConcurrent":1}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"runnerImage":"image:latest","runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"kubernetes":{"privileged":true},"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]'; do
+    if render_shared_chart --set-json "scope.repos=${invalid_projects}" &>/dev/null; then
+        fail "Shared projects: malformed or unapproved project was accepted: ${invalid_projects}"
+    else
+        pass "Shared projects: malformed or unapproved project rejected"
+    fi
+done
+
+CONTROLLER_SPECIAL_RANGES_OK=true
+for cidr in '0.0.0.0/8' '100.64.0.0/10' '127.0.0.0/8' '169.254.0.0/16' '224.0.0.0/4' '240.0.0.0/4'; do
+    if ! echo "${RENDERED_NO_TLS}" | grep -q -- "- ${cidr}"; then
+        CONTROLLER_SPECIAL_RANGES_OK=false
+    fi
+done
+if [[ "$CONTROLLER_SPECIAL_RANGES_OK" == true ]]; then
+    pass "Controller world egress excludes private and special destination ranges"
+else
+    fail "Controller world egress permits a private or special destination range"
+fi
+
 # ── Print results ────────────────────────────────────────────────────────────
 
 echo ""

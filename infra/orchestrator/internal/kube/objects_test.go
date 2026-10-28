@@ -1,6 +1,7 @@
 package kube_test
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -1441,5 +1442,39 @@ func TestDefaultPodStorageAndProxyBounds(t *testing.T) {
 		if pod.Spec.Containers[0].Name == "proxy" && (resources.Limits.Cpu().IsZero() || resources.Limits.Memory().IsZero()) {
 			t.Fatal("proxy missing CPU or memory limit")
 		}
+	}
+}
+
+func TestProxyWorldEgressRejectsSpecialDestinations(t *testing.T) {
+	policy := kube.ProxyEgressNetworkPolicy(testInput())
+	for _, destination := range []string{"0.0.0.1", "10.1.2.3", "127.0.0.1", "169.254.169.254", "100.100.100.200", "224.0.0.1", "255.255.255.255"} {
+		address := netip.MustParseAddr(destination)
+		for _, rule := range policy.Spec.Egress {
+			for _, peer := range rule.To {
+				if peer.IPBlock == nil || peer.IPBlock.CIDR != "0.0.0.0/0" {
+					continue
+				}
+				blocked := false
+				for _, excluded := range peer.IPBlock.Except {
+					if netip.MustParsePrefix(excluded).Contains(address) {
+						blocked = true
+					}
+				}
+				if !blocked {
+					t.Errorf("world rule permits special destination %s", destination)
+				}
+			}
+		}
+	}
+}
+
+func TestLongRepositoryLabelIsValidDeterministicAndBounded(t *testing.T) {
+	repo := "acme/" + strings.Repeat("long-repository-", 7)
+	label := kube.RepoLabel(repo)
+	if len(label) > 63 || label == repo || label != kube.RepoLabel(repo) || label == kube.RepoLabel(repo+"other") {
+		t.Fatalf("invalid repository label %q", label)
+	}
+	if kube.RepoLabel("acme/widget") != "acme_widget" {
+		t.Fatal("legacy safe label changed")
 	}
 }

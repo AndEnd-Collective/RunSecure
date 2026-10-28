@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,4 +360,55 @@ func TestSharedScopeRejectsInvalidProjects(t *testing.T) {
 	for name, projects := range cases {
 		t.Run(name, func(t *testing.T) { require.Error(t, sharedScope(t, projects).Validate()) })
 	}
+}
+
+func TestSharedScopeAcceptsLongValidRepository(t *testing.T) {
+	s := sharedScope(t, strings.Replace(approvedProject, "acme/alpha", "acme/"+strings.Repeat("a", 100), 1))
+	require.NoError(t, s.Validate())
+}
+
+func TestSharedScopeValidationBoundaries(t *testing.T) {
+	for name, mutate := range map[string]func(*Scope){
+		"compose":                  func(s *Scope) { s.Backend = "compose"; require.NoError(t, os.Chmod(s.Auth.PATFile, 0o400)) },
+		"invalid controller":       func(s *Scope) { s.Name = "Invalid_name" },
+		"memory ceiling":           func(s *Scope) { s.Repos[0].RunnerConfig.Resources.Memory = "513g" },
+		"memory overflow":          func(s *Scope) { s.Repos[0].RunnerConfig.Resources.Memory = "999999999999999999999999999999g" },
+		"cpu ceiling":              func(s *Scope) { s.Repos[0].RunnerConfig.Resources.CPUs = 129 },
+		"pids zero":                func(s *Scope) { s.Repos[0].RunnerConfig.Resources.PIDs = 0 },
+		"labels empty":             func(s *Scope) { s.Repos[0].RunnerConfig.Labels = nil },
+		"unsupported architecture": func(s *Scope) { s.Repos[0].RunnerConfig.Labels = []string{"ARM"} },
+		"conflicting architecture": func(s *Scope) { s.Repos[0].RunnerConfig.Labels = []string{"X64", "ARM64"} },
+		"seccomp":                  func(s *Scope) { s.Repos[0].RunnerConfig.Orchestrator.SeccompProfile = "custom.json" },
+		"timeout":                  func(s *Scope) { s.Repos[0].RunnerConfig.Orchestrator.TimeoutSeconds = -1 },
+		"egress":                   func(s *Scope) { s.Repos[0].RunnerConfig.HTTPEgress = []string{"bad;domain"} },
+		"placement count": func(s *Scope) {
+			s.Repos[0].Kubernetes.NodeSelector = map[string]string{}
+			for i := 0; i < 17; i++ {
+				s.Repos[0].Kubernetes.NodeSelector[fmt.Sprint(i)] = "ci"
+			}
+		},
+		"unsupported node OS": func(s *Scope) { s.Repos[0].Kubernetes.NodeSelector = map[string]string{"kubernetes.io/os": "windows"} },
+		"disk upper bound":    func(s *Scope) { s.Repos[0].Kubernetes.EphemeralStorage = "2Ti" },
+		"malformed quantity":  func(s *Scope) { s.Repos[0].Kubernetes.ProxyResources.Memory = "garbage" },
+	} {
+		t.Run(name, func(t *testing.T) { s := sharedScope(t, approvedProject); mutate(s); require.Error(t, s.Validate()) })
+	}
+}
+
+func TestSharedScopeMaximumBoundsAndTolerationDefaults(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	r := &s.Repos[0]
+	r.RunnerConfig.Resources.Memory = "512g"
+	r.RunnerConfig.Resources.CPUs = 128
+	r.RunnerConfig.Resources.PIDs = 32768
+	r.RunnerConfig.Labels = []string{"self-hosted", "X64", "Linux"}
+	r.RunnerConfig.Orchestrator.TimeoutSeconds = 86400
+	r.RunnerImage = "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seconds := int64(86400)
+	r.Kubernetes = backend.KubePodSettings{NodeSelector: map[string]string{"kubernetes.io/arch": "amd64"}, EphemeralStorage: "1Ti", ProxyResources: backend.KubeProxyResources{CPU: "8", Memory: "8Gi", EphemeralStorage: "100Gi"}, Tolerations: []backend.KubeToleration{{Key: "dedicated", Value: "ci", Effect: "NoSchedule"}, {Key: "maintenance", Operator: "Exists", Effect: "NoExecute", TolerationSeconds: &seconds}}}
+	require.NoError(t, s.Validate())
+	require.Equal(t, "Equal", r.Kubernetes.Tolerations[0].Operator)
+	require.Equal(t, "amd64", r.Kubernetes.NodeSelector["kubernetes.io/arch"])
+	legacy := makeScope(t, nil)
+	require.Nil(t, legacy.ProjectNamespaces())
 }

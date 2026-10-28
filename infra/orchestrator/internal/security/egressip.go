@@ -18,10 +18,14 @@ var builtinBlockedCIDRs = []string{
 	"127.0.0.0/8",
 	"169.254.0.0/16",
 	"0.0.0.0/8",
+	"100.64.0.0/10",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
 	"::1/128",
 	"fe80::/10",
 	"fc00::/7",
 	"::/128",
+	"ff00::/8",
 }
 
 // parseCIDRFn is the CIDR parser used to build blockedRanges. Replaced in

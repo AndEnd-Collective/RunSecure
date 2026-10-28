@@ -2,9 +2,11 @@
 
 This guide walks through deploying the RunSecure orchestrator to an existing
 Kubernetes cluster using the Helm chart at `charts/runsecure-orchestrator/`.
-One Helm release = one scope. The orchestrator fetches `runner.yml` from
-the GitHub API (no bind-mount) and spawns per-job runner+proxy Pod stacks
-with namespace-scoped NetworkPolicies and RBAC.
+One Helm release runs one controller for one scope. Shared mode maps each
+approved repository to its own execution namespace and uses operator-approved
+inline runner configuration. Legacy mode keeps runners in the scope namespace
+and fetches `runner.yml` from GitHub. Both modes use per-job runner+proxy Pods,
+namespace-scoped NetworkPolicies and RBAC.
 
 For the Compose backend (Linux/macOS host with Docker), see
 [`install.md`](install.md).
@@ -109,8 +111,8 @@ a user identity. Prefer this in shared/team environments.
        privateKeySecretName: runsecure-app-key
    ```
 
-The orchestrator enforces that the private key file has mode 0400 — the
-chart mounts it read-only from the Secret.
+The Kubernetes controller requires mode 0440 and reads the projected Secret
+through its non-root fsGroup. Compose retains mode 0400.
 
 ---
 
@@ -175,18 +177,111 @@ auth:
 image:
   orchestrator:
     repository: ghcr.io/andend-collective/runsecure/orchestrator
-    tag: "2.1.0"
-    # Replace with the real digest from the 2.1.0 release — see step 6.
+    tag: "2.2.0"
+    # Replace with the real digest from the approved 2.2+ release — see step 6.
     digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   proxy:
     repository: ghcr.io/andend-collective/runsecure/proxy
-    tag: "2.1.0"
+    tag: "2.2.0"
     digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   socketProxy:
     repository: ghcr.io/andend-collective/runsecure/socket-proxy
-    tag: "2.1.0"
+    tag: "2.2.0"
     digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 ```
+
+### Shared controller with separate project namespaces
+
+Shared mode requires an explicitly pinned RunSecure 2.2+ controller. The chart
+retains 2.1.10 image defaults for legacy installs and rejects that bundled
+controller digest when project namespaces are configured. Load the exact
+controller, proxy and terminal runner digests from the approved 2.2+ release
+manifest into the existing `image.*` values before installing; setting a newer
+`tag` alone does not replace a digest. No release digests are invented here.
+
+Replace `scope.repos` in the example with explicit enrollment:
+
+```yaml
+scope:
+  repos:
+    - repo: owner/repo-a
+      namespace: ci-project-a
+      maxConcurrent: 3
+      runnerConfig:
+        runtime: node:24
+        labels: [self-hosted, Linux, ARM64, container]
+        resources: {memory: 2g, cpus: 2, pids: 256}
+        httpEgress: [registry.npmjs.org]
+        orchestrator: {timeoutSeconds: 21600}
+      kubernetes:
+        nodeSelector: {dedicated: ci}
+        tolerations:
+          - {key: dedicated, operator: Equal, value: ci, effect: NoSchedule}
+        ephemeralStorage: 10Gi
+        proxyResources: {cpu: 250m, memory: 256Mi, ephemeralStorage: 1Gi}
+    - repo: owner/repo-b
+      namespace: ci-project-b
+      maxConcurrent: 2
+      runnerConfig:
+        runtime: python:3.12
+        labels: [self-hosted, Linux, ARM64, container]
+        resources: {memory: 2g, cpus: 2, pids: 256}
+        httpEgress: [pypi.org, files.pythonhosted.org]
+```
+
+The management namespace `runsecure-production` contains the only controller,
+its ServiceAccount, GitHub App key/PAT and mounted scope configuration. Each
+project namespace contains only that project's transient runner/proxy stacks.
+Helm precreates all namespaces, labels them PSS Restricted, installs default
+deny policies and binds the management ServiceAccount with a separate Role in
+each enrolled execution namespace. Runtime permissions cannot create namespaces
+or act in an unenrolled namespace. Shared mode grants no workload Role in the
+management namespace. The controller is a trusted boundary: its credential and
+all enrolled namespace permissions cover every project in its scope.
+
+Once one namespace is explicit, every repository must have a distinct namespace
+and approved `runnerConfig`. Reserved/controller namespaces, duplicate identities,
+missing policies and malformed runtime, label, image and resource values fail
+closed. A workflow cannot choose its namespace or submit a Pod manifest. Shared
+mode does not call the Contents API for policy, including on the default branch.
+Change approved configuration through the values file and restart the controller
+with the normal Helm upgrade; it loads a fixed configuration at startup.
+
+`runnerConfig` and nested chart values use camelCase. The rendered `scope.yml`
+uses canonical snake_case (`runner_config`, `http_egress`, `node_selector`, etc.).
+An optional project `runnerImage: registry.example/terminal@sha256:<64 hex>`
+overrides runtime image selection and must satisfy the terminal image contract.
+Otherwise the selected runtime resolves an operator-pinned image environment
+variable. Mutable image tags are rejected.
+
+Both runner and proxy receive the project's selectors and tolerations. `ARM64`
+labels select `kubernetes.io/arch=arm64`; `X64` selects `amd64`; without an
+architecture label the default is `amd64`. Conflicting architecture or non-Linux
+selectors fail. No automatic architecture translation is performed. Requests
+equal limits for runner CPU/memory/disk and proxy CPU/memory/disk. Omitted disk
+and proxy bounds default to 10Gi runner storage and 250m/256Mi/1Gi proxy resources.
+Kubelet storage accounting and node-level PID limits remain cluster prerequisites;
+namespace isolation is not a separate kernel or a VM boundary.
+
+At idle there are zero runner/proxy Pods in the project namespaces; the one
+controller keeps polling. A queued compatible job is observed on a poll, waits
+for existing capacity if needed, and creates one pair of Pods. Cold-start latency
+includes up to a poll interval, GitHub JIT registration, scheduling, image pulls
+and any external node provisioning. RunSecure does not scale cluster nodes.
+Configure node autoscaling externally; a pending Pod is not proof of node
+capacity. `globalMaxRunners` and each `maxConcurrent` bound admission, while
+in-memory reservations prevent repeated polls from duplicating pending work.
+The existing targeting labels must match and every requested job label must be
+present on the actual runner, including generated `runsecure-jit` and
+`runsecure-scope-<scope>` ownership labels where requested.
+
+On controller restart, recovery searches only enrolled namespaces and validates
+scope/repository/namespace ownership before cleanup, deregistering exact GitHub
+runners before deleting owning Secrets. There is one active replica with
+`Recreate`; no leader election or HA is provided. Removing or renaming an enrolled
+namespace requires draining its work first and retaining access until cleanup is
+confirmed. GitHub registration cleanup and Kubernetes object cleanup are both
+required before capacity is considered recovered.
 
 ### Values reference
 
@@ -203,7 +298,7 @@ image:
 | `scope.globalMaxRunners` | `5` | Ceiling on concurrent runner Pods across all repos in the scope. |
 | `scope.pollIntervalSeconds` | `15` | How often the orchestrator polls GitHub for queued jobs. Minimum 5. |
 | `scope.securityProfile` | `strict` | `strict` \| `standard` \| `permissive`. Controls per-project override permissions. |
-| `scope.repos` | `[]` | List of `{repo: owner/repo, maxConcurrent: N}` entries. |
+| `scope.repos` | `[]` | Legacy `{repo, maxConcurrent}` or shared `{repo, namespace, maxConcurrent, runnerConfig, runnerImage?, kubernetes?}` entries. |
 | `auth.type` | `pat` | `pat` or `github_app`. |
 | `auth.pat.existingSecretName` | `""` | Name of a pre-existing Secret with key `pat`. |
 | `auth.app.appId` | `""` | GitHub App ID (string). |
@@ -230,8 +325,8 @@ The chart creates:
 - **Namespace** `runsecure-<scope>` with PSS Restricted labels.
 - **ServiceAccount** for the orchestrator (namespace-scoped; no ClusterRole).
 - **Role + RoleBinding** — least-privilege: `pods`, `services`, `secrets`,
-  `networkpolicies` verbs `create/get/list/watch/delete` in the scope
-  namespace only.
+  `networkpolicies` verbs `create/get/list/watch/delete` in each enrolled
+  execution namespace (legacy mode: scope namespace only).
 - **Default-deny NetworkPolicy** — denies all ingress and egress to every
   Pod in the namespace; two allow policies carve out only what the
   orchestrator needs (kube-apiserver, kube-dns, external HTTPS for GitHub).
@@ -277,8 +372,8 @@ For each CI job the orchestrator spawns:
 - **Runner Pod** — the hardened GitHub Actions runner. `HTTP_PROXY` is set to
   the proxy Service DNS name; apart from exact cluster DNS Service `/32s` and
   selected DNS Pods, the runner has no path other than its own proxy. CPU and
-  memory requests equal the limits from `runner.yml`, and the memory-backed
-  `/tmp` volume is capped at 512 MiB.
+  memory requests equal the approved configuration limits; ephemeral storage
+  is bounded and the memory-backed `/tmp` volume is capped at 512 MiB.
 
 All per-spawn Pods run under PSS Restricted with `runAsUser: 1001`,
 `cap_drop: ALL`, `seccompProfile: RuntimeDefault`, no host namespaces, and
@@ -304,14 +399,17 @@ the orchestrator pins the runner Pod's `command` to that path). See the
 
 ## 6. Pin image digests
 
-The chart ships placeholder digests (`sha256:000...`). Replace them with the
-real 2.1.0 digests before deploying to a non-test cluster:
+The chart retains digest-pinned legacy 2.1.10 images. Shared mode requires
+explicit 2.2+ release-manifest values; override controller, proxy and terminal
+runner digests together before installing. The zero digests earlier in this
+guide are placeholders and cannot run. Resolve the intended approved release
+manifest instead of assuming the chart's `appVersion` replaces its image pins:
 
 ```sh
 # Fetch digests for each image
 for img in orchestrator proxy socket-proxy; do
   docker buildx imagetools inspect \
-    ghcr.io/andend-collective/runsecure/${img}:2.1.0 \
+    ghcr.io/andend-collective/runsecure/${img}:2.2.0 \
     --format '{{.Manifest.Digest}}'
 done
 ```
@@ -329,13 +427,14 @@ Digest takes precedence over tag in the chart's pod spec.
 
 ---
 
-## 7. How runner.yml is fetched
+## 7. How runner policy is loaded
 
-On the Kubernetes backend, the orchestrator fetches each repo's
+Shared mode loads approved `runnerConfig` from the mounted scope ConfigMap and
+never fetches repository policy. In legacy single-namespace Kubernetes mode, the orchestrator fetches each repo's
 `.github/runner.yml` from the GitHub API (using the authenticated credential)
 rather than reading it from a bind-mounted project directory. The `project_dir`
 field in the scope config is not used on the Kubernetes backend; only the
-`repo` field is required.
+`repo` and `max_concurrent` fields are required.
 
 The orchestrator caches the `runner.yml` ETag per repo to avoid redundant API
 calls on every poll tick. The rendered egress configs (Squid, HAProxy, optional
@@ -345,8 +444,11 @@ dnsmasq) are written into the per-spawn Secret and mounted into the proxy Pod.
 
 ## 8. TLS (optional)
 
-The optional mTLS mode secures the orchestrator→socket-proxy hop with TLS 1.3,
-`RequireAndVerifyClientCert`. Enable it in your values:
+The Kubernetes backend talks directly to the Kubernetes API using its normal
+TLS and ServiceAccount credentials. It has no Docker socket-proxy hop. The
+optional certificate resources remain available for compatibility; enabling
+`tls.enabled` does not add a separate runner or controller mTLS channel. The
+socket-proxy TLS 1.3 feature applies to Compose deployments.
 
 ```yaml
 tls:
@@ -386,7 +488,8 @@ curl -sf http://127.0.0.1:8081/metrics | grep in_flight
 # runsecure_orchestrator_in_flight_runners{...} 0
 ```
 
-Trigger a spawn by pushing a workflow that targets labels from `runner.yml`.
+Trigger a spawn with a workflow targeting the approved labels (`runnerConfig`
+in shared mode, `runner.yml` in legacy mode).
 Watch the orchestrator logs for the spawn sequence:
 
 ```sh
@@ -444,7 +547,7 @@ harness exits 0 (SKIP) rather than failing.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Orchestrator exits immediately | Missing or wrong Secret name for auth | Check `kubectl -n runsecure-<scope> get secret`; verify the key name (`pat` or `private-key`). |
-| `auth: private key file mode must be 0400` | Secret was created with wrong permissions | Re-create the Secret; the chart mounts it read-only with mode 0400. |
+| Auth file mode error | Incorrect Secret projection permissions | Kubernetes requires 0440 with fsGroup readability; Compose requires 0400. |
 | No pods spawned; many `auth.degraded` events | PAT/App lacks Administration:RW for a repo | Re-issue with correct permissions. |
 | Runner Pod stuck Pending | PSS admission rejecting the Pod | Check `kubectl describe pod <name> -n runsecure-<scope>` for `violates PodSecurity`; ensure the image runs as UID 1001 with no capabilities. |
 | Runner cannot reach proxy | NetworkPolicy not enforced by CNI | Verify the cluster's CNI enforces NetworkPolicy (kindnet/flannel do not). |
@@ -455,8 +558,10 @@ harness exits 0 (SKIP) rather than failing.
 
 ## 12. Security model (Kubernetes backend)
 
-The Kubernetes backend enforces the same defense layers as the Compose
-backend plus k8s-specific controls. Each claim is verified by
+The Kubernetes backend uses runtime-default seccomp and its own resource and
+network controls. The controller NetworkPolicy permits exact API/DNS peers and
+external IPv4 TCP80/443; `orch_egress.allow_domains` is not domain enforcement on the
+controller. Runner proxy domain policy is separate. Controls are exercised by
 `tests/integration/k8s/run-k8s-tests.sh` on Calico:
 
 | Claim | Mechanism | Verified by |
@@ -470,6 +575,6 @@ backend plus k8s-specific controls. Each claim is verified by
 | ProxyIngressNetworkPolicy is load-bearing | Without it, the namespace default-deny blocks runner→proxy 3128/TCP even when the runner's egress rule matches; this was a real bug during development | Code comment in `kube/objects.go:ProxyIngressNetworkPolicy` |
 | NetworkPolicy enforcement requires an enforcing CNI | kindnet/flannel ignore NetworkPolicy; Calico/Cilium enforce it | `kind-calico.yaml` (disableDefaultCNI=true; Calico installed) |
 | GitHub App least-privilege tokens | Installation access tokens scoped to selected repos; auto-rotate; no user identity | `infra/orchestrator/internal/auth/githubapp.go` |
-| Optional mTLS on socket-proxy hop | TLS 1.3, `RequireAndVerifyClientCert`; cert-manager `Certificate` when `tls.enabled: true` | `infra/socket-proxy/internal/config/config.go:BuildTLSConfig` |
+| Kubernetes API TLS | In-cluster API client uses ServiceAccount identity; Kubernetes mode has no Docker socket-proxy hop | `internal/kube/client.go:NewInCluster` |
 
 For the full threat model and claim catalog, see [SECURITY.md](./SECURITY.md).

@@ -654,3 +654,21 @@ func makePATForQueue(t *testing.T) string {
 	require.NoError(t, os.WriteFile(path, []byte("p"), 0o400))
 	return path
 }
+
+func TestEligibleQueuedJobsGeneratedLabelsAndCompatibility(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 1}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+			{"id": 1, "status": "queued", "labels": []string{"SELF-HOSTED", "container", "runsecure-jit", "runsecure-scope-shared"}},
+			{"id": 2, "status": "queued", "labels": []string{"self-hosted", "container", "gpu"}},
+			{"id": 3, "status": "queued", "labels": []string{"self-hosted"}},
+		}})
+	})
+	demand, err := c.EligibleQueuedJobs(context.Background(), "o/r", []string{"self-hosted", "container"}, []string{"self-hosted", "container", "runsecure-jit", "runsecure-scope-shared"})
+	require.NoError(t, err)
+	require.Len(t, demand.Jobs, 1)
+	require.Equal(t, int64(1), demand.Jobs[0].ID)
+}

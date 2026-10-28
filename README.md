@@ -49,7 +49,7 @@ Each CI job runs in a fresh container that:
 | **Non-root** | UID 1001, root account locked, shell set to nologin |
 | **No capabilities** | `cap_drop: ALL` (only `NET_BIND_SERVICE` on the proxy) |
 | **No privilege escalation** | `no-new-privileges:true`, all setuid bits stripped |
-| **Restricted syscalls** | Custom seccomp profile blocks `ptrace`, `mount`, `bpf`, `keyctl`, `swapon`, etc. |
+| **Restricted syscalls** | Docker/runtime-default seccomp on the orchestrator paths; Kubernetes uses `RuntimeDefault`. Custom orchestrator profile overrides are rejected. |
 | **Read-only system paths** | `/etc` is `chmod 555`; `/etc/passwd` and `/etc/group` are `444` |
 | **No package manager** | `apt`/`dpkg` executables and mutable state removed; only read-only dpkg inventory remains for Syft/Grype |
 | **No network recon tools** | `ping`, `nc`, `ssh`, `wget` removed |
@@ -657,7 +657,30 @@ entrypoint reads it from a tmpfs file and removes the file after
 reading. The orchestrator-side switch to file-mode is tracked as a
 follow-up; see [SECURITY.md §14](./SECURITY.md#known-limitations).
 
-### Concurrency: one orchestrator per repo
+### Shared Kubernetes controller
+
+One Kubernetes controller can serve multiple explicitly enrolled repositories,
+each in its own execution namespace. The existing scheduler keeps the global
+and per-repository concurrency caps. Idle project namespaces have zero job Pods;
+the controller remains running. Cluster node autoscaling is external.
+
+Configure a unique `scope.repos[].namespace` and approved inline `runnerConfig`
+for every shared project. Helm precreates Restricted namespaces, default-deny
+policies and namespace-scoped Roles bound to one management ServiceAccount.
+Project policy is loaded at controller startup without a GitHub Contents API
+request; jobs cannot select namespaces or relax Pod hardening. Both runner and
+proxy receive project architecture/placement and CPU/memory/storage bounds.
+Credentials stay in the management namespace; job Pods have no mounted service
+account token. See [the shared installation example](install-kubernetes.md#shared-controller-with-separate-project-namespaces).
+
+This topology has one active replica with `Recreate` and no leader election.
+Cold-start includes polling, GitHub registration, scheduling and image pulls;
+external node scaling may add further latency. Recovery retains exact
+scope/repository/namespace identity and touches only enrolled namespaces.
+The controller itself has external IPv4 HTTP(S) egress; its configured domain list is
+not enforced by the chart. Runner egress uses the per-spawn proxy allow-list.
+
+### Concurrency: standalone run.sh per repo
 
 The orchestrator acquires a per-repo lockfile at `${TMPDIR:-/tmp}/runsecure-<repo-slug>.lock`
 on startup. A second invocation against the same repo fails fast with a
@@ -717,17 +740,18 @@ The persistent orchestrator supports two deployment backends, selected by
 | **Kubernetes backend** | `backend: kube` | [`install-kubernetes.md`](install-kubernetes.md) | Existing k8s cluster with a NetworkPolicy-enforcing CNI (Calico, Cilium). Requires Helm. |
 
 Both backends spawn hardened ephemeral runner containers (or Pods) and
-enforce the same egress allow-path from `runner.yml`. They differ in the
+enforce a per-spawn proxy allow-path. Shared Kubernetes uses approved inline
+configuration; Compose and legacy Kubernetes use `runner.yml`. They differ in the
 spawning primitive (Docker container vs. Kubernetes Pod), the secrets
 delivery mechanism (named volume vs. k8s Secret), and the network
 isolation layer (Docker internal network vs. NetworkPolicy + per-spawn
 Service).
 
-2.1.0 additions available on both backends: **GitHub App authentication**
-(alternative to PAT — least-privilege installation tokens, no user
-identity) and **optional mTLS** on the orchestrator→socket-proxy hop
-(TLS 1.3, `RequireAndVerifyClientCert`, cert-manager integration on the
-Kubernetes backend via the chart).
+**GitHub App authentication** is available on both backends (installation-scoped,
+short-lived tokens). Compose additionally supports optional TLS 1.3 mTLS on the
+Docker socket-proxy hop. Kubernetes uses its API TLS directly and has no Docker
+socket-proxy dependency. Shared mode requires explicit 2.2+ release-manifest image
+pins; the bundled legacy controller digest is rejected.
 
 ---
 
