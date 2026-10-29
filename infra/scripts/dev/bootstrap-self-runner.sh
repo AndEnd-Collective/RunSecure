@@ -8,7 +8,7 @@
 #
 # When to use:
 #   You opened a PR and the `lints-on-self` check is pending. That check
-#   targets the [self-hosted, Linux, ARM64, container] label set, which
+#   targets the [self-hosted, Linux, ARM64, container, runsecure-dogfood] label set, which
 #   needs a RunSecure runner online. Run this once to drain the queue,
 #   it'll exit after MAX_JOBS jobs.
 #

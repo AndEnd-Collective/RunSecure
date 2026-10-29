@@ -40,8 +40,9 @@ permissions:
 
 jobs:
   lints-on-self:
-    # If you change these labels, also change them in .github/runner.yml.
-    runs-on: [self-hosted, Linux, ARM64, container]
+    # Keep these labels aligned with .github/runner.yml. The dedicated label
+    # excludes generic terminal runners that lack self-CI's composed packages.
+    runs-on: [self-hosted, Linux, ARM64, container, runsecure-dogfood]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
