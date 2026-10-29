@@ -227,7 +227,10 @@ fi
 
 # Create a deterministic hash of the config to tag the image
 # Include RunSecure version so different releases don't collide
-CONFIG_HASH=$(echo "${RUNSECURE_VERSION}|${BUILD_SOURCE_ID}|${RUNTIME}|${TOOLS}|${APT_PACKAGES}|${HARDENING_REMOVE}|${HARDENING_STUB}" | sha256sum | cut -c1-12)
+# Include the composer itself so a corrected finalization recipe cannot reuse
+# a cached project image produced by older composer code.
+COMPOSER_ID=$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)
+CONFIG_HASH=$(echo "${COMPOSER_ID}|${RUNSECURE_VERSION}|${BUILD_SOURCE_ID}|${RUNTIME}|${TOOLS}|${APT_PACKAGES}|${HARDENING_REMOVE}|${HARDENING_STUB}" | sha256sum | cut -c1-12)
 PROJECT_IMAGE="runner-project:${CONFIG_HASH}"
 
 # Check if image already exists (skip rebuild unless --force)
@@ -251,6 +254,10 @@ cat > "$DOCKERFILE" <<HEADER
 FROM ${LANG_BUILD_IMAGE}
 
 USER root
+# dpkg maintainer scripts need root-only helpers such as ldconfig/start-stop-daemon.
+# Preserve the inherited language PATH (including Cargo) and restore it below.
+ARG RUNSECURE_RUNTIME_PATH="\${PATH}"
+ENV PATH="/usr/local/sbin:/usr/sbin:/sbin:\${RUNSECURE_RUNTIME_PATH}"
 HEADER
 
 # Add extra apt packages if specified
@@ -319,6 +326,13 @@ RUN /opt/runsecure/composition/finalize-hardening.sh \
 # consumed during finalize-hardening only.
 ENV RUNSECURE_HARDENING_REMOVE=""
 ENV RUNSECURE_HARDENING_STUB=""
+ENV PATH="\${RUNSECURE_RUNTIME_PATH}"
+
+# The builder's composition metadata no longer describes this finalized image.
+LABEL org.opencontainers.image.title="RunSecure Project Runtime"
+LABEL org.opencontainers.image.description="Hardened terminal GitHub Actions runner with project-requested packages and tools. One job per container, then destroyed."
+LABEL io.runsecure.image-role="runtime"
+LABEL security.hardening="full"
 
 USER runner
 WORKDIR /home/runner

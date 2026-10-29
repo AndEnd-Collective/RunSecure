@@ -52,7 +52,7 @@ Each CI job runs in a fresh container that:
 | **Restricted syscalls** | Docker/runtime-default seccomp on the orchestrator paths; Kubernetes uses `RuntimeDefault`. Custom orchestrator profile overrides are rejected. |
 | **Read-only system paths** | `/etc` is `chmod 555`; `/etc/passwd` and `/etc/group` are `444` |
 | **No package manager** | `apt`/`dpkg` executables and mutable state removed; only read-only dpkg inventory remains for Syft/Grype |
-| **No network recon tools** | `ping`, `nc`, `ssh`, `wget` removed |
+| **Minimal default tools** | Default images omit `ping`, `nc`, `ssh`, and `wget`; project `apt:` additions are explicit opt-ins |
 | **Egress allowlist** | Network goes through Squid (HTTP/HTTPS) + HAProxy (raw TCP) + dnsmasq (DNS). Anything not on your allowlist is blocked. |
 | **Cloud-metadata blocked** | `169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254` all refused |
 | **PID-1 reaping** | `init: true` ensures zombie processes don't accumulate |
@@ -252,6 +252,11 @@ terminal language image identifies the exact immutable `*-build` digest that
 produced it. `compose-image.sh` pulls that digest and runs the recipes and
 finalizer embedded in that release. A missing label, mismatched package, or
 failed digest pull is fatal; it never substitutes the current checkout.
+
+For native ZIP or SSH-key fixtures, use the existing
+`apt: [zip, openssh-client]` composition path. See
+[the fixture tools guide](docs/fixture-tools.md) for official release inputs,
+workspace temporary files, scanning, digest pins, and rollout verification.
 
 Validate any `runner.yml` against the schema:
 
