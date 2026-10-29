@@ -1,6 +1,6 @@
 # RunSecure on private EKS with Bottlerocket
 
-Illustrative deployment pathway, checked **2026-10-29 04:06 UTC** against the sources
+Illustrative deployment pathway, checked **2026-10-29 03:35–04:04 UTC** against the sources
 linked below. This is not a commissioned cluster, a production certification, or
 a claim of a SLSA level. No Terraform apply or EKS deployment accompanied this
 example. Start with the [Terraform foundation](../examples/eks-bottlerocket/),
