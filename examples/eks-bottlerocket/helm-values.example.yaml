@@ -1,0 +1,85 @@
+# Renderable ILLUSTRATION, not a deployable account configuration.
+# Replace the example ECR account/repositories AND independently read back digests.
+# These are the accepted RunSecure 2.2.1 manifest digests; mirror without mutation.
+# Set real App IDs, API/endpoint peers, AZ-local DNS and policy prerequisites.
+# Empty enrollment is intentional until target-cluster acceptance succeeds.
+# Render-only: the controller rejects an empty scope; do not install as-is.
+replicaCount: 1
+terminationGracePeriodSeconds: 90
+scope:
+  name: eks
+  backend: kube
+  globalMaxRunners: 2
+  pollIntervalSeconds: 15
+  securityProfile: strict
+  allowProjectOverrides: []
+  orchEgress:
+    allowDomains: [api.github.com]
+  repos: []
+auth:
+  type: github_app
+  app:
+    appId: "1"          # Illustrative only; replace with the existing reviewed App.
+    installationId: "1"
+    privateKeySecretName: runsecure-app-key
+nodeSelector:
+  runsecure.io/pool: management
+kubernetesNetwork:
+  # Service addresses match this Terraform's service CIDR. Replace/add exact
+  # private API endpoint addresses and the qualified AZ-local DNS peers.
+  apiServerPeers:
+    - {cidr: "172.20.0.1/32", port: 443}
+  dnsServiceCIDRs: ["172.20.0.10/32"]
+  dnsNamespace: kube-system
+  dnsPodLabel: {key: k8s-app, value: kube-dns}
+tls:
+  enabled: false # Kubernetes has no Docker socket-proxy TLS hop.
+image:
+  orchestrator:
+    repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/orchestrator
+    tag: "2.2.1"
+    digest: "sha256:a7e18269db81e856101b34dda87392ca0e6a7b6578f586872338c34d613e1800"
+  proxy:
+    repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/proxy
+    tag: "2.2.1"
+    digest: "sha256:00b80bf41e8ad5e5254471afaaee3efc8ed831a16de321102dfd856340d1450a"
+  socketProxy:
+    repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/socket-proxy
+    tag: "2.2.1"
+    digest: "sha256:78fa59f75b67bea824cff5b6f24110998f5e6100a8690b3ea4ea21880f9c2743"
+  runners:
+    default:
+      repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/node
+      tag: "2.2.1-24"
+      digest: "sha256:42b801e5931cb25de7d63160d1f0a481dd0b1d4861e73680a57193677c75990a"
+    node:
+      repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/node
+      tag: "2.2.1-24"
+      digest: "sha256:42b801e5931cb25de7d63160d1f0a481dd0b1d4861e73680a57193677c75990a"
+    python:
+      repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/python
+      tag: "2.2.1-3.12"
+      digest: "sha256:157c8b2598080d9f19da50dcb7ba5b98557397cd08c9680ba77cfc0c736f4136"
+    rust:
+      repository: 000000000000.dkr.ecr.us-east-2.amazonaws.com/runsecure/rust
+      tag: "2.2.1-stable"
+      digest: "sha256:339001ee9ab03d0f093f6f01e4ea0d339a9d942f8210f2cf3ebcae940c0c20fc"
+
+# AFTER acceptance, merge an explicitly reviewed enrollment into scope.repos:
+# - repo: example/your-repository
+#   namespace: ci-example
+#   maxConcurrent: 1
+#   runnerConfig:
+#     runtime: node:24
+#     labels: [self-hosted, Linux, ARM64, container, runsecure-eks]
+#     resources: {memory: 2g, cpus: 2, pids: 256}
+#     httpEgress: [github.com, api.github.com, codeload.github.com]
+#     orchestrator: {timeoutSeconds: 3600}
+#   kubernetes:
+#     nodeSelector: {runsecure.io/pool: execution}
+#     tolerations:
+#       - {key: dedicated, operator: Equal, value: runsecure-execution, effect: NoSchedule}
+#     ephemeralStorage: 10Gi
+#     proxyResources: {cpu: 250m, memory: 256Mi, ephemeralStorage: 1Gi}
+# The finite outer firewall inventory must also satisfy actual job transport,
+# including approved exact service/storage hosts. This comment does not enroll.

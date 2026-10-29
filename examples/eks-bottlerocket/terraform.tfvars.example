@@ -1,0 +1,19 @@
+# Illustrative placeholders; DO NOT rename and apply without qualification.
+account_id                    = "REPLACE_WITH_REVIEWED_ACCOUNT"
+cluster_role_arn              = "REPLACE_WITH_EXISTING_EKS_SERVICE_ROLE_ARN"
+cni_role_arn                  = "REPLACE_WITH_CNI_ONLY_POD_IDENTITY_ROLE_ARN"
+operator_role_arn             = "REPLACE_WITH_EXISTING_PRIVATE_OPERATOR_ROLE_ARN"
+operator_cidrs                = ["REPLACE_WITH_PRIVATE_VPN_CIDR"]
+kubernetes_version            = "REPLACE_WITH_QUALIFIED_MINOR"
+bottlerocket_release_version  = "REPLACE_WITH_EXACT_QUALIFIED_RELEASE"
+pull_repository_arns          = ["REPLACE_WITH_EXACT_PLATFORM_AND_RUNSECURE_REPOSITORY_ARNS"]
+addon_versions = {
+  vpc_cni            = "REPLACE_WITH_COMPATIBLE_PIN_AT_LEAST_1_21"
+  pod_identity_agent = "REPLACE_WITH_COMPATIBLE_PIN"
+  kube_proxy         = "REPLACE_WITH_COMPATIBLE_PIN"
+  coredns            = "REPLACE_WITH_COMPATIBLE_PIN"
+}
+# Empty keeps execution internet quarantined. Review exact function-dependent
+# GitHub/CNAME/storage hosts before adding any. No suffix-wide allow exceptions.
+github_execution_domains        = []
+additional_platform_dns_domains = []
