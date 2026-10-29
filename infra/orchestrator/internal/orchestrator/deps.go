@@ -77,6 +77,7 @@ type EgressGenerator interface {
 // its runtime. Spawn workers consume this; production caches it per repo
 // keyed on file mtime.
 type RunnerYMLSnapshot struct {
+	Kubernetes  backend.KubePodSettings
 	YML         *runneryml.Runner
 	ImageDigest string // resolved digest for the runner image
 }

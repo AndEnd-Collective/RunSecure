@@ -19,22 +19,20 @@ FROM ${BASE_REF} AS node-build
 
 ARG NODE_VERSION=24
 # Keep the workflow-facing npm independent from the version bundled by
-# NodeSource. npm 12.2.0 is latest stable and checksum-pinned.
+# NodeSource. npm 12.2.1 is latest stable and checksum-pinned.
 #
-# This can be 12.x while images/base.Dockerfile is held at 11.21.0 because
+# This can be 12.x while images/base.Dockerfile is held at 11.21.1 because
 # this image runs NodeSource Node 24, which satisfies npm 12's
 # `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0`. The base image installs
-# npm into the runner's externals/node20 (Node 20.20.2), which does not.
-ARG NPM_VERSION=12.2.0
-ARG NPM_SHA256=6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677
-# npm bundles undici and brace-expansion versions that are behind their
-# security fixes in every current release, including 12.2.0 — see the longer
-# note in images/base.Dockerfile. Both are HIGH with fixes available, so the
-# Grype gate blocks the publish until they are replaced. Same checksum-pinned
-# overwrite, same versions as the base image, so the two npm installations do
-# not drift apart.
-ARG UNDICI_VERSION=6.29.0
-ARG UNDICI_SHA256=b7d888586625c1508c0e17463bac86aecd22ed6053bc945372aed8cae14406fc
+# npm into the runner's externals/node20, which does not.
+ARG NPM_VERSION=12.2.1
+ARG NPM_SHA256=228bd64aaef23270dbdbd2cf3d5ef5c467602ef38c4066246cef1984adab9a67
+# npm 12.2.1 still bundles undici 6.29.0, behind its HIGH security fixes.
+# Retain the same checksum-pinned dependency overwrite as the base image,
+# including the already-fixed brace-expansion pin, so the npm payloads stay
+# aligned. See images/base.Dockerfile for the advisories and removal trigger.
+ARG UNDICI_VERSION=6.29.1
+ARG UNDICI_SHA256=29c4b8e0b2d86cb8795571c1959012ce057a14ecfd34858335f47c31e770a04f
 ARG BRACE_EXPANSION_VERSION=5.0.12
 ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
 

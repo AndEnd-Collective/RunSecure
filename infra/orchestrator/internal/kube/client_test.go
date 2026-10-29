@@ -1401,3 +1401,64 @@ func TestListSpawns_RejectsConflictingRepositoryLabels(t *testing.T) {
 
 	require.ErrorContains(t, err, "conflicting resources for spawn ID")
 }
+
+func TestWaitRunnerScopedRejectsConflictingOwner(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "rs-runner-one", Namespace: "project-one", Labels: map[string]string{
+			LabelScope: "controller", LabelSpawnID: "one", LabelRepo: "owner_one", LabelRole: RoleRunner,
+		}, OwnerReferences: []metav1.OwnerReference{{Kind: "Secret", Name: "rs-secret-other"}},
+	}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+	phase, timedOut := NewClient(fake.NewSimpleClientset(pod)).WaitRunnerScoped(context.Background(), "controller", "project-one", "rs-runner-one", "one", "owner_one", time.Second)
+	require.Empty(t, phase)
+	require.False(t, timedOut)
+}
+
+func TestScopedOperationsRejectInvalidIdentityWithoutAPIAccess(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	c := NewClient(cs)
+	ctx := context.Background()
+	for _, tuple := range [][2]string{{"", "project-one"}, {"controller", ""}, {"invalid scope", "project-one"}, {"controller", "INVALID"}} {
+		require.Error(t, c.EnsureDefaultDenyPolicyInNamespace(ctx, tuple[0], tuple[1]))
+		_, err := c.ListSpawnsInNamespace(ctx, tuple[0], tuple[1])
+		require.Error(t, err)
+		require.Error(t, c.DeleteSpawnScoped(ctx, tuple[0], tuple[1], "rs-secret-one", "one", "owner_one"))
+		phase, timedOut := c.WaitRunnerScoped(ctx, tuple[0], tuple[1], "rs-runner-one", "one", "owner_one", time.Second)
+		require.Empty(t, phase)
+		require.False(t, timedOut)
+	}
+	for _, tuple := range [][3]string{{"", "rs-secret-one", "owner_one"}, {"invalid/id", "rs-secret-invalid/id", "owner_one"}, {"one", "rs-secret-one", "invalid/repo"}, {"one", "wrong", "owner_one"}} {
+		require.Error(t, c.DeleteSpawnScoped(ctx, "controller", "project-one", tuple[1], tuple[0], tuple[2]))
+	}
+	require.Empty(t, cs.Actions())
+}
+
+func TestWaitRunnerScopedChecksInitialWatchAndRelistIdentity(t *testing.T) {
+	for _, mode := range []string{"initial", "watch", "relist"} {
+		t.Run(mode, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "rs-runner-one", Namespace: "project-one", Labels: map[string]string{
+				LabelScope: "controller", LabelSpawnID: "one", LabelRepo: "owner_one", LabelRole: RoleRunner,
+			}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			if mode == "initial" {
+				pod.Labels[LabelRepo] = "owner_two"
+				pod.Status.Phase = corev1.PodSucceeded
+			}
+			cs := fake.NewSimpleClientset(pod)
+			cs.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+				foreign := pod.DeepCopy()
+				foreign.Labels[LabelRepo] = "owner_two"
+				foreign.Status.Phase = corev1.PodSucceeded
+				fw := watch.NewRaceFreeFake()
+				if mode == "relist" {
+					require.NoError(t, cs.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), foreign, "project-one"))
+					fw.Stop()
+				} else {
+					fw.Modify(foreign)
+				}
+				return true, fw, nil
+			})
+			phase, timedOut := NewClient(cs).WaitRunnerScoped(context.Background(), "controller", "project-one", "rs-runner-one", "one", "owner_one", time.Second)
+			require.Empty(t, phase)
+			require.False(t, timedOut)
+		})
+	}
+}

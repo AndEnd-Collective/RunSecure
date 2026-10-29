@@ -6,7 +6,8 @@ Scope     : {{ .Values.scope.name }}
 Backend   : {{ .Values.scope.backend }}
 Auth      : {{ .Values.auth.type }}
 {{- if .Values.tls.enabled }}
-TLS       : enabled ({{ if .Values.tls.selfSigned }}self-signed{{ else }}issuer: {{ .Values.tls.issuerName }}{{ end }})
+TLS       : certificate resources enabled; Kubernetes backend uses Kubernetes API TLS
+            (no Docker socket-proxy hop)
 {{- else }}
 TLS       : disabled
 {{- end }}
@@ -14,7 +15,10 @@ TLS       : disabled
 Security posture:
   - Pod Security Standards: Restricted (enforced on namespace)
   - RBAC: namespace-scoped Role only (no ClusterRole)
-  - NetworkPolicy: default-deny + explicit orchestrator egress allow
+  - NetworkPolicy: default-deny; exact API/DNS peers and external IPv4 TCP80/443
+    Controller orch_egress domains are not enforced by this chart.
+  - Shared projects: per-project namespace Roles, one controller ServiceAccount
+  - One Recreate controller; zero idle job Pods; node scaling is external
   - Secrets mounted root:fsGroup at mode 0440 (no world access)
 
 To verify the orchestrator is running:
@@ -24,7 +28,8 @@ To view logs:
   kubectl -n {{ include "runsecure-orchestrator.namespace" . }} logs \
     -l app.kubernetes.io/name={{ include "runsecure-orchestrator.name" . }}
 
-IMPORTANT: In production, set image digests to real SHA256 values:
+Use exact image digests from the approved release manifest. Shared mode requires
+a 2.2+ controller; the bundled legacy 2.1.10 controller digest is rejected:
   helm upgrade {{ .Release.Name }} charts/runsecure-orchestrator \
     --set image.orchestrator.digest=sha256:<real-digest> \
     --set image.proxy.digest=sha256:<real-digest> \

@@ -6,8 +6,8 @@ additional allow policies carve out only what the orchestrator actually needs:
 
 1. default-deny-all    — catch-all deny (this file)
 2. orchestrator-egress — allows orchestrator → kube-apiserver (configured TCP ports),
-                         cluster DNS (53/UDP+TCP), and orch_egress domains (any
-                         port, gated by the proxy at L7 via Squid).
+                         cluster DNS (53/UDP+TCP), and external IPv4 HTTP(S) (80/443).
+                         The controller does not traverse the runner proxy.
 
 Mirrors the pattern from infra/orchestrator/internal/kube/objects.go
 DefaultDenyNetworkPolicy().
@@ -32,8 +32,7 @@ spec:
 # Allow the orchestrator pod egress to:
 #   - kube-apiserver on exact operator-configured pre/post-DNAT CIDR/port pairs
 #   - exact cluster DNS Service /32s and DNS Pods (UDP+TCP 53)
-#   - External orchestrator egress domains (any port via 0.0.0.0/0 minus
-#     RFC1918; the Squid L7 allow-list is the authoritative control).
+#   - Public HTTP(S) on TCP80/443. NetworkPolicy does not enforce domains.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -76,9 +75,8 @@ spec:
           podSelector:
             matchLabels:
               {{ .Values.kubernetesNetwork.dnsPodLabel.key | quote }}: {{ .Values.kubernetesNetwork.dnsPodLabel.value | quote }}
-    # Orchestrator egress — reaches GitHub API and other allow-listed domains
-    # via the configured Squid proxy. The L7 allow-list is the primary control;
-    # this rule provides network-layer reachability for HTTPS (443/TCP).
+    # Controller external IPv4 HTTP(S). orch_egress.allow_domains is a configuration
+    # prerequisite; this chart does not enforce a domain allow-list.
     - ports:
         - protocol: TCP
           port: 443
@@ -91,3 +89,25 @@ spec:
               - 10.0.0.0/8
               - 172.16.0.0/12
               - 192.168.0.0/16
+              - 0.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+
+{{- range .Values.scope.repos }}
+{{- if .namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "runsecure-orchestrator.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}
+{{- end }}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,9 +43,36 @@ type OrchEgressBlock struct {
 }
 
 type RepoBlock struct {
-	Repo          string `yaml:"repo"`        // "owner/name"
-	ProjectDir    string `yaml:"project_dir"` // Compose-only (bind-mount)
-	MaxConcurrent int    `yaml:"max_concurrent"`
+	sharedSettingsDeclared bool
+	Namespace              string                  `yaml:"namespace,omitempty"`
+	RunnerConfig           *runneryml.Runner       `yaml:"runner_config,omitempty"`
+	RunnerImage            string                  `yaml:"runner_image,omitempty"`
+	Kubernetes             backend.KubePodSettings `yaml:"kubernetes,omitempty"`
+	Repo                   string                  `yaml:"repo"`        // "owner/name"
+	ProjectDir             string                  `yaml:"project_dir"` // Compose-only (bind-mount)
+	MaxConcurrent          int                     `yaml:"max_concurrent"`
+}
+
+// UnmarshalYAML retains shared-only declarations even when empty, so an
+// incomplete enrollment cannot silently select repository-controlled policy.
+func (r *RepoBlock) UnmarshalYAML(node *yaml.Node) error {
+	type plainRepo RepoBlock
+	var decoded plainRepo
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]yaml.Node
+	if err := node.Decode(&fields); err != nil {
+		return err
+	}
+	*r = RepoBlock(decoded)
+	for name := range fields {
+		switch name {
+		case "runner_config", "runner_image", "kubernetes":
+			r.sharedSettingsDeclared = true
+		}
+	}
+	return nil
 }
 
 // Load reads and parses a scope YAML. Does NOT validate semantically — see
@@ -64,4 +93,29 @@ func Load(path string) (*Scope, error) {
 		return nil, fmt.Errorf("config: %s: unsupported apiVersion %q (expected %s)", path, s.APIVersion, SupportedAPIVersion)
 	}
 	return &s, nil
+}
+
+// SharedKubernetes reports explicit enrollment or shared-only configuration
+// intent. Validation requires every such project to have a namespace.
+func (s *Scope) SharedKubernetes() bool {
+	for _, r := range s.Repos {
+		if r.Namespace != "" || r.sharedSettingsDeclared || r.RunnerConfig != nil || r.RunnerImage != "" ||
+			r.Kubernetes.NodeSelector != nil || r.Kubernetes.Tolerations != nil || r.Kubernetes.EphemeralStorage != "" ||
+			r.Kubernetes.ProxyResources != (backend.KubeProxyResources{}) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProjectNamespaces returns the operator-approved mapping for shared mode.
+func (s *Scope) ProjectNamespaces() map[string]string {
+	if !s.SharedKubernetes() {
+		return nil
+	}
+	out := make(map[string]string, len(s.Repos))
+	for _, r := range s.Repos {
+		out[r.Repo] = r.Namespace
+	}
+	return out
 }

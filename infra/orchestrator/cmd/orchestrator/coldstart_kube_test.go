@@ -7,8 +7,12 @@ import (
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
+	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 type startupFakeBackend struct {
@@ -159,5 +163,50 @@ func TestValidateRecoveredKubeHandlesRejectsDuplicateAndMalformed(t *testing.T) 
 	} {
 		_, err := validateRecoveredKubeHandles("scope", []string{"owner/repo"}, handles)
 		require.ErrorContains(t, err, "invalid ownership")
+	}
+}
+
+func TestCleanupRecoveredKubeProjectsWithRealBackend(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	mapping := map[string]string{"owner/one": "project-one", "owner/two": "project-two"}
+	for i, repo := range []string{"owner/one", "owner/two"} {
+		in := backend.SpawnInput{Scope: "scope", Repo: repo, Namespace: mapping[repo], SpawnID: []string{"one", "two"}[i]}
+		secret := kube.SpawnSecret(in, nil, nil, nil)
+		_, err := cs.CoreV1().Secrets(mapping[repo]).Create(ctx, secret, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	be, err := backendkube.NewForProjects(kube.NewClient(cs), "scope", mapping)
+	require.NoError(t, err)
+	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{
+		"owner/one": {ownedRecoveredRunner(1, "rs-one-runner", "scope")},
+		"owner/two": {ownedRecoveredRunner(2, "rs-two-runner", "scope")},
+	}}
+	cs.ClearActions()
+	require.NoError(t, cleanupRecoveredKubeSpawnsForProjects(ctx, "scope", mapping, be, gh))
+	require.Equal(t, []int64{1, 2}, gh.deletedIDs)
+	for _, action := range cs.Actions() {
+		require.Contains(t, []string{"project-one", "project-two"}, action.GetNamespace())
+	}
+	handles, err := be.Reconcile(ctx, "scope")
+	require.NoError(t, err)
+	require.Empty(t, handles)
+}
+
+func TestValidateRecoveredKubeProjectsRejectsForgedIdentity(t *testing.T) {
+	mapping := map[string]string{"owner/one": "project-one", "owner/two": "project-two"}
+	for _, key := range []string{"scope", "repo", "repo_label", "namespace", "secret", "runner_pod"} {
+		t.Run(key, func(t *testing.T) {
+			h := backend.Handle{Backend: "kube", SpawnID: "one", Refs: map[string]string{
+				"scope": "scope", "repo": "owner/one", "namespace": "project-one", "repo_label": "owner_one",
+				"secret": "rs-secret-one", "runner_pod": "rs-runner-one",
+			}}
+			h.Refs[key] = "forged"
+			be := &startupFakeBackend{name: "kube", handles: []backend.Handle{h}}
+			gh := &fakeColdStartGitHub{}
+			require.ErrorContains(t, cleanupRecoveredKubeSpawnsForProjects(context.Background(), "scope", mapping, be, gh), "invalid ownership")
+			require.Empty(t, be.tornDown)
+			require.Empty(t, gh.deletedIDs)
+		})
 	}
 }

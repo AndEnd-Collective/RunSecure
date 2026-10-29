@@ -98,7 +98,7 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 	// constructing a Docker client there made a valid Helm deployment fail
 	// before the in-cluster backend was selected.
 	be, dc, err := initializeBackend(
-		ctx, s, repoNames, gh, docker.NewClient, productionKubeCtor,
+		ctx, s, repoNames, gh, docker.NewClient, func() (backend.Backend, error) { return productionKubeCtorForScope(s) },
 	)
 	if err != nil {
 		return fmt.Errorf("orchestrator: backend init: %w", err)
@@ -488,6 +488,23 @@ func (p *productionDeps) RunnerYMLContext(
 		if r.Repo != repo {
 			continue
 		}
+
+		if p.scopeRef.SharedKubernetes() {
+			if r.Namespace == "" {
+				return nil, errors.New("shared Kubernetes requires explicit project namespace enrollment")
+			}
+			if r.RunnerConfig == nil {
+				return nil, errors.New("shared Kubernetes requires approved runner_config")
+			}
+			image := r.RunnerImage
+			if image == "" {
+				image = p.RunnerImageDigestFor(r.RunnerConfig.Runtime)
+			}
+			if err := validateImmutableImageRef("runner_image", image); err != nil {
+				return nil, err
+			}
+			return &orchestrator.RunnerYMLSnapshot{YML: r.RunnerConfig, ImageDigest: image, Kubernetes: r.Kubernetes}, nil
+		}
 		if p.scopeRef.Backend == "kube" {
 			snapshot, err := loadRunnerYMLFromAPI(ctx, p.gh, p.st, repo)
 			if errors.Is(err, errRunnerYMLNotModified) {
@@ -722,18 +739,10 @@ func (p *productionDeps) RunnerImageDigestFor(runtime string) string {
 	return os.Getenv("RUNSECURE_RUNNER_IMAGE_DEFAULT")
 }
 func (p *productionDeps) SeccompProfileHostPath(name string) string {
-	// Empty name → no seccomp profile applied (defense in depth on top of
-	// cap_drop:ALL + no-new-privileges, not load-bearing).
-	//
-	// When set, the path must be a JSON-encoded profile that dockerd can
-	// read at container-start time. Note: Docker's SecurityOpt API expects
-	// the JSON CONTENTS, not a file path — passing a path triggers
-	// "Decoding seccomp profile failed". A path-based wiring requires the
-	// orchestrator to read the file and inject the JSON inline, which
-	// requires bind-mounting the seccomp dir into the orchestrator. That
-	// integration is deferred; for now an explicit profile name is treated
-	// as a no-op until the bind-mount is wired (next: read the file in
-	// productionDeps and pass JSON inline).
+	// Empty selects Docker's default seccomp. Explicit legacy profile names
+	// remain visible to the socket-proxy, which rejects custom seccomp options.
+	// A host path was never valid Engine API inline seccomp JSON. Shared kube
+	// config rejects these overrides at startup and always uses RuntimeDefault.
 	if name == "" {
 		return ""
 	}
@@ -843,11 +852,15 @@ func nextSeq() int64 { return seq.Add(1) }
 // kube.NewInCluster() (requires in-cluster service-account credentials) and
 // wraps the resulting client in the kube backend.
 func productionKubeCtor() (backend.Backend, error) {
+	return productionKubeCtorForScope(&config.Scope{})
+}
+
+func productionKubeCtorForScope(s *config.Scope) (backend.Backend, error) {
 	c, err := kube.NewInCluster()
 	if err != nil {
 		return nil, fmt.Errorf("kube: in-cluster init: %w", err)
 	}
-	return backendkube.New(c), nil
+	return configureKubeBackend(c, s)
 }
 
 // selectBackend constructs the spawn backend indicated by scope.Backend.
@@ -867,4 +880,11 @@ func selectBackend(s *config.Scope, dc docker.Client, kubeCtor func() (backend.B
 		return nil, errors.New("compose backend requires a Docker client")
 	}
 	return compose.New(dc), nil
+}
+
+func configureKubeBackend(c *kube.Client, s *config.Scope) (backend.Backend, error) {
+	if s.SharedKubernetes() {
+		return backendkube.NewForProjects(c, s.Name, s.ProjectNamespaces())
+	}
+	return backendkube.New(c), nil
 }

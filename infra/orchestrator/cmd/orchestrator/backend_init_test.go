@@ -3,6 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	backendkube "github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend/kube"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
+	"k8s.io/client-go/kubernetes/fake"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
@@ -158,4 +166,151 @@ func TestSelectBackendComposeRejectsNilDocker(t *testing.T) {
 		return nil, errors.New("must not be called")
 	})
 	require.ErrorContains(t, err, "requires a Docker client")
+}
+
+func approvedStartupScope(t *testing.T) *config.Scope {
+	t.Helper()
+	pat := filepath.Join(t.TempDir(), "pat")
+	require.NoError(t, os.WriteFile(pat, []byte("fixture"), 0o440))
+	return &config.Scope{APIVersion: config.SupportedAPIVersion, Name: "shared", Backend: "kube", GlobalMaxRunners: 2, PollIntervalSeconds: 5, SecurityProfile: "strict", Auth: config.AuthBlock{Type: "pat", PATFile: pat}, OrchEgress: config.OrchEgressBlock{AllowDomains: []string{"api.github.com"}}, AllowProjectOverrides: []string{"allow_wildcards"}, Repos: []config.RepoBlock{{Repo: "acme/alpha", Namespace: "project-alpha", MaxConcurrent: 1, RunnerConfig: &runneryml.Runner{Runtime: "node:24", Labels: []string{"self-hosted", "Linux", "X64", "container"}, Resources: runneryml.Resources{Memory: "1g", CPUs: 1, PIDs: 256}}}}}
+}
+
+func TestInitializeSharedBackendRejectsInvalidPolicyBeforeExternalMutations(t *testing.T) {
+	proxyDNS := false
+	cases := []struct {
+		name     string
+		override any
+		ports    []string
+		dnsHost  *bool
+		http     []string
+		want     string
+	}{
+		{name: "Squid listener", ports: []string{"gateway.example.com:3128"}, want: "3128"},
+		{name: "dnsmasq listener", ports: []string{"gateway.example.com:53"}, dnsHost: &proxyDNS, want: "53"},
+		{name: "forbidden private HTTP literal", http: []string{"10.1.2.3"}, want: "literal IP"},
+		{name: "forbidden metadata TCP literal", ports: []string{"169.254.169.254:5432"}, want: "literal IP"},
+		{name: "malformed allowed override", override: 123, want: "security"},
+		{name: "zero TCP port", ports: []string{"db.example.com:0"}, want: "tcp_egress"},
+		{name: "overflow TCP port", ports: []string{"db.example.com:65536"}, want: "tcp_egress"},
+		{name: "reserved alias", ports: []string{"db.example.com:00443"}, want: "tcp_egress"},
+		{name: "duplicate alias", ports: []string{"a:5432", "b:05432"}, want: "tcp_egress"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidKubeImages(t)
+			s := approvedStartupScope(t)
+			s.Repos[0].RunnerConfig.TCPEgress = tc.ports
+			s.Repos[0].RunnerConfig.DNS.Host = tc.dnsHost
+			s.Repos[0].RunnerConfig.HTTPEgress = tc.http
+			if tc.override != nil {
+				s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": tc.override}
+			}
+			cs := fake.NewSimpleClientset()
+			gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{"acme/alpha": {ownedRecoveredRunner(42, "rs-recovered-runner", "shared")}}}
+			constructorCalls := 0
+			_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, func(string) (docker.Client, error) { t.Fatal("Docker initialized"); return nil, nil }, func() (backend.Backend, error) {
+				constructorCalls++
+				return backendkube.NewForProjects(kube.NewClient(cs), s.Name, s.ProjectNamespaces())
+			})
+			require.ErrorContains(t, err, tc.want)
+			require.Zero(t, constructorCalls, "reject approved policy before backend construction")
+			require.Empty(t, cs.Actions(), "no Kubernetes API operation")
+			require.Empty(t, gh.listedRepos, "no GitHub recovery API operation")
+			require.Empty(t, gh.deletedIDs, "no GitHub mutation")
+		})
+	}
+}
+
+func TestInitializeSharedBackendAcceptsValidEffectivePolicyAndTCP(t *testing.T) {
+	setValidKubeImages(t)
+	s := approvedStartupScope(t)
+	s.SecurityOverrides = map[string]any{"allow_imds": false, "allow_private_cidrs": []any{"10.0.0.0/8"}}
+	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": []any{"*.example.org"}, "allow_kube_api": "unpermitted and ignored"}
+	s.Repos[0].RunnerConfig.TCPEgress = []string{"db.example.com:5432", "cache.example.com:65535", "10.1.2.3:6379"}
+	s.Repos[0].RunnerConfig.HTTPEgress = []string{"10.2.3.4"}
+	cs := fake.NewSimpleClientset()
+	gh := &fakeColdStartGitHub{runners: map[string][]github.Runner{"acme/alpha": {ownedRecoveredRunner(42, "rs-recovered-runner", "shared")}}}
+	_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, nil, func() (backend.Backend, error) {
+		return backendkube.NewForProjects(kube.NewClient(cs), s.Name, s.ProjectNamespaces())
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, cs.Actions())
+	require.Equal(t, []int64{42}, gh.deletedIDs, "valid policy permits normal recovery")
+}
+
+func TestInitializeSharedBackendRevalidatesNormalizedSelectorBoundary(t *testing.T) {
+	for _, explicitMandatory := range []bool{false, true} {
+		for _, customCount := range []int{14, 15} {
+			t.Run(fmt.Sprintf("custom-%d-explicit-%t", customCount, explicitMandatory), func(t *testing.T) {
+				setValidKubeImages(t)
+				s := approvedStartupScope(t)
+				selectors := map[string]string{}
+				for i := 0; i < customCount; i++ {
+					selectors[fmt.Sprintf("custom-%d", i)] = "ci"
+				}
+				if explicitMandatory {
+					selectors["kubernetes.io/arch"] = "amd64"
+					selectors["kubernetes.io/os"] = "linux"
+				}
+				s.Repos[0].Kubernetes.NodeSelector = selectors
+				firstValidation := s.Validate()
+				cs := fake.NewSimpleClientset()
+				gh := &fakeColdStartGitHub{}
+				constructorCalls := 0
+				initialize := func() error {
+					_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, nil, func() (backend.Backend, error) {
+						constructorCalls++
+						return backendkube.NewForProjects(kube.NewClient(cs), s.Name, s.ProjectNamespaces())
+					})
+					return err
+				}
+				if customCount > 14 {
+					require.ErrorContains(t, firstValidation, "placement exceeds 16")
+					require.ErrorContains(t, initialize(), "placement exceeds 16")
+					require.Zero(t, constructorCalls)
+					require.Empty(t, cs.Actions())
+					require.Empty(t, gh.listedRepos)
+					require.Empty(t, gh.deletedIDs)
+					return
+				}
+				require.NoError(t, firstValidation)
+				require.Len(t, selectors, 16)
+				require.NoError(t, initialize(), "production initializes a previously validated boundary scope")
+				require.Equal(t, 1, constructorCalls)
+				require.NotEmpty(t, cs.Actions())
+				require.Equal(t, []string{"acme/alpha"}, gh.listedRepos)
+			})
+		}
+	}
+}
+
+func TestInitializeBackendRejectsSharedSettingsWithoutNamespacesBeforeAPIs(t *testing.T) {
+	for _, setting := range []string{"runner_config", "runner_image", "kubernetes"} {
+		t.Run(setting, func(t *testing.T) {
+			setValidKubeImages(t)
+			s := approvedStartupScope(t)
+			s.Repos[0].Namespace = ""
+			if setting != "runner_config" {
+				s.Repos[0].RunnerConfig = nil
+			}
+			if setting == "runner_image" {
+				s.Repos[0].RunnerImage = "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}
+			if setting == "kubernetes" {
+				s.Repos[0].Kubernetes.EphemeralStorage = "20Gi"
+			}
+			gh := &fakeColdStartGitHub{}
+			cs := fake.NewSimpleClientset()
+			calls := 0
+			_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, nil, func() (backend.Backend, error) {
+				calls++
+				return backendkube.New(kube.NewClient(cs)), nil
+			})
+			require.ErrorContains(t, err, "namespace")
+			require.Zero(t, calls)
+			require.Empty(t, cs.Actions())
+			require.Empty(t, gh.listedRepos)
+			require.Empty(t, gh.deletedIDs)
+		})
+	}
 }

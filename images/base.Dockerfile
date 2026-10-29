@@ -30,66 +30,63 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 # per-image Grype gate already catch a bad upstream build. Each pin records
 # why it is at the version it is at, so a bump is a one-line audit.
 #
-# RUNNER_VERSION 2.337.0 — latest stable. Checksums are the ones published
+# RUNNER_VERSION 2.338.2 — latest stable. Checksums are the ones published
 #   in the release body (`<!-- BEGIN SHA linux-x64 -->` / `linux-arm64`).
-ARG RUNNER_VERSION=2.337.0
-ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
-ARG RUNNER_SHA256_AMD64=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+ARG RUNNER_VERSION=2.338.2
+ARG RUNNER_SHA256_ARM64=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
+ARG RUNNER_SHA256_AMD64=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 # The runner tarball vendors npm under both of its private Node runtimes.
 # Refresh that payload from a checksum-pinned npm release so newly disclosed
 # vulnerabilities do not remain trapped behind the actions/runner release
 # cadence.
 #
-# This is deliberately npm 11.21.0 and NOT npm 12.x, which is the current
-# `latest`. runner 2.337.0 bundles node20=20.20.2 and node24=24.19.0, and npm
-# 12.2.0 declares `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0` — it does
+# This is deliberately npm 11.21.1 and NOT npm 12.x, which is the current
+# `latest`. runner 2.338.2 bundles both node20 and node24, and npm
+# 12.2.1 declares `engines.node: ^22.22.2 || ^24.15.0 || >=26.0.0` — it does
 # not support Node 20, so installing it into externals/node20 would ship a
 # broken npm to every action that still runs on the node20 handler. npm
-# 11.21.0 declares `^20.17.0 || >=22.9.0` and covers both runtimes.
+# 11.21.1 declares `^20.17.0 || >=22.9.0` and covers both runtimes.
 #
-# Nothing is given up by staying on 11.x here: 11.21.0 vendors exactly the
-# same versions of the CVE-tracked transitive deps as 12.2.0 does. The
+# Nothing is given up by staying on 11.x here: 11.21.1 vendors exactly the
+# same versions of the CVE-tracked transitive deps as 12.2.1 does. The
 # workflow-facing npm in images/node.Dockerfile runs on NodeSource Node 24
-# and is pinned to 12.2.0 there.
+# and is pinned to 12.2.1 there.
 #
 # Revisit when the runner drops its node20 external — then this can follow
 # `latest` again. NPM_SHA256 is the sha256 of the registry tarball
-# (https://registry.npmjs.org/npm/-/npm-11.21.0.tgz).
-ARG NPM_VERSION=11.21.0
-ARG NPM_SHA256=783e7c92bf73b442fb800c2d6ef3921e86da8894a700fed45140e37916877482
-# Two of npm's own bundled dependencies lag behind their security fixes, in
-# EVERY npm release including the current `latest` (12.2.0 bundles the same
-# versions as 11.21.0). Refreshing npm alone is therefore not enough — these
-# are HIGH findings with fixes available, so the Grype gate blocks the publish:
+# (https://registry.npmjs.org/npm/-/npm-11.21.1.tgz).
+ARG NPM_VERSION=11.21.1
+ARG NPM_SHA256=dd77c48eb845f4856c2cdba347cfb52bd877a2655a1ea48ff0c4796e3df9dd7b
+# npm 11.21.1 and 12.2.1 still bundle undici 6.29.0, behind its 6.29.1
+# security fixes. Refreshing npm alone cannot clear the HIGH findings.
+# brace-expansion required the same repair previously; npm now bundles our
+# fixed 5.0.12 pin, and the explicit overwrite keeps both payloads identical:
 #
-#   undici 6.28.0          GHSA-rfgv-xxqx-mfg5  (>=6.7.0 <6.28.1)  WebSocket DoS
+#   undici 6.29.0          GHSA-xjj6-f33q-929c  fixed in 6.29.1
+#                          GHSA-qrxm-fqhp-jwvm / GHSA-2m5v-pch6-74hx
 #   brace-expansion 5.0.9  GHSA-6j4f-fj2g-mc7p  (>=4.0.0 <5.0.10)  recursion DoS
 #                          GHSA-qhr7-859c-m2p7  (>=4.0.0 <5.0.11)  recursion DoS
 #
 # So the same checksum-pinned overwrite the npm payload already gets is applied
 # one level down, to these two packages inside npm's node_modules. Both are
 # patch-level bumps within the major npm depends on, and each image carries
-# exactly one copy of each (verified with `find` in the built images), so there
+# one copy of each per npm installation, so there
 # is no nested copy left behind at an older version.
-# Re-evaluate on every npm bump: if npm catches up, drop these and let the
-# bundled versions stand.
-ARG UNDICI_VERSION=6.29.0
-ARG UNDICI_SHA256=b7d888586625c1508c0e17463bac86aecd22ed6053bc945372aed8cae14406fc
+# Re-evaluate on every npm bump: once both packages are fixed upstream,
+# the explicit dependency overwrite can be retired.
+ARG UNDICI_VERSION=6.29.1
+ARG UNDICI_SHA256=29c4b8e0b2d86cb8795571c1959012ce057a14ecfd34858335f47c31e770a04f
 ARG BRACE_EXPANSION_VERSION=5.0.12
 ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
-# GH_CLI_VERSION 2.102.0 — latest stable, and the first pin in this file built
-#   with go1.27.1 (verified: `go version` on the released linux_amd64 binary
-#   reports go1.27.1). That clears GO-2026-4970 / CVE-2026-39822 ("os symlink
-#   escape", fixed in go1.26.5), which earlier gh builds forced us to carry as
-#   a justified allow in .grype.yaml. Those go-stdlib allows are removed in
-#   this change — if a future gh release regresses to an older Go, the Grype
-#   gate will fail loudly rather than pass on a stale ignore.
+# GH_CLI_VERSION 2.103.3 — latest stable. Its bundled Go and x/net fixes
+#   replace the vulnerable go1.27.1 / x/net v0.58.0 in gh 2.102.0.
+#   The unchanged Grype gate checks bundled modules without suppressions.
 #   These are the checksums of the .deb packages (what the install step below
 #   downloads), NOT the .tar.gz archives — the release publishes both and they
 #   differ.
-ARG GH_CLI_VERSION=2.102.0
-ARG GH_CLI_SHA256_AMD64=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0
-ARG GH_CLI_SHA256_ARM64=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237
+ARG GH_CLI_VERSION=2.103.3
+ARG GH_CLI_SHA256_AMD64=e3bafef96328d1a67de3a968bdfe1cc2ffd58cf6aba8b5e201356897ed06bb3d
+ARG GH_CLI_SHA256_ARM64=cac3ff84b60b68e64cca69f31f303210c26320361cc3286b773655d4226b7b06
 
 ARG TARGETARCH
 

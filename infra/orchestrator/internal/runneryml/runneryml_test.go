@@ -186,3 +186,28 @@ func TestValidateEgress(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateEgressTCPNumericBoundsAndCanonicalPorts(t *testing.T) {
+	for _, ports := range [][]string{{"db.example.com:0"}, {"db.example.com:65536"}, {"db.example.com:080"}, {"db.example.com:00443"}, {"a:5432", "b:05432"}, {"db.example.com:00022"}} {
+		t.Run(ports[0], func(t *testing.T) { require.Error(t, (&Runner{TCPEgress: ports}).ValidateEgress()) })
+	}
+	for _, ports := range [][]string{{"db.example.com:1", "cache.example.com:65535"}, {"db:5432", "redis:6379"}} {
+		require.NoError(t, (&Runner{TCPEgress: ports}).ValidateEgress())
+	}
+}
+
+func TestValidateEgressProxyListenerPorts(t *testing.T) {
+	host, proxy := true, false
+	for _, dnsHost := range []*bool{nil, &host, &proxy} {
+		r := &Runner{TCPEgress: []string{"gateway.example.com:3128"}, DNS: DNSConfig{Host: dnsHost}}
+		require.ErrorContains(t, r.ValidateEgress(), "3128")
+		r.TCPEgress = []string{"gateway.example.com:53"}
+		if dnsHost == &proxy {
+			require.ErrorContains(t, r.ValidateEgress(), "53")
+		} else {
+			require.NoError(t, r.ValidateEgress())
+		}
+		r.TCPEgress = []string{"gateway.example.com:5432"}
+		require.NoError(t, r.ValidateEgress())
+	}
+}

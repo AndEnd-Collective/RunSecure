@@ -1,11 +1,15 @@
 package config
 
 import (
+	"fmt"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/backend"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func makeScope(t *testing.T, mut func(*Scope)) *Scope {
@@ -304,4 +308,202 @@ func TestValidate_GitHubApp_KubeSecretMode0440(t *testing.T) {
 		s.Repos[0].ProjectDir = ""
 	})
 	require.NoError(t, s.Validate())
+}
+
+func sharedScope(t *testing.T, projects string) *Scope {
+	t.Helper()
+	s := makeScope(t, func(s *Scope) { s.Backend = "kube"; require.NoError(t, os.Chmod(s.Auth.PATFile, 0o440)) })
+	require.NoError(t, yaml.Unmarshal([]byte("repos:\n"+projects), s))
+	return s
+}
+
+const approvedProject = `  - repo: acme/alpha
+    namespace: project-alpha
+    max_concurrent: 2
+    runner_config:
+      runtime: node:24
+      labels: [self-hosted, Linux, ARM64, container]
+      resources: {memory: 2g, cpus: 2, pids: 256}
+`
+
+func TestSharedScopeApprovedConfig(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	require.NoError(t, s.Validate())
+	b, err := yaml.Marshal(s.Repos[0])
+	require.NoError(t, err)
+	require.Contains(t, string(b), "kubernetes.io/arch: arm64")
+	require.Contains(t, string(b), "ephemeral_storage: 10Gi")
+}
+
+func TestSharedScopeRejectsInvalidProjects(t *testing.T) {
+	cases := map[string]string{
+		"missing config":       strings.Replace(approvedProject, "    runner_config:", "    ignored_config:", 1),
+		"reserved namespace":   strings.Replace(approvedProject, "project-alpha", "kube-system", 1),
+		"controller namespace": strings.Replace(approvedProject, "project-alpha", "runsecure-test", 1),
+		"invalid namespace":    strings.Replace(approvedProject, "project-alpha", "Bad/Space", 1),
+		"invalid repo":         strings.Replace(approvedProject, "acme/alpha", "alpha", 1),
+		"runtime":              strings.Replace(approvedProject, "node:24", "bogus:999", 1),
+		"zero cpu":             strings.Replace(approvedProject, "cpus: 2", "cpus: 0", 1),
+		"memory":               strings.Replace(approvedProject, "memory: 2g", "memory: 2gBAD", 1),
+		"invalid label":        strings.Replace(approvedProject, "container]", "'bad label\n']", 1),
+		"duplicate label":      strings.Replace(approvedProject, "container]", "container, container]", 1),
+		"image":                approvedProject + "    runner_image: registry.example/runner:latest\n",
+		"mixed namespaces":     approvedProject + "  - repo: acme/beta\n    max_concurrent: 1\n",
+		"duplicate repo":       approvedProject + strings.Replace(approvedProject, "project-alpha", "project-beta", 1),
+		"duplicate namespace":  approvedProject + strings.Replace(approvedProject, "acme/alpha", "acme/beta", 1),
+		"disk":                 approvedProject + "    kubernetes: {ephemeral_storage: -1Gi}\n",
+		"proxy cpu":            approvedProject + "    kubernetes: {proxy_resources: {cpu: \"0\"}}\n",
+		"selector":             approvedProject + "    kubernetes: {node_selector: {'bad key': value}}\n",
+		"architecture":         approvedProject + "    kubernetes: {node_selector: {kubernetes.io/arch: amd64}}\n",
+		"toleration":           approvedProject + "    kubernetes: {tolerations: [{key: dedicated, operator: Bogus}]}\n",
+	}
+	for name, projects := range cases {
+		t.Run(name, func(t *testing.T) { require.Error(t, sharedScope(t, projects).Validate()) })
+	}
+}
+
+func TestSharedScopeAcceptsLongValidRepository(t *testing.T) {
+	s := sharedScope(t, strings.Replace(approvedProject, "acme/alpha", "acme/"+strings.Repeat("a", 100), 1))
+	require.NoError(t, s.Validate())
+}
+
+func TestSharedScopeValidationBoundaries(t *testing.T) {
+	for name, mutate := range map[string]func(*Scope){
+		"compose":                  func(s *Scope) { s.Backend = "compose"; require.NoError(t, os.Chmod(s.Auth.PATFile, 0o400)) },
+		"invalid controller":       func(s *Scope) { s.Name = "Invalid_name" },
+		"memory ceiling":           func(s *Scope) { s.Repos[0].RunnerConfig.Resources.Memory = "513g" },
+		"memory overflow":          func(s *Scope) { s.Repos[0].RunnerConfig.Resources.Memory = "999999999999999999999999999999g" },
+		"cpu ceiling":              func(s *Scope) { s.Repos[0].RunnerConfig.Resources.CPUs = 129 },
+		"pids zero":                func(s *Scope) { s.Repos[0].RunnerConfig.Resources.PIDs = 0 },
+		"labels empty":             func(s *Scope) { s.Repos[0].RunnerConfig.Labels = nil },
+		"unsupported architecture": func(s *Scope) { s.Repos[0].RunnerConfig.Labels = []string{"ARM"} },
+		"conflicting architecture": func(s *Scope) { s.Repos[0].RunnerConfig.Labels = []string{"X64", "ARM64"} },
+		"seccomp":                  func(s *Scope) { s.Repos[0].RunnerConfig.Orchestrator.SeccompProfile = "custom.json" },
+		"timeout":                  func(s *Scope) { s.Repos[0].RunnerConfig.Orchestrator.TimeoutSeconds = -1 },
+		"egress":                   func(s *Scope) { s.Repos[0].RunnerConfig.HTTPEgress = []string{"bad;domain"} },
+		"placement count": func(s *Scope) {
+			s.Repos[0].Kubernetes.NodeSelector = map[string]string{}
+			for i := 0; i < 17; i++ {
+				s.Repos[0].Kubernetes.NodeSelector[fmt.Sprint(i)] = "ci"
+			}
+		},
+		"unsupported node OS": func(s *Scope) { s.Repos[0].Kubernetes.NodeSelector = map[string]string{"kubernetes.io/os": "windows"} },
+		"disk upper bound":    func(s *Scope) { s.Repos[0].Kubernetes.EphemeralStorage = "2Ti" },
+		"malformed quantity":  func(s *Scope) { s.Repos[0].Kubernetes.ProxyResources.Memory = "garbage" },
+	} {
+		t.Run(name, func(t *testing.T) { s := sharedScope(t, approvedProject); mutate(s); require.Error(t, s.Validate()) })
+	}
+}
+
+func TestSharedScopeMaximumBoundsAndTolerationDefaults(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	r := &s.Repos[0]
+	r.RunnerConfig.Resources.Memory = "512g"
+	r.RunnerConfig.Resources.CPUs = 128
+	r.RunnerConfig.Resources.PIDs = 32768
+	r.RunnerConfig.Labels = []string{"self-hosted", "X64", "Linux"}
+	r.RunnerConfig.Orchestrator.TimeoutSeconds = 86400
+	r.RunnerImage = "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seconds := int64(86400)
+	r.Kubernetes = backend.KubePodSettings{NodeSelector: map[string]string{"kubernetes.io/arch": "amd64"}, EphemeralStorage: "1Ti", ProxyResources: backend.KubeProxyResources{CPU: "8", Memory: "8Gi", EphemeralStorage: "100Gi"}, Tolerations: []backend.KubeToleration{{Key: "dedicated", Value: "ci", Effect: "NoSchedule"}, {Key: "maintenance", Operator: "Exists", Effect: "NoExecute", TolerationSeconds: &seconds}}}
+	require.NoError(t, s.Validate())
+	require.Equal(t, "Equal", r.Kubernetes.Tolerations[0].Operator)
+	require.Equal(t, "amd64", r.Kubernetes.NodeSelector["kubernetes.io/arch"])
+	legacy := makeScope(t, nil)
+	require.Nil(t, legacy.ProjectNamespaces())
+}
+
+func TestSharedScopeResolvesApprovedSecurityBeforeStartup(t *testing.T) {
+	for name, mutate := range map[string]func(*Scope){
+		"project override": func(s *Scope) {
+			s.AllowProjectOverrides = []string{"allow_wildcards"}
+			s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": 123}
+		},
+		"scope override": func(s *Scope) { s.SecurityOverrides = map[string]any{"allow_imds": "invalid"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := sharedScope(t, approvedProject)
+			mutate(s)
+			require.ErrorContains(t, s.Validate(), "security")
+		})
+	}
+	s := sharedScope(t, approvedProject)
+	s.SecurityOverrides = map[string]any{"allow_imds": false}
+	s.AllowProjectOverrides = []string{"allow_wildcards"}
+	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": []any{"*.example.org"}, "allow_kube_api": "unpermitted and ignored"}
+	require.NoError(t, s.Validate())
+	legacy := makeScope(t, nil)
+	legacy.SecurityOverrides = map[string]any{"allow_imds": "deferred legacy validation"}
+	require.NoError(t, legacy.Validate())
+}
+
+func TestSharedScopeChecksLiteralDestinationsWithEffectivePolicy(t *testing.T) {
+	s := sharedScope(t, approvedProject)
+	s.Repos[0].RunnerConfig.HTTPEgress = []string{"10.1.2.3"}
+	require.ErrorContains(t, s.Validate(), "literal IP")
+	s.SecurityOverrides = map[string]any{"allow_private_cidrs": []any{"10.0.0.0/8"}}
+	require.NoError(t, s.Validate())
+	s.Repos[0].RunnerConfig.TCPEgress = []string{"169.254.169.254:5432"}
+	require.ErrorContains(t, s.Validate(), "literal IP")
+	s.AllowProjectOverrides = []string{"allow_private_cidrs"}
+	s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_private_cidrs": []any{"10.0.0.0/8", "169.254.169.254/32"}}
+	require.NoError(t, s.Validate(), "scope-authorized project exceptions use resolved effective policy")
+}
+
+func TestSharedScopeSelectorLimitUsesNormalizedTotalAndIsIdempotent(t *testing.T) {
+	for _, customCount := range []int{13, 14, 15, 16} {
+		for _, mandatoryCount := range []int{0, 1, 2} {
+			t.Run(fmt.Sprintf("custom-%d-explicit-mandatory-%d", customCount, mandatoryCount), func(t *testing.T) {
+				s := sharedScope(t, approvedProject)
+				selectors := map[string]string{}
+				for i := 0; i < customCount; i++ {
+					selectors[fmt.Sprintf("custom-%d", i)] = "ci"
+				}
+				if mandatoryCount >= 1 {
+					selectors["kubernetes.io/arch"] = "arm64"
+				}
+				if mandatoryCount >= 2 {
+					selectors["kubernetes.io/os"] = "linux"
+				}
+				s.Repos[0].Kubernetes.NodeSelector = selectors
+				if customCount > 14 {
+					require.ErrorContains(t, s.Validate(), "placement exceeds 16")
+					require.ErrorContains(t, s.Validate(), "placement exceeds 16")
+					return
+				}
+				require.NoError(t, s.Validate())
+				require.Len(t, selectors, customCount+2)
+				normalized, err := yaml.Marshal(s)
+				require.NoError(t, err)
+				require.NoError(t, s.Validate())
+				repeated, err := yaml.Marshal(s)
+				require.NoError(t, err)
+				require.Equal(t, string(normalized), string(repeated), "accepted scope normalization must be idempotent")
+			})
+		}
+	}
+}
+
+func TestSharedSettingsRequireNamespaceEnrollment(t *testing.T) {
+	for _, declaration := range []string{
+		"runner_config: {runtime: node:24, labels: [container], resources: {memory: 1g, cpus: 1, pids: 256}}",
+		"runner_image: registry.example/runner@sha256:" + strings.Repeat("a", 64),
+		"kubernetes: {ephemeral_storage: 20Gi}",
+		"runner_config: null", "runner_image: ''", "kubernetes: {}",
+		"<<: {kubernetes: {}}",
+	} {
+		t.Run(declaration, func(t *testing.T) {
+			s := sharedScope(t, "  - repo: acme/alpha\n    max_concurrent: 1\n    "+declaration+"\n")
+			require.ErrorContains(t, s.Validate(), "namespace")
+		})
+	}
+	legacy := sharedScope(t, "  - repo: acme/alpha\n    max_concurrent: 1\n")
+	require.NoError(t, legacy.Validate())
+	require.False(t, legacy.SharedKubernetes())
+}
+
+func TestRepoBlockRejectsInvalidFieldTypes(t *testing.T) {
+	var repo RepoBlock
+	require.Error(t, yaml.Unmarshal([]byte("kubernetes: invalid"), &repo))
+	require.Error(t, yaml.Unmarshal([]byte("max_concurrent: invalid"), &repo))
 }

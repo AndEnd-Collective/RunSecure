@@ -21,7 +21,11 @@
 package kube
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
+	"net/netip"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -77,6 +81,14 @@ func Namespace(scope string) string {
 	return "runsecure-" + scope
 }
 
+// executionNamespace keeps execution placement independent from controller ownership.
+func executionNamespace(in backend.SpawnInput) string {
+	if in.Namespace != "" {
+		return in.Namespace
+	}
+	return Namespace(in.Scope)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Labels
 // ──────────────────────────────────────────────────────────────────────────────
@@ -94,9 +106,15 @@ func Labels(in backend.SpawnInput, role string) map[string]string {
 }
 
 // RepoLabel returns the canonical Kubernetes label value for a GitHub
-// repository identity.
+// repository identity. Existing valid labels are retained; long or otherwise
+// invalid label values receive a deterministic 224-bit hash fallback.
 func RepoLabel(repo string) string {
-	return strings.ReplaceAll(repo, "/", "_")
+	label := strings.ReplaceAll(repo, "/", "_")
+	if len(kubevalidation.IsValidLabelValue(label)) == 0 {
+		return label
+	}
+	digest := sha256.Sum256([]byte(repo))
+	return fmt.Sprintf("repo-%x", digest[:28])
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -183,7 +201,7 @@ func spawnResourceName(kind, spawnID string) string {
 // cascades (via ownerReferences set on other objects) to remove all per-spawn
 // resources.
 func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte) *corev1.Secret {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	name := spawnResourceName("secret", in.SpawnID)
 	labels := Labels(in, RoleProxy)
 
@@ -221,7 +239,7 @@ func SpawnSecret(in backend.SpawnInput, squidCfg, haproxyCfg, dnsmasqCfg []byte)
 // with mode 0o440 using KeyToPath projection (jit-config is NOT projected here;
 // the runner pod mounts that key separately).
 func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	// Secret volume projects only the proxy config keys (not jit-config).
@@ -305,6 +323,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 		Image:           in.ProxyImage,
 		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: hardContainerSecCtx(),
+		Resources:       proxyResourceBounds(in.Kubernetes),
 		Env:             proxyEnv,
 		VolumeMounts:    mounts,
 		Ports:           ports,
@@ -313,6 +332,8 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: objectMeta(spawnResourceName("proxy", in.SpawnID), ns, labels),
 		Spec: corev1.PodSpec{
+			NodeSelector:                 in.Kubernetes.NodeSelector,
+			Tolerations:                  podTolerations(in.Kubernetes),
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: ptr(false),
 			HostNetwork:                  false,
@@ -338,7 +359,7 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 //   - RUNNER_JIT_CONFIG_FILE points to the projected jit-config key.
 //   - restartPolicy: Never (one-shot CI runner; GH Actions expects exit code).
 func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev1.Pod {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleRunner)
 
 	proxyURL := fmt.Sprintf("http://%s:%d", proxyServiceDNS, proxyPort)
@@ -414,12 +435,14 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 		SecurityContext: runnerContainerSecCtx(),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    cpu,
-				corev1.ResourceMemory: memory,
+				corev1.ResourceEphemeralStorage: quantityOrDefault(in.Kubernetes.EphemeralStorage, "10Gi"),
+				corev1.ResourceCPU:              cpu,
+				corev1.ResourceMemory:           memory,
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    cpu,
-				corev1.ResourceMemory: memory,
+				corev1.ResourceEphemeralStorage: quantityOrDefault(in.Kubernetes.EphemeralStorage, "10Gi"),
+				corev1.ResourceCPU:              cpu,
+				corev1.ResourceMemory:           memory,
 			},
 		},
 		Env:          runnerEnv,
@@ -429,6 +452,8 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 	return &corev1.Pod{
 		ObjectMeta: objectMeta(spawnResourceName("runner", in.SpawnID), ns, labels),
 		Spec: corev1.PodSpec{
+			NodeSelector:                 in.Kubernetes.NodeSelector,
+			Tolerations:                  podTolerations(in.Kubernetes),
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: ptr(false),
 			HostNetwork:                  false,
@@ -451,7 +476,7 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 //   - 53/TCP+UDP — dnsmasq (only when EnableDNSMasq is true).
 //   - Each port in TCPEgressPorts (e.g. 443 for direct TLS passthrough).
 func ProxyService(in backend.SpawnInput) *corev1.Service {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	selector := map[string]string{
@@ -560,7 +585,7 @@ func DefaultDenyNetworkPolicy(scope string) *networkingv1.NetworkPolicy {
 // All other egress from the runner is denied by the DefaultDenyNetworkPolicy.
 // No Ingress rule is created — the runner must not accept inbound connections.
 func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleRunner)
 
 	// Build the list of ports the runner may use to reach the proxy.
@@ -635,8 +660,8 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 // ProxyEgressNetworkPolicy returns a NetworkPolicy that allows the proxy Pod to:
 //
 //  1. Reach kube-dns on port 53 (TCP+UDP) for DNS resolution.
-//  2. Reach the external internet on any port (0.0.0.0/0) so Squid can proxy
-//     runner CONNECT requests.
+//  2. Reach external IPv4 destinations on any port except the canonical blocked
+//     ranges, so Squid can proxy runner CONNECT requests.
 //
 // # Security rationale for the broad internet egress rule
 //
@@ -647,13 +672,14 @@ func RunnerEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolic
 //     RunnerEgressNetworkPolicy; it cannot bypass the proxy to reach the
 //     internet directly.
 //   - The proxy's Squid config (rendered by internal/egress) enforces L7
-//     allow-lists; any attempt by a compromised proxy process to reach a
-//     non-allow-listed domain is rejected by Squid itself.
+//     allow-lists for runner requests. A compromised proxy process can bypass
+//     its own L7 filter and remains a trusted domain-filtering boundary. A compromised
+//     proxy process can bypass its own L7 filter; it is trusted for domain filtering.
 //
 // TODO(egress): when internal/egress exposes resolved CIDRs (Phase 2 Task 5),
 // replace the 0.0.0.0/0 peer with the explicit CIDR list for defence-in-depth.
 func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	tcpProto := corev1.ProtocolTCP
@@ -668,20 +694,16 @@ func ProxyEgressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy
 		},
 	}
 
-	// Rule 2: internet egress (all IPs minus private RFC1918 ranges to avoid
-	// routing cluster traffic via this rule).
+	// Rule 2: external IPv4 egress excludes the canonical private and
+	// special-use destination ranges, including metadata/link-local.
 	// The Squid L7 allow-list is the authoritative control; this rule provides
 	// network-layer reachability.
 	internetRule := networkingv1.NetworkPolicyEgressRule{
 		To: []networkingv1.NetworkPolicyPeer{
 			{
 				IPBlock: &networkingv1.IPBlock{
-					CIDR: worldCIDR,
-					Except: []string{
-						"10.0.0.0/8",
-						"172.16.0.0/12",
-						"192.168.0.0/16",
-					},
+					CIDR:   worldCIDR,
+					Except: blockedIPv4EgressCIDRs(),
 				},
 			},
 		},
@@ -764,7 +786,7 @@ func clusterDNSPeers(in backend.SpawnInput) []networkingv1.NetworkPolicyPeer {
 //   - Ports mirror ProxyService: 3128/TCP always, 53/UDP+TCP when EnableDNSMasq
 //     is true, plus each TCPEgressPort from the input.
 func ProxyIngressNetworkPolicy(in backend.SpawnInput) *networkingv1.NetworkPolicy {
-	ns := Namespace(in.Scope)
+	ns := executionNamespace(in)
 	labels := Labels(in, RoleProxy)
 
 	tcpProto := corev1.ProtocolTCP
@@ -854,4 +876,38 @@ func OwnerRef(secret *corev1.Secret) metav1.OwnerReference {
 func ptrIntStr(port int32) *intstr.IntOrString {
 	v := intstr.FromInt32(port)
 	return &v
+}
+
+func quantityOrDefault(value, fallback string) resource.Quantity {
+	if value == "" {
+		value = fallback
+	}
+	return resource.MustParse(value)
+}
+
+func proxyResourceBounds(settings backend.KubePodSettings) corev1.ResourceRequirements {
+	bounds := corev1.ResourceList{
+		corev1.ResourceCPU:              quantityOrDefault(settings.ProxyResources.CPU, "250m"),
+		corev1.ResourceMemory:           quantityOrDefault(settings.ProxyResources.Memory, "256Mi"),
+		corev1.ResourceEphemeralStorage: quantityOrDefault(settings.ProxyResources.EphemeralStorage, "1Gi"),
+	}
+	return corev1.ResourceRequirements{Requests: bounds.DeepCopy(), Limits: bounds}
+}
+
+func podTolerations(settings backend.KubePodSettings) []corev1.Toleration {
+	out := make([]corev1.Toleration, 0, len(settings.Tolerations))
+	for _, tol := range settings.Tolerations {
+		out = append(out, corev1.Toleration{Key: tol.Key, Operator: corev1.TolerationOperator(tol.Operator), Value: tol.Value, Effect: corev1.TaintEffect(tol.Effect), TolerationSeconds: tol.TolerationSeconds})
+	}
+	return out
+}
+
+func blockedIPv4EgressCIDRs() []string {
+	out := []string{}
+	for _, cidr := range security.BlockedEgressCIDRs() {
+		if netip.MustParsePrefix(cidr).Addr().Is4() {
+			out = append(out, cidr)
+		}
+	}
+	return out
 }

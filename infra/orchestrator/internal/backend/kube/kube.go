@@ -12,6 +12,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,12 +27,71 @@ import (
 
 // kubeBackend implements backend.Backend over a kube.Client.
 type kubeBackend struct {
-	c *kube.Client
+	c          *kube.Client
+	scope      string
+	namespaces map[string]string
 }
 
 // New returns a backend.Backend that manages runner stacks in Kubernetes.
 func New(c *kube.Client) backend.Backend {
 	return &kubeBackend{c: c}
+}
+
+var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// NewForProjects binds one controller scope to immutable, explicit project namespaces.
+func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) (backend.Backend, error) {
+	if c == nil || scope == "" || len(kubevalidation.IsValidLabelValue(scope)) != 0 || len(namespaces) == 0 {
+		return nil, errors.New("kube backend: client, valid controller scope and project namespaces are required")
+	}
+	copyNamespaces := make(map[string]string, len(namespaces))
+	seenNamespaces := make(map[string]bool, len(namespaces))
+	seenLabels := make(map[string]bool, len(namespaces))
+	for repo, ns := range namespaces {
+		parts := strings.Split(repo, "/")
+		label := kube.RepoLabel(repo)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" || !validProjectRepo.MatchString(repo) || len(kubevalidation.IsValidLabelValue(label)) != 0 || seenLabels[label] {
+			return nil, fmt.Errorf("kube backend: invalid or conflicting repository %q", repo)
+		}
+		if len(kubevalidation.IsDNS1123Label(ns)) != 0 || ns == "default" || strings.HasPrefix(ns, "kube-") || ns == kube.Namespace(scope) || seenNamespaces[ns] {
+			return nil, fmt.Errorf("kube backend: invalid or conflicting project namespace %q", ns)
+		}
+		copyNamespaces[repo], seenNamespaces[ns], seenLabels[label] = ns, true, true
+	}
+	return &kubeBackend{c: c, scope: scope, namespaces: copyNamespaces}, nil
+}
+
+func (b *kubeBackend) route(in backend.SpawnInput) (string, error) {
+	if b.namespaces == nil {
+		ns := kube.Namespace(in.Scope)
+		if in.Namespace != "" && in.Namespace != ns {
+			return "", errors.New("kube backend: explicit namespaces require project enrollment")
+		}
+		return ns, nil
+	}
+	ns, ok := b.namespaces[in.Repo]
+	if !ok || in.Scope != b.scope || (in.Namespace != "" && in.Namespace != ns) {
+		return "", errors.New("kube backend: unapproved scope, repository or namespace")
+	}
+	return ns, nil
+}
+
+func (b *kubeBackend) validateHandle(h backend.Handle) error {
+	if b.namespaces == nil {
+		return nil
+	}
+	ns, err := b.route(backend.SpawnInput{Scope: h.Refs["scope"], Repo: h.Refs["repo"], Namespace: h.Refs["namespace"]})
+	if err != nil || h.Backend != "kube" || !validSpawnID(h.SpawnID) || h.Refs["namespace"] != ns ||
+		h.Refs["repo_label"] != kube.RepoLabel(h.Refs["repo"]) ||
+		h.Refs["secret"] != "rs-secret-"+h.SpawnID || h.Refs["runner_pod"] != "rs-runner-"+h.SpawnID ||
+		(h.Refs["proxy_pod"] != "" && h.Refs["proxy_pod"] != "rs-proxy-"+h.SpawnID) {
+		return errors.New("kube backend: invalid handle ownership")
+	}
+	return nil
+}
+
+func validSpawnID(id string) bool {
+	return id != "" && len(kubevalidation.IsValidLabelValue(id)) == 0 && len(kubevalidation.IsDNS1123Subdomain("rs-runner-egress-"+id)) == 0
 }
 
 // Name returns the backend identifier.
@@ -53,7 +115,14 @@ func (b *kubeBackend) Name() string { return "kube" }
 //	Refs["proxy_pod"]   → proxy Pod name
 //	Refs["network_name"] → "" (not used by the kube backend)
 func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend.Handle, error) {
-	ns := kube.Namespace(in.Scope)
+	ns, err := b.route(in)
+	if err != nil {
+		return backend.Handle{}, err
+	}
+	if b.namespaces != nil && !validSpawnID(in.SpawnID) {
+		return backend.Handle{}, errors.New("kube backend: invalid spawn ID")
+	}
+	in.Namespace = ns
 	if in.ResourcesMemory <= 0 {
 		return backend.Handle{}, errors.New("kube backend: runner memory limit must be positive")
 	}
@@ -87,7 +156,7 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		return backend.Handle{}, errors.New("kube backend: KubeDNSPodLabelValue must be a Kubernetes label value")
 	}
 
-	if err := b.c.EnsureDefaultDenyPolicy(ctx, in.Scope); err != nil {
+	if err := b.c.EnsureDefaultDenyPolicyInNamespace(ctx, in.Scope, ns); err != nil {
 		return backend.Handle{}, fmt.Errorf("kube backend: ensure default-deny policy: %w", err)
 	}
 
@@ -152,6 +221,8 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		Backend: "kube",
 		Refs: map[string]string{
 			"namespace":         ns,
+			"scope":             in.Scope,
+			"repo":              in.Repo,
 			"secret":            secret.Name,
 			"runner_pod":        runnerPod.Name,
 			"proxy_pod":         proxyPod.Name,
@@ -166,8 +237,8 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 		// Deleting the owning Secret is the exact rollback. If confirmation
 		// fails, return the handle so the orchestrator retains teardown debt
 		// and retries instead of releasing capacity around leaked objects.
-		if cleanupErr := b.c.DeleteSpawn(
-			ctx, ns, secret.Name, in.SpawnID, kube.RepoLabel(in.Repo),
+		if cleanupErr := b.c.DeleteSpawnScoped(
+			ctx, in.Scope, ns, secret.Name, in.SpawnID, kube.RepoLabel(in.Repo),
 		); cleanupErr != nil {
 			return h, errors.Join(applyErr,
 				fmt.Errorf("kube backend: rollback spawn: %w", cleanupErr))
@@ -188,10 +259,19 @@ func (b *kubeBackend) Spawn(ctx context.Context, in backend.SpawnInput) (backend
 //	timeout   → (-1, true)
 //	other     → (1, false)  — unexpected terminal or empty phase after watch
 func (b *kubeBackend) WaitForExit(ctx context.Context, h backend.Handle, timeout time.Duration) (int, bool) {
+	if err := b.validateHandle(h); err != nil {
+		return 1, false
+	}
 	ns := h.Refs["namespace"]
 	podName := h.Refs["runner_pod"]
 
-	phase, timedOut := b.c.WaitRunner(ctx, ns, podName, timeout)
+	var phase corev1.PodPhase
+	var timedOut bool
+	if b.namespaces != nil {
+		phase, timedOut = b.c.WaitRunnerScoped(ctx, b.scope, ns, podName, h.SpawnID, h.Refs["repo_label"], timeout)
+	} else {
+		phase, timedOut = b.c.WaitRunner(ctx, ns, podName, timeout)
+	}
 	if timedOut {
 		return -1, true
 	}
@@ -211,13 +291,22 @@ func (b *kubeBackend) WaitForExit(ctx context.Context, h backend.Handle, timeout
 // cascades deletion to the Service, NetworkPolicies, and both Pods via
 // OwnerReferences set during ApplySpawn.
 func (b *kubeBackend) Teardown(ctx context.Context, h backend.Handle, _ bool) error {
+	if err := b.validateHandle(h); err != nil {
+		return err
+	}
 	ns := h.Refs["namespace"]
 	secretName := h.Refs["secret"]
 	repoLabel := h.Refs["repo_label"]
 	var cleanupErrors []error
-	if err := b.c.DeleteSpawn(ctx, ns, secretName, h.SpawnID, repoLabel); err != nil {
+	var deleteErr error
+	if b.namespaces != nil {
+		deleteErr = b.c.DeleteSpawnScoped(ctx, b.scope, ns, secretName, h.SpawnID, repoLabel)
+	} else {
+		deleteErr = b.c.DeleteSpawn(ctx, ns, secretName, h.SpawnID, repoLabel)
+	}
+	if deleteErr != nil {
 		cleanupErrors = append(cleanupErrors,
-			fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, err))
+			fmt.Errorf("kube backend: teardown spawn %q: %w", h.SpawnID, deleteErr))
 	}
 	if egressDir := h.Refs["egress_config_dir"]; egressDir != "" {
 		if err := os.RemoveAll(egressDir); err != nil {
@@ -232,7 +321,37 @@ func (b *kubeBackend) Teardown(ctx context.Context, h backend.Handle, _ bool) er
 // one Handle per spawn.  It calls kube.Client.ListSpawns which groups pods by
 // spawn-id label and resolves the owning Secret name from OwnerReferences.
 func (b *kubeBackend) Reconcile(ctx context.Context, scope string) ([]backend.Handle, error) {
-	refs, err := b.c.ListSpawns(ctx, scope)
+	var refs []kube.SpawnRef
+	var err error
+	reposByNamespace := make(map[string]string, len(b.namespaces))
+	if b.namespaces == nil {
+		refs, err = b.c.ListSpawns(ctx, scope)
+	} else {
+		if scope != b.scope {
+			return nil, errors.New("kube backend: unapproved reconcile scope")
+		}
+		namespaces := make([]string, 0, len(b.namespaces))
+		for repo, ns := range b.namespaces {
+			namespaces = append(namespaces, ns)
+			reposByNamespace[ns] = repo
+		}
+		sort.Strings(namespaces)
+		seen := make(map[string]bool)
+		for _, ns := range namespaces {
+			var discovered []kube.SpawnRef
+			discovered, err = b.c.ListSpawnsInNamespace(ctx, scope, ns)
+			if err != nil {
+				break
+			}
+			for _, ref := range discovered {
+				if ref.RepoLabel != kube.RepoLabel(reposByNamespace[ns]) || seen[ref.SpawnID] {
+					return nil, errors.New("kube backend: conflicting recovered project ownership")
+				}
+				seen[ref.SpawnID] = true
+			}
+			refs = append(refs, discovered...)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("kube backend: reconcile scope %q: %w", scope, err)
 	}
@@ -244,6 +363,8 @@ func (b *kubeBackend) Reconcile(ctx context.Context, scope string) ([]backend.Ha
 			Backend: "kube",
 			Refs: map[string]string{
 				"namespace":    ref.Namespace,
+				"scope":        scope,
+				"repo":         reposByNamespace[ref.Namespace],
 				"secret":       ref.SecretName,
 				"runner_pod":   ref.RunnerPod,
 				"proxy_pod":    "",

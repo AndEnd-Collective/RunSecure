@@ -108,7 +108,7 @@ func (p *Poll) tick(ctx context.Context) {
 			p.handlePollError(repo.Repo, err)
 			continue
 		}
-		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels)
+		demand, err := p.deps.GitHub().EligibleQueuedJobs(ctx, repo.Repo, labels, jitRunnerLabels(p.scope.Name, labels))
 		if err != nil {
 			lim := github.ErrorRateLimit(err)
 			p.deps.RecordRateLimit(p.scope.Name, lim)

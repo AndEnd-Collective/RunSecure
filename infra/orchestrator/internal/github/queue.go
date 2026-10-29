@@ -317,9 +317,14 @@ type JobDemand struct {
 func (d JobDemand) Count() int { return len(d.Jobs) }
 
 // EligibleQueuedJobs enumerates queued and in-progress workflow runs, then
-// counts their latest-attempt queued jobs whose label set contains every
-// required label. Both run and job endpoints are fully paginated.
-func (c *Client) EligibleQueuedJobs(ctx context.Context, repo string, requiredLabels []string) (JobDemand, error) {
+// selects latest-attempt queued jobs targeting every required label. Every job
+// label must also exist on the actual runner; optional runnerLabels includes
+// generated ownership labels. Both endpoints are fully paginated.
+func (c *Client) EligibleQueuedJobs(ctx context.Context, repo string, requiredLabels []string, runnerLabels ...[]string) (JobDemand, error) {
+	available := requiredLabels
+	if len(runnerLabels) > 0 {
+		available = runnerLabels[0]
+	}
 	seenRuns := map[int64]bool{}
 	runs := make([]WorkflowRun, 0)
 	demand := JobDemand{}
@@ -346,7 +351,7 @@ func (c *Client) EligibleQueuedJobs(ctx context.Context, repo string, requiredLa
 		}
 		demand.RateLimit = newestRateLimit(demand.RateLimit, lim)
 		for _, job := range jobs {
-			if job.Status != "queued" || seenJobs[job.ID] || !containsAllLabels(job.Labels, requiredLabels) {
+			if job.Status != "queued" || seenJobs[job.ID] || (!containsAllLabels(job.Labels, requiredLabels) || !containsAllLabels(available, job.Labels)) {
 				continue
 			}
 			seenJobs[job.ID] = true
@@ -437,10 +442,10 @@ func responseError(resp *http.Response, operation string) error {
 func containsAllLabels(got, required []string) bool {
 	set := make(map[string]bool, len(got))
 	for _, label := range got {
-		set[label] = true
+		set[strings.ToLower(label)] = true
 	}
 	for _, label := range required {
-		if !set[label] {
+		if !set[strings.ToLower(label)] {
 			return false
 		}
 	}

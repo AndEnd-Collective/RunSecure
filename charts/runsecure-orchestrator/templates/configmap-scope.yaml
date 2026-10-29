@@ -27,8 +27,8 @@ data:
       {{- if eq .Values.auth.type "pat" }}
       pat_file: /run/secrets/runsecure-pat/pat
       {{- else if eq .Values.auth.type "github_app" }}
-      app_id: {{ .Values.auth.app.appId | quote }}
-      installation_id: {{ .Values.auth.app.installationId | quote }}
+      app_id: {{ .Values.auth.app.appId }}
+      installation_id: {{ .Values.auth.app.installationId }}
       private_key_file: /run/secrets/runsecure-app-key/private-key
       {{- end }}
     backend: {{ .Values.scope.backend | quote }}
@@ -40,6 +40,20 @@ data:
     repos:
     {{- range .Values.scope.repos }}
       - repo: {{ .repo | quote }}
+        {{- if .namespace }}
+        namespace: {{ .namespace | quote }}
+        {{- end }}
+        {{- if .runnerImage }}
+        runner_image: {{ .runnerImage | quote }}
+        {{- end }}
+        {{- if .runnerConfig }}
+        runner_config:
+          {{- include "runsecure-orchestrator.runnerConfig" .runnerConfig | nindent 10 }}
+        {{- end }}
+        {{- if .kubernetes }}
+        kubernetes:
+          {{- include "runsecure-orchestrator.podSettings" .kubernetes | nindent 10 }}
+        {{- end }}
         {{- if .maxConcurrent }}
         max_concurrent: {{ .maxConcurrent }}
         {{- end }}

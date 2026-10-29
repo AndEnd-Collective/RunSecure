@@ -34,6 +34,13 @@ func initializeBackend(
 ) (backend.Backend, docker.Client, error) {
 	switch s.Backend {
 	case "kube":
+		// Keep this startup boundary fail-closed even for direct callers: shared
+		// approved policy must be resolved before recovery can mutate either API.
+		if s.SharedKubernetes() {
+			if err := s.Validate(); err != nil {
+				return nil, nil, err
+			}
+		}
 		if err := validateKubeEnvironment(); err != nil {
 			return nil, nil, err
 		}
@@ -41,7 +48,11 @@ func initializeBackend(
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := cleanupRecoveredKubeSpawns(ctx, s.Name, repoNames, be, gh); err != nil {
+		cleanup := func() error { return cleanupRecoveredKubeSpawns(ctx, s.Name, repoNames, be, gh) }
+		if s.SharedKubernetes() {
+			cleanup = func() error { return cleanupRecoveredKubeSpawnsForProjects(ctx, s.Name, s.ProjectNamespaces(), be, gh) }
+		}
+		if err := cleanup(); err != nil {
 			return nil, nil, err
 		}
 		return be, nil, nil

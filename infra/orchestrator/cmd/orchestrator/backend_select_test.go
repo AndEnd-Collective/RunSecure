@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/docker"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/github"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/kube"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/state"
 	"github.com/stretchr/testify/require"
 )
@@ -396,4 +399,82 @@ tcp_egress:
 	_, err := pd.RunnerYML("o/r")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "egress")
+}
+
+func TestSharedRunnerConfigNeverUsesContentsAPI(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.Error(w, "must not fetch", 500) }))
+	defer srv.Close()
+	pin := "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	approved := &runneryml.Runner{Runtime: "python:3.12", Labels: []string{"self-hosted", "ARM64"}}
+	pd := &productionDeps{gh: makeGHClient(t, srv.URL), st: state.New(), scopeRef: &config.Scope{Backend: "kube", Repos: []config.RepoBlock{{Repo: "o/r", Namespace: "project-alpha", RunnerConfig: approved, RunnerImage: pin}}}}
+	snap, err := pd.RunnerYML("o/r")
+	require.NoError(t, err)
+	require.Equal(t, "python:3.12", snap.YML.Runtime)
+	require.Equal(t, pin, snap.ImageDigest)
+	require.Zero(t, calls)
+	_, err = pd.RunnerYML("other/repo")
+	require.ErrorContains(t, err, "unknown repo")
+	require.Zero(t, calls)
+}
+
+func TestConfigureSharedKubeBackendRejectsInvalidMapBeforeClient(t *testing.T) {
+	_, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/alpha", Namespace: "project-alpha"}, {Repo: "acme/beta", Namespace: "project-alpha"}}})
+	require.Error(t, err)
+	be, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/alpha", Namespace: "project-alpha"}}})
+	require.NoError(t, err)
+	require.Equal(t, "kube", be.Name())
+	_, err = be.Spawn(context.Background(), backend.SpawnInput{Scope: "shared", Repo: "unapproved/repo", SpawnID: "unapproved"})
+	require.ErrorContains(t, err, "unapproved")
+}
+
+func TestSharedRunnerConfigRequiresConfigAndImmutableFallback(t *testing.T) {
+	pd := &productionDeps{scopeRef: &config.Scope{Backend: "kube", Repos: []config.RepoBlock{{Repo: "o/r", Namespace: "project-alpha"}}}}
+	_, err := pd.RunnerYML("o/r")
+	require.ErrorContains(t, err, "runner_config")
+	pd.scopeRef.Repos[0].RunnerConfig = &runneryml.Runner{Runtime: "node:24"}
+	t.Setenv("RUNSECURE_RUNNER_IMAGE_NODE", "mutable:latest")
+	_, err = pd.RunnerYML("o/r")
+	require.ErrorContains(t, err, "immutable")
+	t.Setenv("RUNSECURE_RUNNER_IMAGE_NODE", "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	snapshot, err := pd.RunnerYML("o/r")
+	require.NoError(t, err)
+	require.Contains(t, snapshot.ImageDigest, "@sha256:")
+}
+
+func TestConfigureKubeBackendAcceptsLongRepositoryWithoutAPI(t *testing.T) {
+	be, err := configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/" + strings.Repeat("a", 100), Namespace: "project-alpha"}}})
+	require.NoError(t, err)
+	require.Equal(t, "kube", be.Name())
+	_, err = configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/bad*repo", Namespace: "project-alpha"}}})
+	require.Error(t, err)
+}
+
+func TestRunnerYMLSharedSettingsWithoutNamespaceNeverFetchContents(t *testing.T) {
+	for _, setting := range []string{"runner_config", "runner_image", "kubernetes"} {
+		t.Run(setting, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				encoded := base64.StdEncoding.EncodeToString([]byte("runtime: python:3.12\nhttp_egress: [unapproved.example.com]\n"))
+				require.NoError(t, json.NewEncoder(w).Encode(contentsResp{Content: encoded, Encoding: "base64"}))
+			}))
+			defer server.Close()
+			s := approvedStartupScope(t)
+			s.Repos[0].Namespace = ""
+			if setting != "runner_config" {
+				s.Repos[0].RunnerConfig = nil
+			}
+			if setting == "runner_image" {
+				s.Repos[0].RunnerImage = "registry.example/runner@sha256:" + strings.Repeat("a", 64)
+			}
+			if setting == "kubernetes" {
+				s.Repos[0].Kubernetes.EphemeralStorage = "20Gi"
+			}
+			pd := &productionDeps{gh: makeGHClient(t, server.URL), st: state.New(), scopeRef: s}
+			_, err := pd.RunnerYMLContext(context.Background(), "acme/alpha")
+			require.ErrorContains(t, err, "namespace")
+			require.Zero(t, calls, "shared-only settings cannot fall back to repository policy")
+		})
+	}
 }

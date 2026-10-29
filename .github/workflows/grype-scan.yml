@@ -33,6 +33,7 @@ on:
       - 'infra/scripts/install-pinned-scanners.sh'
       - 'tests/validation/test-cve-scanner-config.sh'
       - 'tests/validation/test-grype-scan-image.sh'
+      - 'tests/validation/test-npm-payload-refresh.sh'
       - 'tests/validation/test-scanner-package-inventory.sh'
       - 'tests/validation/test-scanner-installer-pins.sh'
       - 'tools/**'
@@ -86,6 +87,10 @@ jobs:
           else
             docker build -f "$DOCKERFILE" -t "${IMAGE_NAME}:scan" .
           fi
+
+      - name: Test hardened npm payloads with browser storage disabled
+        if: matrix.image_name == 'runner-node-24'
+        run: bash tests/validation/test-npm-payload-refresh.sh "${IMAGE_NAME}:scan"
 
       - name: Install checksum-pinned Syft + Grype
         run: |

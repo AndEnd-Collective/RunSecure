@@ -121,3 +121,62 @@ Issuer name to use in the Certificate: self-signed or user-provided.
 {{- .Values.tls.issuerName }}
 {{- end }}
 {{- end }}
+
+{{/* Validate enrollment before rendering any runtime resources. */}}
+{{- define "runsecure-orchestrator.validateProjects" -}}
+{{- $shared := false -}}
+{{- range .Values.scope.repos -}}{{- if or .namespace (hasKey . "runnerConfig") (hasKey . "runnerImage") (hasKey . "kubernetes") -}}{{- $shared = true -}}{{- end -}}{{- end -}}
+{{- $repos := dict -}}{{- $namespaces := dict -}}
+{{- range .Values.scope.repos -}}
+{{- if hasKey $repos (lower .repo) -}}{{- fail "duplicate repository enrollment" -}}{{- end -}}
+{{- $_ := set $repos (lower .repo) true -}}
+{{- if $shared -}}
+{{- if eq $.Values.image.orchestrator.digest "sha256:dca28cce796ea6b05da390b39d7822ad0fe6bbb91bc3485de10324cbf75dca97" -}}{{- fail "shared mode requires an explicitly pinned RunSecure 2.2+ controller from the approved release manifest; bundled 2.1.10 controller is incompatible" -}}{{- end -}}
+{{- if ne $.Values.scope.backend "kube" -}}{{- fail "shared namespaces require kube backend" -}}{{- end -}}
+{{- if or (not .namespace) (not .runnerConfig) -}}{{- fail "all shared projects require namespace and approved runnerConfig" -}}{{- end -}}
+{{- if or (eq .namespace "default") (hasPrefix "kube-" .namespace) (eq .namespace (include "runsecure-orchestrator.namespace" $)) (hasKey $namespaces .namespace) -}}{{- fail "reserved, controller or duplicate project namespace" -}}{{- end -}}
+{{- $_ := set $namespaces .namespace true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Convert chart camelCase runner values into canonical source YAML. */}}
+{{- define "runsecure-orchestrator.runnerConfig" -}}
+{{- $runner := dict "runtime" .runtime "labels" .labels "resources" .resources -}}
+{{- range $from, $to := dict "version" "version" "httpEgress" "http_egress" "tcpEgress" "tcp_egress" -}}
+{{- if hasKey $ $from -}}{{- $_ := set $runner $to (get $ $from) -}}{{- end -}}
+{{- end -}}
+{{- if .orchestrator -}}
+{{- $orchestrator := dict -}}
+{{- range $from, $to := dict "timeoutSeconds" "timeout_seconds" "securityOverrides" "security_overrides" -}}
+{{- if hasKey $.orchestrator $from -}}{{- $_ := set $orchestrator $to (get $.orchestrator $from) -}}{{- end -}}
+{{- end -}}
+{{- $_ := set $runner "orchestrator" $orchestrator -}}
+{{- end -}}
+{{- if .dns -}}{{- $_ := set $runner "dns" .dns -}}{{- end -}}
+{{- toYaml $runner -}}
+{{- end -}}
+
+{{- define "runsecure-orchestrator.podSettings" -}}
+{{- $settings := dict -}}
+{{- range $from, $to := dict "nodeSelector" "node_selector" "ephemeralStorage" "ephemeral_storage" -}}
+{{- if hasKey $ $from -}}{{- $_ := set $settings $to (get $ $from) -}}{{- end -}}
+{{- end -}}
+{{- if .proxyResources -}}
+{{- $proxy := dict -}}
+{{- range $from, $to := dict "cpu" "cpu" "memory" "memory" "ephemeralStorage" "ephemeral_storage" -}}
+{{- if hasKey $.proxyResources $from -}}{{- $_ := set $proxy $to (get $.proxyResources $from) -}}{{- end -}}
+{{- end -}}
+{{- $_ := set $settings "proxy_resources" $proxy -}}
+{{- end -}}
+{{- if .tolerations -}}
+{{- $tolerations := list -}}
+{{- range .tolerations -}}
+{{- $toleration := omit . "tolerationSeconds" -}}
+{{- if hasKey . "tolerationSeconds" -}}{{- $_ := set $toleration "toleration_seconds" .tolerationSeconds -}}{{- end -}}
+{{- $tolerations = append $tolerations $toleration -}}
+{{- end -}}
+{{- $_ := set $settings "tolerations" $tolerations -}}
+{{- end -}}
+{{- toYaml $settings -}}
+{{- end -}}

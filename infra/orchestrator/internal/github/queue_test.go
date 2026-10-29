@@ -61,10 +61,9 @@ func TestEligibleQueuedJobs_EnumeratesRunStatesAndMatchesAllLabels(t *testing.T)
 
 	demand, err := c.EligibleQueuedJobs(context.Background(), "o/r", []string{"self-hosted", "Linux", "runsecure"})
 	require.NoError(t, err)
-	require.Equal(t, 2, demand.Count())
-	require.Equal(t, []int64{101, 201}, []int64{demand.Jobs[0].ID, demand.Jobs[1].ID})
+	require.Equal(t, 1, demand.Count())
+	require.Equal(t, int64(101), demand.Jobs[0].ID)
 	require.Equal(t, int64(10), demand.Jobs[0].RunID)
-	require.Equal(t, int64(20), demand.Jobs[1].RunID)
 	require.True(t, seenStatuses["queued"])
 	require.True(t, seenStatuses["in_progress"])
 	require.True(t, seenLatest)
@@ -654,4 +653,22 @@ func makePATForQueue(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "pat")
 	require.NoError(t, os.WriteFile(path, []byte("p"), 0o400))
 	return path
+}
+
+func TestEligibleQueuedJobsGeneratedLabelsAndCompatibility(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 1}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+			{"id": 1, "status": "queued", "labels": []string{"SELF-HOSTED", "container", "runsecure-jit", "runsecure-scope-shared"}},
+			{"id": 2, "status": "queued", "labels": []string{"self-hosted", "container", "gpu"}},
+			{"id": 3, "status": "queued", "labels": []string{"self-hosted"}},
+		}})
+	})
+	demand, err := c.EligibleQueuedJobs(context.Background(), "o/r", []string{"self-hosted", "container"}, []string{"self-hosted", "container", "runsecure-jit", "runsecure-scope-shared"})
+	require.NoError(t, err)
+	require.Len(t, demand.Jobs, 1)
+	require.Equal(t, int64(1), demand.Jobs[0].ID)
 }

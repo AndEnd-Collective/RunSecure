@@ -1403,3 +1403,14 @@ func TestExecute_SpawnInput_AllowedPrivateCIDRs_EmptyWhenNone(t *testing.T) {
 	assert.Empty(t, spawnCalls[0].AllowedPrivateCIDRs,
 		"SpawnInput.AllowedPrivateCIDRs must be empty when no private CIDRs are approved")
 }
+
+func TestExecuteApprovedProjectPodSettings(t *testing.T) {
+	d := newSpawnDeps(t)
+	d.kubernetes = backend.KubePodSettings{EphemeralStorage: "20Gi", NodeSelector: map[string]string{"kubernetes.io/arch": "arm64"}}
+	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "project-settings"})
+	require.NoError(t, err)
+	d.be.mu.Lock()
+	defer d.be.mu.Unlock()
+	require.Len(t, d.be.spawnCalls, 1)
+	require.Equal(t, d.kubernetes, d.be.spawnCalls[0].Kubernetes)
+}

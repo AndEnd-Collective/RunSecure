@@ -208,16 +208,23 @@ _generate_haproxy_cfg() {
         # interface prevents accidentally serving these ports if the
         # network configuration ever changes (e.g. a future feature that
         # adds an external bridge for monitoring).
-        # M3: every backend now references a `resolvers` section so
-        # haproxy uses runtime DNS resolution and re-resolves on every
-        # health check rather than caching the bootstrap A-record forever.
+        # Resolve and check the exact address used for this connection. The
+        # backend deliberately has no hostname, DNS resolver, or health check:
+        # those would perform an unchecked second resolution. Legacy run.sh
+        # has no scope-level private-CIDR exemption, so all private ranges fail
+        # closed, consistently with its Squid configuration.
         ENTRIES_BLOCK="${ENTRIES_BLOCK}
 frontend tcp_${port}
     bind ${PROXY_IP}:${port}
+    tcp-request inspect-delay 5s
+    tcp-request content do-resolve(sess.rs_dst,${resolvers_name},ipv4) str(${host})
+    tcp-request content reject unless { var(sess.rs_dst) -m found }
+    tcp-request content reject if { var(sess.rs_dst) -m ip 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 0.0.0.0/8 ::1/128 fe80::/10 fc00::/7 ::/128 }
+    tcp-request content set-dst var(sess.rs_dst)
     default_backend backend_${port}
 
 backend backend_${port}
-    server srv_${port} ${host}:${port} check inter 10s resolvers ${resolvers_name} init-addr none
+    server srv_${port} 0.0.0.0:${port}
 "
     done < <(_yq '.tcp_egress // [] | .[]' "$RUNNER_YML")
 
@@ -230,7 +237,7 @@ backend backend_${port}
     # Pass multi-line content via ENVIRON to avoid awk -v newline limitations.
     # M3: the resolvers block is always emitted. The expanded form differs
     # depending on dns.host (dnsmasq vs parse-resolv-conf) but the section
-    # itself is non-optional — every backend references it.
+    # itself is non-optional — every frontend resolves through it.
     RS_HAPROXY_ENTRIES=$(printf '%b' "$ENTRIES_BLOCK") \
     RS_HAPROXY_RESOLVERS=$(printf '%b' "$resolvers_block") \
     awk '

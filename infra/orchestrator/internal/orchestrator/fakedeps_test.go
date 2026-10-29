@@ -584,6 +584,7 @@ type spawnDeps struct {
 	runnerYML      *runneryml.Runner
 	runnerYMLErr   error
 	imageDigest    string // snapshot.ImageDigest
+	kubernetes     backend.KubePodSettings
 	fallbackDigest string // RunnerImageDigestFor(...) — defaults to imageDigest
 	proxyDigest    string
 	breakers       *fakeBreakers
@@ -606,7 +607,7 @@ func (d *spawnDeps) RunnerYMLContext(_ context.Context, _ string) (*RunnerYMLSna
 	if d.runnerYMLErr != nil {
 		return nil, d.runnerYMLErr
 	}
-	return &RunnerYMLSnapshot{YML: d.runnerYML, ImageDigest: d.imageDigest}, nil
+	return &RunnerYMLSnapshot{YML: d.runnerYML, ImageDigest: d.imageDigest, Kubernetes: d.kubernetes}, nil
 }
 func (d *spawnDeps) State() StateLike               { return d.st }
 func (d *spawnDeps) GlobalMaxRunners() int          { return d.globalCap }

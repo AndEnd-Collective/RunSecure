@@ -20,6 +20,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -91,10 +92,17 @@ func NewInCluster() (*Client, error) {
 //
 // AlreadyExists is tolerated so callers may invoke this on every reconcile.
 func (c *Client) EnsureDefaultDenyPolicy(ctx context.Context, scope string) error {
-	ns := Namespace(scope)
+	return c.EnsureDefaultDenyPolicyInNamespace(ctx, scope, Namespace(scope))
+}
 
+// EnsureDefaultDenyPolicyInNamespace reconciles a preprovisioned execution namespace.
+func (c *Client) EnsureDefaultDenyPolicyInNamespace(ctx context.Context, scope, ns string) error {
+	if err := validateScopeNamespace(scope, ns); err != nil {
+		return err
+	}
 	// Create the default-deny NetworkPolicy; tolerate AlreadyExists.
 	policy := DefaultDenyNetworkPolicy(scope)
+	policy.Namespace = ns
 	_, err := c.cs.NetworkingV1().NetworkPolicies(ns).Create(ctx, policy, metav1.CreateOptions{})
 	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: create default-deny policy in %q: %w", ns, err)
@@ -164,6 +172,25 @@ func (c *Client) ApplySpawn(ctx context.Context, objs SpawnObjects) error {
 // API server restarted), WaitRunner re-lists the pod once to obtain its current
 // phase, avoiding a spurious timeout.
 func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout time.Duration) (phase corev1.PodPhase, timedOut bool) {
+	return c.waitRunner(ctx, ns, podName, timeout, nil)
+}
+
+// WaitRunnerScoped verifies the exact identity on each observed runner Pod.
+func (c *Client) WaitRunnerScoped(ctx context.Context, scope, ns, podName, spawnID, repoLabel string, timeout time.Duration) (corev1.PodPhase, bool) {
+	if validateScopeNamespace(scope, ns) != nil || validateExplicitSpawnIdentity(spawnResourceName("secret", spawnID), spawnID, repoLabel) != nil || podName != spawnResourceName("runner", spawnID) {
+		return "", false
+	}
+	matches := func(pod *corev1.Pod) bool {
+		if _, err := appendSpawnResource(nil, "pod", pod, spawnID, repoLabel); err != nil {
+			return false
+		}
+		return pod.Namespace == ns && pod.Name == podName && pod.Labels[LabelScope] == scope &&
+			pod.Labels[LabelSpawnID] == spawnID && pod.Labels[LabelRepo] == repoLabel && pod.Labels[LabelRole] == RoleRunner
+	}
+	return c.waitRunner(ctx, ns, podName, timeout, matches)
+}
+
+func (c *Client) waitRunner(ctx context.Context, ns, podName string, timeout time.Duration, matches func(*corev1.Pod) bool) (corev1.PodPhase, bool) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -175,6 +202,9 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 	if err != nil {
 		return "", waitDeadlineExpired(ctx, timeoutCtx)
 	}
+	if matches != nil && !matches(pod) {
+		return "", false
+	}
 	if isTerminalPodPhase(pod.Status.Phase) {
 		return pod.Status.Phase, false
 	}
@@ -185,7 +215,7 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 	})
 	if err != nil {
 		// Cannot establish a watch — fall through to the re-list path.
-		phase, timedOut := c.relist(timeoutCtx, ns, podName)
+		phase, timedOut := c.relistMatching(timeoutCtx, ns, podName, matches)
 		if phase == "" && waitDeadlineExpired(ctx, timeoutCtx) {
 			return "", true
 		}
@@ -198,7 +228,7 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				// Watch channel closed unexpectedly; re-list to get current phase.
-				phase, timedOut := c.relist(timeoutCtx, ns, podName)
+				phase, timedOut := c.relistMatching(timeoutCtx, ns, podName, matches)
 				if phase == "" && waitDeadlineExpired(ctx, timeoutCtx) {
 					return "", true
 				}
@@ -207,6 +237,9 @@ func (c *Client) WaitRunner(ctx context.Context, ns, podName string, timeout tim
 			pod, ok := event.Object.(*corev1.Pod)
 			if !ok {
 				continue
+			}
+			if matches != nil && !matches(pod) {
+				return "", false
 			}
 			if isTerminalPodPhase(pod.Status.Phase) {
 				return pod.Status.Phase, false
@@ -230,8 +263,15 @@ func isTerminalPodPhase(phase corev1.PodPhase) bool {
 // called when the watch channel closes unexpectedly. If the Get fails for any
 // reason, an empty phase is returned (not a timeout).
 func (c *Client) relist(ctx context.Context, ns, podName string) (corev1.PodPhase, bool) {
+	return c.relistMatching(ctx, ns, podName, nil)
+}
+
+func (c *Client) relistMatching(ctx context.Context, ns, podName string, matches func(*corev1.Pod) bool) (corev1.PodPhase, bool) {
 	pod, err := c.cs.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
+		return "", false
+	}
+	if matches != nil && !matches(pod) {
 		return "", false
 	}
 	return pod.Status.Phase, false
@@ -252,6 +292,17 @@ func (c *Client) DeleteSpawn(
 ) error {
 	scope, err := validateSpawnIdentity(ns, secretName, spawnID, repoLabel)
 	if err != nil {
+		return err
+	}
+	return c.DeleteSpawnScoped(ctx, scope, ns, secretName, spawnID, repoLabel)
+}
+
+// DeleteSpawnScoped deletes only the explicit controller identity in ns.
+func (c *Client) DeleteSpawnScoped(ctx context.Context, scope, ns, secretName, spawnID, repoLabel string) error {
+	if err := validateScopeNamespace(scope, ns); err != nil {
+		return err
+	}
+	if err := validateExplicitSpawnIdentity(secretName, spawnID, repoLabel); err != nil {
 		return err
 	}
 	resources, err := c.listExactSpawnResources(ctx, ns, scope, spawnID, repoLabel)
@@ -276,22 +327,37 @@ func validateSpawnIdentity(ns, secretName, spawnID, repoLabel string) (string, e
 	if !ok || scope == "" || Namespace(scope) != ns {
 		return "", fmt.Errorf("kube: invalid spawn namespace %q", ns)
 	}
+	return scope, validateExplicitSpawnIdentity(secretName, spawnID, repoLabel)
+}
+
+func validateScopeNamespace(scope, ns string) error {
+	if scope == "" || len(kubevalidation.IsValidLabelValue(scope)) != 0 {
+		return fmt.Errorf("kube: invalid controller scope %q", scope)
+	}
+	if len(kubevalidation.IsDNS1123Label(ns)) != 0 {
+		return fmt.Errorf("kube: invalid execution namespace %q", ns)
+	}
+	return nil
+}
+
+func validateExplicitSpawnIdentity(secretName, spawnID, repoLabel string) error {
 	if spawnID == "" {
-		return "", fmt.Errorf("kube: empty spawn ID for namespace %q", ns)
+		return fmt.Errorf("kube: empty spawn ID")
+	}
+	if len(kubevalidation.IsValidLabelValue(spawnID)) != 0 || len(kubevalidation.IsDNS1123Subdomain(spawnResourceName("runner-egress", spawnID))) != 0 {
+		return fmt.Errorf("kube: invalid spawn ID %q", spawnID)
 	}
 	if repoLabel == "" {
-		return "", fmt.Errorf("kube: empty repository label for spawn %q", spawnID)
+		return fmt.Errorf("kube: empty repository label for spawn %q", spawnID)
+	}
+	if len(kubevalidation.IsValidLabelValue(repoLabel)) != 0 {
+		return fmt.Errorf("kube: invalid repository label %q", repoLabel)
 	}
 	expectedSecret := spawnResourceName("secret", spawnID)
 	if secretName != expectedSecret {
-		return "", fmt.Errorf(
-			"kube: secret %q does not match spawn %q (want %q)",
-			secretName,
-			spawnID,
-			expectedSecret,
-		)
+		return fmt.Errorf("kube: secret %q does not match spawn %q (want %q)", secretName, spawnID, expectedSecret)
 	}
-	return scope, nil
+	return nil
 }
 
 func (c *Client) listExactSpawnResources(
@@ -472,7 +538,14 @@ func (c *Client) waitForSpawnDeleted(
 // named objects fail closed instead of allowing reconciliation to delete an
 // ambiguous resource set.
 func (c *Client) ListSpawns(ctx context.Context, scope string) ([]SpawnRef, error) {
-	ns := Namespace(scope)
+	return c.ListSpawnsInNamespace(ctx, scope, Namespace(scope))
+}
+
+// ListSpawnsInNamespace enumerates only ns using controller-scope labels.
+func (c *Client) ListSpawnsInNamespace(ctx context.Context, scope, ns string) ([]SpawnRef, error) {
+	if err := validateScopeNamespace(scope, ns); err != nil {
+		return nil, err
+	}
 	selector := labels.Set{LabelScope: scope}.AsSelector().String() + "," + LabelSpawnID
 	secrets, err := c.cs.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,

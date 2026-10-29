@@ -91,8 +91,9 @@ scope:
   allowProjectOverrides:
     - allow_wildcards
 
-  # Orchestrator-side egress allow-list (for the orchestrator's own traffic,
-  # e.g. reaching GitHub API). Runner egress is controlled by runner.yml.
+  # Controller configuration prerequisite; the chart allows public TCP80/443
+  # and DNS, without enforcing this domain list. Project proxy policy uses
+  # approved runnerConfig in shared mode or runner.yml in legacy mode.
   orchEgress:
     allowDomains:
       - api.github.com
@@ -103,6 +104,26 @@ scope:
   # repos:
   #   - repo: owner/repo
   #     maxConcurrent: 3
+  # Shared mode (set namespace on every repo; unique preprovisioned namespaces):
+  #   - repo: owner/repo
+  #     namespace: ci-owner-repo
+  #     maxConcurrent: 3
+  #     runnerConfig:
+  #       runtime: node:24
+  #       labels: [self-hosted, Linux, ARM64, container]
+  #       resources: {memory: 2g, cpus: 2, pids: 256}
+  #       httpEgress: [api.github.com]
+  #       orchestrator: {timeoutSeconds: 21600}
+  #     runnerImage: registry.example/terminal@sha256:<64 lowercase hex>
+  #     kubernetes:
+  #       nodeSelector: {dedicated: ci}
+  #       tolerations: [{key: dedicated, operator: Equal, value: ci, effect: NoSchedule}]
+  #       ephemeralStorage: 10Gi
+  #       proxyResources: {cpu: 250m, memory: 256Mi, ephemeralStorage: 1Gi}
+  # Architecture follows ARM64/X64 labels (default amd64); conflicting selectors fail.
+  # Omitted runnerImage resolves the approved runtime environment image.
+  # Runner and proxy requests equal limits. Defaults: runner disk10Gi;
+  # proxy250m CPU/256Mi memory/1Gi disk. These settings cannot relax hardening.
 
 # ---------------------------------------------------------------------------
 # Authentication — PAT or GitHub App.

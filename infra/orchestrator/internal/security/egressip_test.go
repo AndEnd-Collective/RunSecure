@@ -140,3 +140,22 @@ func TestApplyOverrides_AllowPrivateCIDRs_BadCIDR(t *testing.T) {
 	require.Error(t, err, "bad CIDR must cause a parse error")
 	require.Contains(t, err.Error(), "security:")
 }
+
+func TestSharedAndMulticastEgressRequiresOperatorOptIn(t *testing.T) {
+	for _, tc := range []struct{ address, cidr string }{{"100.100.100.200", "100.64.0.0/10"}, {"224.0.0.1", "224.0.0.0/4"}, {"255.255.255.255", "240.0.0.0/4"}, {"ff02::1", "ff00::/8"}} {
+		t.Run(tc.address, func(t *testing.T) {
+			require.Error(t, CheckEgressIPLiterals([]string{tc.address}, Policy{}))
+			_, network, err := net.ParseCIDR(tc.cidr)
+			require.NoError(t, err)
+			require.NoError(t, CheckEgressIPLiterals([]string{tc.address}, Policy{AllowedPrivateCIDRs: []*net.IPNet{network}}))
+		})
+	}
+}
+
+func TestBlockedEgressCIDRsReturnsIndependentCanonicalCopy(t *testing.T) {
+	first := BlockedEgressCIDRs()
+	require.Contains(t, first, "100.64.0.0/10")
+	require.Contains(t, first, "ff00::/8")
+	first[0] = "0.0.0.0/0"
+	require.NotContains(t, BlockedEgressCIDRs(), "0.0.0.0/0")
+}

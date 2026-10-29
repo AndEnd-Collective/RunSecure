@@ -471,6 +471,162 @@ else
     fail "Kubernetes network: API peer rendering introduced a CIDR/port cross-product"
 fi
 
+# Shared mode provisions exactly the enrolled namespaces and binds the one
+# management ServiceAccount independently in each project namespace.
+SHARED_PROJECTS='[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":2,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"2g","cpus":2,"pids":256}}},{"repo":"acme/beta","namespace":"project-beta","maxConcurrent":1,"runnerConfig":{"runtime":"python:3.12","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":256}}}]'
+SHARED_CONTROLLER_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+if render_chart --set-json "scope.repos=${SHARED_PROJECTS}" &>/dev/null; then
+    fail "Shared projects: bundled legacy controller image was accepted"
+else
+    pass "Shared projects: bundled legacy controller image rejected"
+fi
+render_shared_chart() {
+    render_chart --set "image.orchestrator.digest=${SHARED_CONTROLLER_DIGEST}" "$@"
+}
+SHARED_RENDERED=$(render_shared_chart --set-json "scope.repos=${SHARED_PROJECTS}" 2>/dev/null || echo "")
+if [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: Namespace$') -eq 3 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: Role$') -eq 2 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: RoleBinding$') -eq 2 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c '^  name: default-deny-all$') -eq 3 ]] &&
+   [[ $(echo "${SHARED_RENDERED}" | grep -c 'pod-security.kubernetes.io/enforce: restricted') -eq 3 ]] &&
+   ! echo "${SHARED_RENDERED}" | grep -qE '^kind: ClusterRole(Binding)?$'; then
+    pass "Shared projects: restricted namespaces, default deny and per-project Roles bind one controller"
+else
+    fail "Shared projects: namespace or RBAC provisioning is incomplete"
+fi
+if [[ -z "$SHARED_RENDERED" ]]; then
+    fail "Shared projects: could not render chart for schema validation"
+elif [[ -z "$KUBECONFORM_BIN" ]]; then
+    skip_test "Shared projects: strict Kubernetes schema validation (kubeconform unavailable)"
+elif echo "${SHARED_RENDERED}" | "$KUBECONFORM_BIN" -strict -summary -kubernetes-version 1.29.0 >/dev/null; then
+    pass "Shared projects: strict Kubernetes schema validation"
+else
+    fail "Shared projects: Kubernetes schema validation failed"
+fi
+for invalid_projects in \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1}]' \
+ '[{"repo":"acme/alpha","namespace":"kube-system","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"runsecure-ci-scope","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}},{"repo":"acme/beta","maxConcurrent":1}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"runnerImage":"image:latest","runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]' \
+ '[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":1,"kubernetes":{"privileged":true},"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":1}}}]'; do
+    if render_shared_chart --set-json "scope.repos=${invalid_projects}" &>/dev/null; then
+        fail "Shared projects: malformed or unapproved project was accepted: ${invalid_projects}"
+    else
+        pass "Shared projects: malformed or unapproved project rejected"
+    fi
+done
+
+CONTROLLER_SPECIAL_RANGES_OK=true
+for cidr in '0.0.0.0/8' '100.64.0.0/10' '127.0.0.0/8' '169.254.0.0/16' '224.0.0.0/4' '240.0.0.0/4'; do
+    if ! echo "${RENDERED_NO_TLS}" | grep -q -- "- ${cidr}"; then
+        CONTROLLER_SPECIAL_RANGES_OK=false
+    fi
+done
+if [[ "$CONTROLLER_SPECIAL_RANGES_OK" == true ]]; then
+    pass "Controller world egress excludes private and special destination ranges"
+else
+    fail "Controller world egress permits a private or special destination range"
+fi
+
+# Configuration delivery uses the actual rendered Deployment and ConfigMap.
+if python3 - "$HELM_BIN" "$CHART_DIR" "$SHARED_PROJECTS" "$SHARED_CONTROLLER_DIGEST" <<'PYTEST'
+import copy
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+helm, chart, projects, digest = sys.argv[1:]
+class UniqueKeys(yaml.SafeLoader):
+    pass
+
+def mapping(loader, node, deep=False):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        assert key not in result, f"duplicate rendered YAML key: {key}"
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+values = {
+    "scope": {"name": "ci-scope", "repos": json.loads(projects)},
+    "image": {"orchestrator": {"digest": digest}},
+    "podAnnotations": {"operator.example/retained": "yes", "checksum/scope-config": "untrusted"},
+}
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / "values.json"
+    def render(config, bypass=False):
+        path.write_text(json.dumps(config))
+        command = [helm, "template", "test-release", chart, "-f", str(path)]
+        if bypass:
+            command.append("--skip-schema-validation")
+        return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def template(config):
+        result = render(config)
+        assert result.returncode == 0, result.stderr
+        objects = list(yaml.load_all(result.stdout, Loader=UniqueKeys))
+        deployment = next(obj for obj in objects if obj["kind"] == "Deployment")
+        annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+        assert annotations["operator.example/retained"] == "yes"
+        assert re.fullmatch(r"[0-9a-f]{64}", annotations["checksum/scope-config"])
+        assert deployment["spec"]["replicas"] == 1
+        assert deployment["spec"]["strategy"]["type"] == "Recreate"
+        assert deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] >= 90
+        return deployment["spec"]["template"]
+
+    failures = []
+    try:
+        baseline = template(values)
+        assert baseline == template(values), "identical configuration changed Pod template"
+        for kind in ("policy", "enrollment", "image", "placement"):
+            changed = copy.deepcopy(values)
+            project = changed["scope"]["repos"][0]
+            if kind == "policy":
+                project["runnerConfig"]["httpEgress"] = ["replacement.example.com"]
+            elif kind == "enrollment":
+                project["namespace"] = "project-replacement"
+            elif kind == "image":
+                project["runnerImage"] = "registry.example/runner@sha256:" + "a" * 64
+            else:
+                project["kubernetes"] = {"ephemeralStorage": "20Gi"}
+            updated = template(changed)
+            assert updated != baseline, f"{kind} edit did not change Pod template"
+            assert updated["metadata"]["annotations"]["checksum/scope-config"] != baseline["metadata"]["annotations"]["checksum/scope-config"]
+    except (AssertionError, KeyError) as error:
+        failures.append(f"scope rollout: {error}")
+
+    for setting, value in (
+        ("runnerConfig", values["scope"]["repos"][0]["runnerConfig"]),
+        ("runnerImage", "registry.example/runner@sha256:" + "a" * 64),
+        ("kubernetes", {"ephemeralStorage": "20Gi"}),
+        ("kubernetes", {}),
+    ):
+        incomplete = copy.deepcopy(values)
+        incomplete["scope"]["repos"] = [{"repo": "acme/alpha", "maxConcurrent": 1, setting: value}]
+        for bypass in (False, True):
+            result = render(incomplete, bypass)
+            if result.returncode == 0:
+                failures.append(f"{setting} without namespaces accepted (schema bypass={bypass})")
+            elif not bypass and "schema" not in result.stderr:
+                failures.append(f"{setting} missing namespace was not rejected by schema")
+    legacy = copy.deepcopy(values)
+    legacy["scope"]["repos"] = [{"repo": "acme/alpha", "maxConcurrent": 1}]
+    assert render(legacy).returncode == 0, "genuine legacy configuration rejected"
+    assert not failures, "; ".join(failures)
+PYTEST
+then
+    pass "Configuration delivery: deterministic rollout, protected annotations and explicit enrollment"
+else
+    fail "Configuration delivery: rollout or enrollment contract failed"
+fi
+
 # ── Print results ────────────────────────────────────────────────────────────
 
 echo ""

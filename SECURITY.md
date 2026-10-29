@@ -65,8 +65,10 @@ limits, internal-only network, no host binds) stays intact. This holds on
 runner only, and Kubernetes sets `readOnlyRootFilesystem: false` on the
 runner container only (proxy Pod containers stay read-only).
 
-Kubernetes maps `runner.yml` CPU and memory values to equal Pod requests and
-limits and caps the runner's memory-backed `/tmp` at 512 MiB. Kubernetes' core
+Kubernetes maps approved runner configuration CPU/memory to equal Pod requests
+and limits, caps runner ephemeral storage (default 10Gi), applies proxy CPU, memory
+and ephemeral-storage requests/limits (default 250m/256Mi/1Gi), and caps the
+runner's memory-backed `/tmp` at 512 MiB. Kubernetes' core
 Pod API does **not** expose a per-Pod PID-limit field: `runner.yml`'s `pids`
 value is enforced by the Compose backend only. Kubernetes deployments must set
 a bounded kubelet `podPidsLimit`; that is a node-level prerequisite and is not
@@ -82,7 +84,7 @@ equivalent to RunSecure enforcing the exact per-runner value.
 | `--pids-limit` (Compose); kubelet `podPidsLimit` prerequisite (Kubernetes) | Fork bombs, unbounded process spawning | `run-all-tests.sh` (PID test); cluster configuration |
 | `--memory` / `--memory-swap` | Memory exhaustion, OOM attacks | `validate-runner.sh` |
 | `--cpus` | CPU exhaustion (cryptomining) | `validate-runner.sh` |
-| Seccomp profile (`node-runner.json`) | Dangerous syscalls (ptrace, mount, bpf, keyctl) | Architecture |
+| Docker default / Kubernetes `RuntimeDefault` seccomp on orchestrator workloads | Runtime syscall filtering; kernel/runtime dependent | Runtime security contexts and socket-proxy regression tests |
 
 ### Layer 3: Network Isolation (network-level)
 
@@ -111,16 +113,36 @@ the policies are created but silently ignored.**
 
 | Control | What it prevents | Verified by |
 |---------|-----------------|-------------|
-| Per-spawn `RunnerEgressNetworkPolicy` | Runner Pod reaching anything other than its own proxy Pod on 3128/TCP | `tests/integration/k8s/run-k8s-tests.sh` step 5a–5c (Calico) |
+| Per-spawn `RunnerEgressNetworkPolicy` | Runner Pod reaching anything other than exact cluster DNS peers and its own proxy ports | `tests/integration/k8s/run-k8s-tests.sh` step 5a–5c (Calico) |
 | Per-spawn `ProxyIngressNetworkPolicy` | Runner of one spawn reaching the proxy of a different spawn (cross-spawn); also makes runner→proxy 3128/TCP work under default-deny (load-bearing — runner→proxy is blocked without it) | `tests/integration/k8s/run-k8s-tests.sh` step 5d |
 | Per-spawn `ProxyEgressNetworkPolicy` | Proxy reaching destinations other than kube-dns + internet via Squid allow-list | `tests/integration/k8s/run-k8s-tests.sh` step 4 |
 | Namespace default-deny NetworkPolicy | All unlisted traffic blocked at network layer | Chart `networkpolicy-default-deny.yaml` |
-| Namespace-scoped RBAC (Role, not ClusterRole) | Orchestrator SA acting outside its scope namespace or creating cluster-level objects | `tests/integration/k8s/run-k8s-tests.sh` step 6 |
+| Namespace-scoped RBAC (Role, not ClusterRole) | Orchestrator SA acting outside its enrolled execution namespaces or creating cluster-level objects | `tests/integration/k8s/run-k8s-tests.sh` step 6 |
 | PSS Restricted admission | Privileged Pods, host namespaces, unsafe capabilities in the scope namespace | `tests/integration/k8s/run-k8s-tests.sh` step 3 |
 | `automountServiceAccountToken: false` on runner+proxy Pods | Runner or proxy code accessing the kube API via the default SA token | `infra/orchestrator/internal/kube/objects.go` (all pod builders) |
 | GitHub App least-privilege installation tokens | Long-lived PAT as the only auth option; user-identity-scoped tokens in multi-team environments | `infra/orchestrator/internal/auth/githubapp.go` |
-| Optional mTLS on orchestrator→socket-proxy hop | Plaintext traffic between orchestrator and socket-proxy in a shared network segment | `infra/socket-proxy/internal/config/config.go` (`BuildTLSConfig`: TLS 1.3, `RequireAndVerifyClientCert`) |
-| cert-manager TLS via chart | Manual certificate rotation for the socket-proxy TLS certificate | Chart `certificate.yaml` + `issuer-selfsigned.yaml` (rendered when `tls.enabled: true`) |
+| Kubernetes API TLS | API client uses in-cluster credentials and TLS; there is no Docker socket-proxy in Kubernetes mode | `infra/orchestrator/internal/kube/client.go` |
+| Optional certificate resources | Chart compatibility resources; no separate Kubernetes runtime mTLS enforcement claim | Chart `certificate.yaml` + `issuer-selfsigned.yaml` |
+
+Shared Kubernetes mode requires a complete operator-approved repository to
+namespace map and inline runner configuration. Helm creates Restricted project
+namespaces with default-deny policies and binds the single management
+ServiceAccount separately in each. Credentials remain in the management
+namespace. Runtime spawn/recovery/teardown validates exact controller scope,
+repository and execution namespace, with no cluster-wide discovery or namespace
+creation. The controller is trusted across all enrolled projects; project
+namespaces share a kernel and are not VM isolation. Admission and node policy
+remain operator responsibilities. Architecture labels drive placement for both
+runner and proxy. There is one active controller and no distributed leader
+election or HA.
+
+The controller's chart NetworkPolicy permits exact Kubernetes API/DNS peers plus
+external IPv4 TCP80/443. `orch_egress.allow_domains` is a configuration prerequisite,
+not a domain filter for controller traffic: the controller does not traverse the
+per-spawn Squid proxy. The runner's proxy domain policy does not protect a
+compromised controller. Custom Docker seccomp overrides are rejected; the former
+host-path value was not valid Docker Engine API inline seccomp JSON and did not
+establish a working custom-profile control. Kubernetes keeps `RuntimeDefault`.
 
 ---
 
