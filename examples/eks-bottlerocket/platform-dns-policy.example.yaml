@@ -1,0 +1,35 @@
+# Stage BEFORE creating the CoreDNS add-on in strict CNI mode.
+# Illustrative addresses only. Replace both API peers from the real Service
+# and endpoints, and qualify AZ-local forwarding/NodeLocal DNS separately.
+# This policy does not install DNS or assert AZ locality.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsecure-platform-coredns
+  namespace: kube-system
+spec:
+  podSelector:
+    matchLabels: {k8s-app: kube-dns}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [runsecure-eks, ci-example, kube-system]
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+  egress:
+    - to:
+        - ipBlock: {cidr: 10.80.0.2/32} # This example VPC's Resolver only.
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock: {cidr: 172.20.0.1/32} # Example Kubernetes Service address.
+      ports: [{protocol: TCP, port: 443}]
+    - to:
+        - ipBlock: {cidr: 10.80.0.5/32} # PLACEHOLDER: replace with exact API endpoint(s).
+      ports: [{protocol: TCP, port: 443}]
