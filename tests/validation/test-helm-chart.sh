@@ -494,8 +494,11 @@ if [[ $(echo "${SHARED_RENDERED}" | grep -c '^kind: Namespace$') -eq 3 ]] &&
 else
     fail "Shared projects: namespace or RBAC provisioning is incomplete"
 fi
-if [[ -n "$SHARED_RENDERED" && -n "$KUBECONFORM_BIN" ]] &&
-   echo "${SHARED_RENDERED}" | "$KUBECONFORM_BIN" -strict -summary -kubernetes-version 1.29.0 >/dev/null; then
+if [[ -z "$SHARED_RENDERED" ]]; then
+    fail "Shared projects: could not render chart for schema validation"
+elif [[ -z "$KUBECONFORM_BIN" ]]; then
+    skip_test "Shared projects: strict Kubernetes schema validation (kubeconform unavailable)"
+elif echo "${SHARED_RENDERED}" | "$KUBECONFORM_BIN" -strict -summary -kubernetes-version 1.29.0 >/dev/null; then
     pass "Shared projects: strict Kubernetes schema validation"
 else
     fail "Shared projects: Kubernetes schema validation failed"
