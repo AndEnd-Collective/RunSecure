@@ -2,7 +2,7 @@
 # RunSecure — self-CI configuration
 # ============================================================================
 # This file makes RunSecure use itself for CI. The dogfood.yml workflow
-# requires `runs-on: [self-hosted, Linux, ARM64, container]` — pointing
+# requires `runs-on: [self-hosted, Linux, ARM64, container, runsecure-dogfood]` — pointing
 # at a runner that the orchestrator (./infra/scripts/run.sh) starts.
 #
 # Bootstrap:
@@ -46,5 +46,6 @@ resources:
   cpus: 2
   pids: 256
 
-# These labels must match the `runs-on:` in dogfood.yml.
-labels: [self-hosted, Linux, ARM64, container]
+# These labels must match the `runs-on:` in dogfood.yml. The dedicated label
+# keeps generic terminal acceptance runners from claiming composed self-CI jobs.
+labels: [self-hosted, Linux, ARM64, container, runsecure-dogfood]

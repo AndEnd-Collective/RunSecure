@@ -291,3 +291,74 @@ fi
 grep -Fq 'expected_parallelism must be between 1 and 4' "$invalid_output"
 
 echo "PASS: embedded live-acceptance verifier emits bound four-runner evidence"
+
+# Execute the exact network probe with an exhausted unauthenticated /meta quota.
+# The positive proxy path must still work through /rate_limit, while a proxy
+# failure or a successful direct connection must continue to fail the gate.
+python3 - "$WORKFLOW" "$tmp" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+import yaml
+
+workflow = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
+script = workflow['jobs']['runtime']['steps'][0]['run']
+probe = script[script.index('curl --disable --proxy'):script.index('# Keep all four jobs')]
+root = pathlib.Path(sys.argv[2])
+mock_bin = root / 'probe-bin'
+mock_bin.mkdir()
+mock = mock_bin / 'curl'
+mock.write_text('#!' + sys.executable + '\n' + '''
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ['PROBE_CALLS'], 'a') as log:
+    log.write(json.dumps({'args': args, 'env': {
+        name: os.environ[name] for name in (
+            'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+            'http_proxy', 'https_proxy', 'no_proxy', 'ALL_PROXY', 'all_proxy'
+        ) if name in os.environ
+    }}) + '\\n')
+# An unauthenticated primary quota can reject /meta despite healthy egress.
+if args[-1] == 'https://api.github.com/meta':
+    sys.exit(22)
+if args[-1] != 'https://api.github.com/rate_limit':
+    sys.exit(99)
+if '--proxy' in args:
+    sys.exit(int(os.environ.get('PROBE_PROXY_RC', '0')))
+sys.exit(int(os.environ.get('PROBE_DIRECT_RC', '7')))
+''')
+mock.chmod(0o755)
+env = dict(os.environ, PATH=str(mock_bin) + os.pathsep + os.environ['PATH'],
+           HTTPS_PROXY='http://proxy:3128', HTTP_PROXY='http://proxy:3128',
+           https_proxy='http://proxy:3128', http_proxy='http://proxy:3128',
+           NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1',
+           ALL_PROXY='http://proxy:3128', all_proxy='http://proxy:3128')
+
+def check(mode, proxy_rc, direct_rc):
+    calls = root / f'probe-{mode}.jsonl'
+    result = subprocess.run(['/bin/bash', '-euo', 'pipefail', '-c', probe],
+                            env=dict(env, PROBE_CALLS=str(calls),
+                                     PROBE_PROXY_RC=str(proxy_rc),
+                                     PROBE_DIRECT_RC=str(direct_rc)),
+                            capture_output=True, text=True)
+    return result, [json.loads(line) for line in calls.read_text().splitlines()]
+
+result, calls = check('allowed', 0, 7)
+assert result.returncode == 0, 'positive probe failed under exhausted /meta quota'
+assert len(calls) == 2
+assert all(call['args'][-1] == 'https://api.github.com/rate_limit' for call in calls)
+assert all('-fsS' in call['args'] for call in calls), 'probe stopped failing on HTTP errors'
+assert '--proxy' in calls[0]['args'] and calls[0]['env']['HTTPS_PROXY'] == 'http://proxy:3128'
+assert calls[1]['env'] == {}, 'direct probe retained a proxy environment variable'
+assert '--noproxy' in calls[1]['args'] and '*' in calls[1]['args']
+print('PASS: exact network probe tolerates exhausted /meta quota without adding credentials')
+result, calls = check('proxy-denied', 22, 7)
+assert result.returncode == 22 and len(calls) == 1
+print('PASS: positive proxy HTTP failure still fails live acceptance')
+result, calls = check('direct-escape', 0, 0)
+assert result.returncode != 0 and 'runner reached GitHub directly' in result.stderr
+print('PASS: successful direct egress still fails live acceptance')
+PY

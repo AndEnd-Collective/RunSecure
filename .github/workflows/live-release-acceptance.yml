@@ -92,16 +92,18 @@ jobs:
           printf 'slot=%s spawn=%s\n' '${{ matrix.slot }}' "$RUNSECURE_SPAWN_ID" > "$probe"
           rm -f "$probe"
 
+          # /meta shares the egress IP's unauthenticated primary API quota.
+          # /rate_limit probes the same allowed host without consuming that quota.
           curl --disable --proxy "$HTTPS_PROXY" --noproxy "" \
             -fsS --connect-timeout 10 --max-time 20 \
-            -o /dev/null https://api.github.com/meta
+            -o /dev/null https://api.github.com/rate_limit
           if env \
               -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY \
               -u http_proxy -u https_proxy -u no_proxy \
               -u ALL_PROXY -u all_proxy \
               curl --disable --noproxy "*" -fsS \
                 --connect-timeout 3 --max-time 5 \
-                -o /dev/null https://api.github.com/meta; then
+                -o /dev/null https://api.github.com/rate_limit; then
             echo "::error::runner reached GitHub directly with every proxy variable removed" >&2
             exit 1
           fi
