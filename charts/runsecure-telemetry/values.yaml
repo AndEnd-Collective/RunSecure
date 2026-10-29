@@ -2,9 +2,6 @@
 # host reader and external archive are ready. Never put credentials here.
 enabled: false
 renderOnly: false
-image:
-  repository: ""
-  digest: ""
 environment: Testing
 clusterName: ""
 aws:
@@ -26,10 +23,12 @@ trustedSources:
     podNamePrefix: runsecure-
     signature: runsecure-orchestrator-v1
 gateway:
+  image: {repository: "", digest: ""}
   storageClassName: ""
   storageSize: 10Gi
   nodeSelector: {runsecure.io/pool: management}
 nodeReader:
+  image: {repository: "", digest: ""}
   # Phase 1 installs a Restricted namespace/admission guard; phase 2 activates
   # only the guarded namespace; after live dry-runs, phase 3 renders workloads.
   installGuardOnly: false

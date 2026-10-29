@@ -42,6 +42,28 @@ class ChartContract(unittest.TestCase):
             bad['aws']['logStreamPrefix'] = stream
             self.assertIn('fixed', render(bad, False))
 
+    def test_role_images_required_distinct_and_single_image_values_rejected(self):
+        for role in ['gateway', 'nodeReader']:
+            for key in ['repository', 'digest']:
+                bad = copy.deepcopy(FIXTURE)
+                bad[role]['image'][key] = ''
+                self.assertIn(role+'.image.'+key, render(bad, False))
+        bad = copy.deepcopy(FIXTURE)
+        bad['gateway']['image'] = copy.deepcopy(bad['nodeReader']['image'])
+        self.assertIn('distinct', render(bad, False))
+        bad = copy.deepcopy(FIXTURE)
+        bad['image'] = copy.deepcopy(bad['nodeReader']['image'])
+        self.assertIn('image', render(bad, False))
+
+    def test_admission_binds_only_node_image(self):
+        docs = render(FIXTURE)
+        policy = next(d for d in docs if d['kind'] == 'ValidatingAdmissionPolicy')
+        assertions = '\n'.join(v['expression'] for v in policy['spec']['validations'])
+        node = FIXTURE['nodeReader']['image']
+        gateway = FIXTURE['gateway']['image']
+        self.assertIn(node['repository']+'@'+node['digest'], assertions)
+        self.assertNotIn(gateway['repository']+'@'+gateway['digest'], assertions)
+
     def test_live_guard_required(self):
         bad = copy.deepcopy(FIXTURE)
         bad['renderOnly'] = False
@@ -49,7 +71,7 @@ class ChartContract(unittest.TestCase):
 
     def test_guard_phase_has_no_workload_or_gateway_identity(self):
         values = copy.deepcopy(FIXTURE)
-        values['nodeReader'] = {'installGuardOnly': True}
+        values['nodeReader']['installGuardOnly'] = True
         docs = render(values)
         self.assertFalse(any(d['kind'] in ['DaemonSet', 'StatefulSet'] for d in docs))
         accounts = [d for d in docs if d['kind']=='ServiceAccount']
@@ -68,7 +90,7 @@ class ChartContract(unittest.TestCase):
 
     def test_namespace_activation_is_separate_and_has_no_workloads(self):
         values=copy.deepcopy(FIXTURE)
-        values['nodeReader']={'installGuardOnly':True,'activateGuardNamespace':True}
+        values['nodeReader'].update(installGuardOnly=True, activateGuardNamespace=True)
         docs=render(values)
         self.assertFalse(any(d['kind'] in ['DaemonSet','StatefulSet'] for d in docs))
         self.assertFalse(any(d['kind']=='ServiceAccount' and d['metadata']['name']=='runsecure-telemetry-gateway' for d in docs))
@@ -89,7 +111,9 @@ class ChartContract(unittest.TestCase):
             self.assertEqual('never', pod['nodeSelector']['runsecure.io/telemetry-render-only'])
             self.assertEqual(['/bin/false'], pod['initContainers'][0]['command'])
             container = pod['containers'][0]
-            self.assertTrue(container['image'].endswith('@'+FIXTURE['image']['digest']))
+            role = 'gateway' if resource['kind'] == 'StatefulSet' else 'nodeReader'
+            image = FIXTURE[role]['image']
+            self.assertEqual(image['repository']+'@'+image['digest'], container['image'])
             self.assertTrue(container['securityContext']['readOnlyRootFilesystem'])
             self.assertFalse(container['securityContext']['privileged'])
             self.assertEqual(['ALL'], container['securityContext']['capabilities']['drop'])

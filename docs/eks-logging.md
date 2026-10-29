@@ -80,22 +80,30 @@ The separately authorized Cornerstone source is pinned at
 `490fc072c02d72a0dc62633d0c4f573b6707b4ef`. Public RunSecure contains its
 integration recipe, not its private implementation. `infra/collector/build.sh`
 requires a clean checkout at that revision and a build directory outside this
-repository. OCB/contrib are 0.158.0 and collector core is 1.64.0, matching the
-actual dependency contract rather than the older example builder file. The
-runtime includes real `journalctl`; do not substitute a stock collector lacking
-Cornerstone processors or the public normalization adapter.
+repository. The supported recipe uses OCB/core release 0.164.0, core modules 1.70.0
+and contrib modules 0.164.1, following the current official distribution. The
+pinned Cornerstone source is qualified on this coherent graph without vendoring
+or changing its private implementation. Do not substitute a stock collector
+lacking the Cornerstone processors or the public normalization adapter.
+
+Two image targets share the custom static binary. The non-root gateway is a
+scratch image containing only the binary and a qualified CA bundle. The node
+reader separately carries Debian's real `journalctl` and native package
+inventory. Only the node reader needs that native surface; its remaining
+advisories must be assessed independently of the minimal gateway scan.
 
 ```sh
 CORNERSTONE_SOURCE=/approved/private/checkout \
 COLLECTOR_BUILD_DIR=/approved/local/build \
   bash infra/collector/build.sh
-# Optional local image build: also set BUILD_IMAGE=1 and COLLECTOR_IMAGE.
+# Optional local pair build: also set BUILD_IMAGE=1,
+# COLLECTOR_GATEWAY_IMAGE and COLLECTOR_NODE_IMAGE to distinct local tags.
 # Publication is a separate reviewed step; no token/private checkout is committed.
 ```
 
-Record resolved modules, source revision, image manifest digest, SBOM and scan
-results. Scan the final architecture-specific image with the normal high/critical
-gate; do not suppress the gate. Mirror an approved image to the private registry
+Record resolved modules, source revision, each image manifest digest, SBOM and
+scan results. Scan both final architecture-specific images with the normal
+high/critical gate; do not suppress the gate. Mirror approved role images to the private registry
 reachable by the cluster and include its exact repository ARN in the reviewed
 `pull_repository_arns` input. Public CI does not gain access to the private
 Cornerstone repository, and this change does not add collector publication to
@@ -112,9 +120,12 @@ not a manifest digest.
    and role outputs. Refresh endpoint peers after ENI replacement. Supply a
    reviewed encrypted StorageClass and working CSI installation; this example
    does not silently create a broadly privileged storage driver.
-3. Supply private image manifest digest, durable storage, TLS Secrets and
+3. Supply distinct `gateway.image` and `nodeReader.image` private manifest
+   references, durable storage, TLS Secrets and
    cloud/cluster context in a private operator values file. The supplied render
-   fixture is deliberately unable to start workloads. Review the trusted source
+   fixture is deliberately unable to start workloads. The unpublished prior
+   single `image` value is rejected; migrate it to the two qualified role refs.
+   Review the trusted source
    tuple against the actual controller Pod/container names. Add socket-proxy
    trust only on a deployment that actually runs that component.
 4. Install the guard-only phase (`nodeReader.installGuardOnly=true`,
@@ -180,6 +191,10 @@ reviewed tool with deduplication by event UUID/AWS event identity. Do not delete
 state or widen egress as a recovery shortcut. Local self-transport errors remain
 on disk and metrics because feeding them back into their failing exporter would
 loop; collect/replay those files through a separate approved incident path.
+
+Collector 0.164 rewrites filelog checkpoints in protobuf while retaining legacy
+JSON read compatibility. Back up state and qualify rollback before assuming an
+older binary can consume newly written checkpoints.
 
 For upgrades, drain jobs, snapshot recovery state, verify chart/config and
 processor/schema compatibility, change one pinned image at a time and repeat

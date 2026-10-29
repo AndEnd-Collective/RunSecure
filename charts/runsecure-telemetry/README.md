@@ -15,6 +15,16 @@ material never belongs in values. Gateway private Logs endpoint IPv4 /32s, exact
 DNS peers, fixed archive group/prefix, reviewed AWS account/region and an
 encrypted persistent StorageClass are required inputs.
 
+The chart requires separate exact manifest references under
+`gateway.image.repository` / `gateway.image.digest` and
+`nodeReader.image.repository` / `nodeReader.image.digest`. Gateway uses the
+shell-free scratch build target; node uses the journal-capable Debian target.
+The legacy top-level `image` values are rejected; role digests must differ, and
+the admission guard permits only the exact node image. Replacing either image
+requires its own build validation, SBOM and scan; changing the node reference
+also requires the three guard phases below. This chart remains disabled and
+unreleased until those artifacts and the live commissioning gates qualify.
+
 The host reader needs root solely to read host-owned logs, with a read-only
 rootfs, no capabilities, no privilege escalation and no host namespaces. Its
 narrow hostPath exception has three stages:

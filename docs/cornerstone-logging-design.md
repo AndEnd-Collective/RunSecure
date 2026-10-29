@@ -20,9 +20,12 @@ normalizer removes producer-supplied validation annotations, makes canonical
 attributes explicitly, and runs the actual Cornerstone schema/signature stages.
 Schema validity is not proof that a workload's message is true or safe.
 
-The gateway runs in a dedicated Restricted observability namespace. A separate
+The gateway uses a minimal scratch/CA/static-binary image and runs in a
+dedicated Restricted observability namespace. A separate
 node-reader namespace needs narrowly guarded host-path access; it does not get
 a Docker socket, host namespaces, Kubernetes API authority or an AWS identity.
+Only that node-reader image carries the native journal tooling and Debian
+package inventory; both role images receive independent scans and manifest pins.
 An admission guard and negative server-side admission preflight are prerequisites
 to starting that reader. Agent-to-gateway transport uses a dedicated mTLS trust
 root and network policies. Job namespaces cannot ingest directly.
@@ -53,7 +56,9 @@ remain operational concerns with explicit tests/runbook actions.
 The Cornerstone repository is private. Public RunSecure source includes its
 revision contract and build configuration, never a copied private source tree or
 credential. Local collector builds consume a separately authorized pinned
-checkout as a named build context. Publishing the resulting artifact and
+checkout as a named build context. The qualified graph follows the current
+0.164.0 collector release with contrib 0.164.1/core modules 1.70.0. Publishing
+the resulting role artifacts and
 provisioning cloud resources are separate approval steps.
 
 The deployment chart stays disabled until qualified image digests, existing mTLS
