@@ -1,0 +1,90 @@
+{{- if .Values.enabled }}
+{{- range $namespace := list "runsecure-observability" "runsecure-observability-node" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ $namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}
+{{- if not .Values.nodeReader.installGuardOnly }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsecure-telemetry-gateway
+  namespace: runsecure-observability
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: runsecure-telemetry-gateway}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: runsecure-observability-node}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: runsecure-telemetry-node}
+      ports: [{protocol: TCP, port: 4317}]
+{{- if .Values.monitoring.namespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.monitoring.namespace }}}
+          podSelector:
+            matchLabels: {{ .Values.monitoring.podLabels | toJson }}
+      ports: [{protocol: TCP, port: 8888}]
+{{- end }}
+  egress:
+    - to:
+{{- range .Values.aws.logsEndpointIPs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+{{- end }}
+      ports: [{protocol: TCP, port: 443}]
+    - to: [{ipBlock: {cidr: 169.254.170.23/32}}]
+      ports: [{protocol: TCP, port: 80}]
+    - to:
+{{- range .Values.dns.serviceCIDRs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+{{- end }}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.dns.namespace }}}
+          podSelector:
+            matchLabels: {{ .Values.dns.podLabels | toJson }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runsecure-telemetry-node
+  namespace: runsecure-observability-node
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: runsecure-telemetry-node}}
+  policyTypes: [Ingress, Egress]
+{{- if .Values.monitoring.namespace }}
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.monitoring.namespace }}}
+          podSelector:
+            matchLabels: {{ .Values.monitoring.podLabels | toJson }}
+      ports: [{protocol: TCP, port: 8888}]
+{{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: runsecure-observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: runsecure-telemetry-gateway}
+      ports: [{protocol: TCP, port: 4317}]
+    - to:
+{{- range .Values.dns.serviceCIDRs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+{{- end }}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.dns.namespace }}}
+          podSelector:
+            matchLabels: {{ .Values.dns.podLabels | toJson }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+{{- end }}
+{{- end }}

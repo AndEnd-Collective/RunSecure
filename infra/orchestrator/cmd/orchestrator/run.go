@@ -42,6 +42,8 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 
 	clk := clock.System()
 	em := cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID)
+	em.SetBackend(s.Backend)
+	_ = em.EmitProcessStarted(version, buildSHA, s.Backend)
 	// Bug #3 fix: respect RUNSECURE_GITHUB_BASE_URL for integration tests
 	// (mock-github) and future GitHub Enterprise deployments.
 	baseURL := envOr("RUNSECURE_GITHUB_BASE_URL", github.DefaultBaseURL)
@@ -198,8 +200,8 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 	defer signal.Stop(sigCh)
 	select {
 	case <-ctx.Done():
-	case sig := <-sigCh:
-		fmt.Fprintln(os.Stderr, "orchestrator: caught", sig, "— draining…")
+	case <-sigCh:
+		_ = em.EmitProcessStopping("signal_received")
 	case serverRunErr = <-serverDone:
 		serverStopped = true
 		if serverRunErr == nil && ctx.Err() == nil {
@@ -220,7 +222,7 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 	result := drainAndStop(drainTimeout, stopPolling, pollDone, intentCh,
 		&draining, stopWorkers, workersDone)
 	if result.Forced {
-		fmt.Fprintln(os.Stderr, "orchestrator: drain deadline reached — forced runner cleanup requested")
+		_ = em.EmitProcessMessage("drain deadline reached; forced runner cleanup requested")
 	}
 	if !result.WorkersStopped {
 		return errors.New("orchestrator: workers did not stop within forced-cleanup grace")
@@ -522,8 +524,12 @@ func (p *productionDeps) RunnerYMLContext(
 		if err != nil {
 			return nil, err
 		}
+		em := p.em
+		if em == nil {
+			em = cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID)
+		}
 		for _, w := range yml.DeprecationWarnings() {
-			fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
+			_ = em.EmitProcessMessage(w)
 		}
 		if err := yml.ValidateEgress(); err != nil {
 			return nil, fmt.Errorf("runner.yml egress validation: %w", err)
@@ -565,10 +571,8 @@ func (p *productionDeps) storeRunnerYML(
 // On 304 the function returns errNotModified; callers should substitute their
 // cached snapshot. On 200 the snapshot is returned and the ETag is persisted.
 //
-// TODO(k8s_context): once cornerstone defines a k8s_context schema field,
-// thread Backend=="kube" into Cornerstone spawn events here and in spawn.go
-// instead of container_context. Currently container_context is reused as-is
-// for kube (no behavior change; pod names are set via Handle.Refs not ctx).
+// k8s.context describes the emitting controller from its explicit Downward API
+// identity. Legacy container fields describe the spawn and remain compatible.
 func loadRunnerYMLFromAPI(ctx context.Context, gh *github.Client, st etagger, repo string) (*orchestrator.RunnerYMLSnapshot, error) {
 	etag := st.LastETag(repo)
 	body, newETag, notModified, err := gh.GetRunnerYML(ctx, repo, etag)
@@ -585,7 +589,7 @@ func loadRunnerYMLFromAPI(ctx context.Context, gh *github.Client, st etagger, re
 		return nil, err
 	}
 	for _, w := range yml.DeprecationWarnings() {
-		fmt.Fprintln(os.Stderr, "[RunSecure] WARNING:", w)
+		_ = cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID).EmitProcessMessage(w)
 	}
 	if err := yml.ValidateEgress(); err != nil {
 		return nil, fmt.Errorf("runner.yml egress validation: %w", err)

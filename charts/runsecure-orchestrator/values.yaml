@@ -255,3 +255,14 @@ affinity: {}
 # Pod annotations.
 # ---------------------------------------------------------------------------
 podAnnotations: {}
+
+# Explicit emitting-controller identity. Downward API supplies Pod/namespace/node;
+# these values describe deployment context only and contain no credentials.
+logging:
+  environment: Testing
+  clusterName: ""
+  cloud:
+    provider: ""
+    accountId: ""
+    region: ""
+    zone: ""

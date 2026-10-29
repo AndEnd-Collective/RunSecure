@@ -1,0 +1,32 @@
+{{- include "telemetry.validate" . -}}
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runsecure-observability
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runsecure-observability-node
+  labels:
+    # HostPath requires an exception; exact guard below constrains this namespace.
+    pod-security.kubernetes.io/enforce: {{ if or .Values.renderOnly (and .Values.nodeReader.installGuardOnly (not .Values.nodeReader.activateGuardNamespace)) }}restricted{{ else }}privileged{{ end }}
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+{{ include "telemetry.guard" . }}
+---
+{{ include "telemetry.guardBinding" . }}
+---
+# Credentialless identity required for the positive admission dry-run fixture.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runsecure-telemetry-node
+  namespace: runsecure-observability-node
+automountServiceAccountToken: false
+{{- end }}

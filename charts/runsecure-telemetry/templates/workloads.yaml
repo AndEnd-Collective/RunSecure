@@ -1,0 +1,189 @@
+{{- if and .Values.enabled (not .Values.nodeReader.installGuardOnly) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runsecure-telemetry-gateway
+  namespace: runsecure-observability
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: runsecure-telemetry-gateway
+  namespace: runsecure-observability
+spec:
+  selector: {app.kubernetes.io/name: runsecure-telemetry-gateway}
+  ports:
+    - {name: otlp, port: 4317, targetPort: otlp, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: runsecure-telemetry-gateway
+  namespace: runsecure-observability
+spec:
+  replicas: 1
+  serviceName: runsecure-telemetry-gateway
+  selector:
+    matchLabels: {app.kubernetes.io/name: runsecure-telemetry-gateway}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: runsecure-telemetry-gateway}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: runsecure-telemetry-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      nodeSelector:
+{{ toYaml .Values.gateway.nodeSelector | indent 8 }}
+{{- if .Values.renderOnly }}
+        runsecure.io/telemetry-render-only: never
+      initContainers:
+        - name: render-only-disabled
+          image: {{ include "telemetry.image" . }}
+          command: [/bin/false]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+{{- end }}
+      containers:
+        - name: collector
+          image: {{ include "telemetry.image" . }}
+          command: [/usr/local/bin/runsecure-collector]
+          args: [--config=/etc/otel/config.yaml]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          env:
+            - {name: AWS_REGION, value: {{ .Values.aws.region | quote }}}
+            - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+          ports:
+            - {name: otlp, containerPort: 4317}
+            - {name: health, containerPort: 13133}
+            - {name: metrics, containerPort: 8888}
+          readinessProbe: {httpGet: {path: /, port: health}}
+          livenessProbe: {httpGet: {path: /, port: health}, initialDelaySeconds: 20}
+          resources:
+            requests: {cpu: 250m, memory: 768Mi, ephemeral-storage: 256Mi}
+            limits: {cpu: "1", memory: 768Mi, ephemeral-storage: 256Mi}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/otel}
+            - {name: config, mountPath: /etc/otel, readOnly: true}
+            - {name: events, mountPath: /etc/otel-events, readOnly: true}
+            - {name: tls, mountPath: /etc/otel-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: runsecure-telemetry-gateway}
+        - name: events
+          configMap: {name: runsecure-telemetry-events}
+        - name: tls
+          secret: {secretName: {{ .Values.tls.gatewaySecret }}, defaultMode: 288}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+  volumeClaimTemplates:
+    - metadata: {name: state}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.gateway.storageClassName | quote }}
+        resources:
+          requests: {storage: {{ .Values.gateway.storageSize | quote }}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: runsecure-telemetry-node
+  namespace: runsecure-observability-node
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: runsecure-telemetry-node}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: runsecure-telemetry-node}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: runsecure-telemetry-node
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {runAsUser: 0, runAsGroup: 0, seccompProfile: {type: RuntimeDefault}}
+      nodeSelector:
+{{ toYaml .Values.nodeReader.nodeSelector | indent 8 }}
+{{- if .Values.renderOnly }}
+        runsecure.io/telemetry-render-only: never
+      initContainers:
+        - name: render-only-disabled
+          image: {{ include "telemetry.image" . }}
+          command: [/bin/false]
+          securityContext: {privileged: false, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+{{- end }}
+      tolerations:
+{{ toYaml .Values.nodeReader.tolerations | indent 8 }}
+      containers:
+        - name: collector
+          image: {{ include "telemetry.image" . }}
+          command: [/usr/local/bin/runsecure-collector]
+          args: [--config=/etc/otel/config.yaml]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+          ports:
+            - {name: health, containerPort: 13133}
+            - {name: metrics, containerPort: 8888}
+          readinessProbe: {httpGet: {path: /, port: health}}
+          livenessProbe: {httpGet: {path: /, port: health}, initialDelaySeconds: 20}
+          resources:
+            requests: {cpu: 100m, memory: 384Mi, ephemeral-storage: 256Mi}
+            limits: {cpu: 500m, memory: 384Mi, ephemeral-storage: 256Mi}
+          volumeMounts:
+            - {name: pod-logs, mountPath: /var/log/pods, readOnly: true}
+            - {name: journals, mountPath: /var/log/journal, readOnly: true}
+            - {name: run-journals, mountPath: /run/log/journal, readOnly: true}
+            - {name: cni-logs, mountPath: /var/log/aws-routed-eni, readOnly: true}
+            - {name: state, mountPath: /var/lib/otel}
+            - {name: config, mountPath: /etc/otel, readOnly: true}
+            - {name: tls, mountPath: /etc/otel-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: pod-logs
+          hostPath: {path: /var/log/pods, type: Directory}
+        - name: journals
+          hostPath: {path: /var/log/journal, type: DirectoryOrCreate}
+        - name: run-journals
+          hostPath: {path: /run/log/journal, type: DirectoryOrCreate}
+        - name: cni-logs
+          hostPath: {path: /var/log/aws-routed-eni, type: DirectoryOrCreate}
+        - name: state
+          hostPath: {path: /var/lib/runsecure-telemetry, type: DirectoryOrCreate}
+        - name: config
+          configMap: {name: runsecure-telemetry-node}
+        - name: tls
+          secret: {secretName: {{ .Values.tls.agentSecret }}, defaultMode: 256}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+{{- end }}

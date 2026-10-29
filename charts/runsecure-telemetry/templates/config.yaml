@@ -1,0 +1,247 @@
+{{- if and .Values.enabled (not .Values.nodeReader.installGuardOnly) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runsecure-telemetry-node
+  namespace: runsecure-observability-node
+data:
+  config.yaml: |
+    extensions:
+      file_storage:
+        directory: /var/lib/otel/storage
+        create_directory: true
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      filelog/pods:
+        include: [/var/log/pods/*/*/*.log]
+        exclude:
+          # Avoid ingesting the collector's own export errors into its exporter.
+          - /var/log/pods/runsecure-observability_*/*/*.log
+          - /var/log/pods/runsecure-observability-node_*/*/*.log
+        include_file_path: true
+        start_at: beginning
+        storage: file_storage
+        max_log_size: 64KiB
+        max_log_size_behavior: truncate
+        max_concurrent_files: 256
+        retry_on_failure: {enabled: true, max_elapsed_time: 0s}
+        resource: {rs.source.class: cri}
+        operators:
+          - type: container
+            format: containerd
+            max_log_size: 64KiB
+            add_metadata_from_filepath: true
+      filelog/cni:
+        include: [/var/log/aws-routed-eni/*.log]
+        include_file_path: true
+        start_at: beginning
+        storage: file_storage
+        max_log_size: 64KiB
+        max_log_size_behavior: truncate
+        retry_on_failure: {enabled: true, max_elapsed_time: 0s}
+        resource: {rs.source.class: host}
+      journald:
+        directory: {{ .Values.nodeReader.journalDirectory }}
+        journalctl_path: /usr/bin/journalctl
+        units: {{ .Values.nodeReader.journalUnits | toJson }}
+        start_at: beginning
+        storage: file_storage
+        priority: debug
+        retry_on_failure: {enabled: true, max_elapsed_time: 0s}
+      filelog/self:
+        include: [/var/lib/otel/collector-diagnostics.log]
+        start_at: beginning
+        storage: file_storage
+        max_log_size: 64KiB
+        max_log_size_behavior: truncate
+        retry_on_failure: {enabled: true, max_elapsed_time: 0s}
+        resource: {rs.source.class: collector}
+        operators:
+          - type: json_parser
+            parse_to: attributes.diagnostic
+            on_error: drop
+          # Match parsed logger component IDs, never arbitrary body substrings.
+          # Self-transport failures remain local and observable through metrics.
+          - type: filter
+            expr: 'attributes.diagnostic["otelcol.component.id"] in ["filelog/self", "otlp/diagnostics"]'
+    processors:
+      memory_limiter: {check_interval: 1s, limit_mib: 256, spike_limit_mib: 64}
+      runsecure_normalize/redact:
+        redact_only: true
+        environment: {{ .Values.environment }}
+        max_body_bytes: 65536
+      resource/node:
+        attributes:
+          - {key: k8s.node.name, value: "${env:NODE_NAME}", action: upsert}
+          - {key: k8s.cluster.name, value: {{ .Values.clusterName | quote }}, action: upsert}
+          - {key: cloud.provider, value: aws, action: upsert}
+          - {key: cloud.account.id, value: {{ .Values.aws.accountId | quote }}, action: upsert}
+          - {key: cloud.region, value: {{ .Values.aws.region | quote }}, action: upsert}
+      resource/host:
+        attributes:
+          - {key: rs.source.class, value: host, action: upsert}
+    exporters:
+      otlp: &agent_otlp
+        endpoint: runsecure-telemetry-gateway.runsecure-observability.svc:4317
+        tls:
+          ca_file: /etc/otel-tls/ca.crt
+          cert_file: /etc/otel-tls/tls.crt
+          key_file: /etc/otel-tls/tls.key
+          min_version: "1.3"
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 2048
+          num_consumers: 2
+          block_on_overflow: true
+          # Split multi-record filelog batches below gateway's 4 MiB limit.
+          batch: {sizer: bytes, min_size: 262144, max_size: 2097152, flush_timeout: 200ms}
+        retry_on_failure: {enabled: true, initial_interval: 1s, max_interval: 30s, max_elapsed_time: 0s}
+      otlp/diagnostics: *agent_otlp
+    service:
+      extensions: [file_storage, health_check]
+      telemetry:
+        logs:
+          level: warn
+          encoding: json
+          output_paths: [/var/lib/otel/collector-diagnostics.log]
+        metrics:
+          readers:
+            - pull:
+                exporter:
+                  prometheus: {host: 0.0.0.0, port: 8888}
+      pipelines:
+        logs/pods:
+          receivers: [filelog/pods]
+          processors: [memory_limiter, runsecure_normalize/redact, resource/node]
+          exporters: [otlp]
+        logs/cni:
+          receivers: [filelog/cni]
+          processors: [memory_limiter, runsecure_normalize/redact, resource/node]
+          exporters: [otlp]
+        logs/host:
+          receivers: [journald]
+          processors: [memory_limiter, runsecure_normalize/redact, resource/host, resource/node]
+          exporters: [otlp]
+        logs/self:
+          receivers: [filelog/self]
+          processors: [memory_limiter, runsecure_normalize/redact, resource/node]
+          exporters: [otlp/diagnostics]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runsecure-telemetry-gateway
+  namespace: runsecure-observability
+data:
+  config.yaml: |
+    extensions:
+      file_storage:
+        directory: /var/lib/otel/storage
+        create_directory: true
+      health_check: {endpoint: "0.0.0.0:13133"}
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            max_recv_msg_size_mib: 4
+            tls:
+              cert_file: /etc/otel-tls/tls.crt
+              key_file: /etc/otel-tls/tls.key
+              client_ca_file: /etc/otel-tls/ca.crt
+              min_version: "1.3"
+      filelog/self:
+        include: [/var/lib/otel/collector-diagnostics.log]
+        start_at: beginning
+        storage: file_storage
+        max_log_size: 64KiB
+        max_log_size_behavior: truncate
+        retry_on_failure: {enabled: true, max_elapsed_time: 0s}
+        resource: {rs.source.class: collector}
+        operators:
+          - type: json_parser
+            parse_to: attributes.diagnostic
+            on_error: drop
+          - type: filter
+            expr: 'attributes.diagnostic["otelcol.component.id"] in ["filelog/self", "awscloudwatchlogs/diagnostics"]'
+    processors:
+      memory_limiter: {check_interval: 1s, limit_mib: 512, spike_limit_mib: 128}
+      resource/platform:
+        attributes:
+          - {key: cloud.provider, value: aws, action: upsert}
+          - {key: cloud.account.id, value: {{ .Values.aws.accountId | quote }}, action: upsert}
+          - {key: cloud.region, value: {{ .Values.aws.region | quote }}, action: upsert}
+      runsecure_normalize:
+        environment: {{ .Values.environment }}
+        max_body_bytes: 65536
+        trusted_sources:
+{{- range .Values.trustedSources }}
+          - namespace: {{ .namespace | quote }}
+            container: {{ .container | quote }}
+            pod_name_prefix: {{ .podNamePrefix | quote }}
+            signature: {{ .signature | quote }}
+{{- end }}
+      cornerstone_enricher:
+        host: {enabled: false}
+        otel_mapping: {enabled: true, cloud: true, kubernetes: true, container: true}
+      cornerstone_schema:
+        schemas: {embed_schemas: true}
+        validation: {on_invalid: pass, validate_contexts: true, add_validation_result: true}
+      cornerstone_validator:
+        signatures: {file: /etc/otel-events}
+        validation:
+          on_invalid: pass
+          require_signature: true
+          validate_required_fields: true
+          validate_event_types: true
+          validate_contexts: true
+          add_validation_result: true
+    exporters:
+      awscloudwatchlogs: &cloudwatch
+        region: {{ .Values.aws.region | quote }}
+        endpoint: {{ printf "https://logs.%s.amazonaws.com" .Values.aws.region | quote }}
+        log_group_name: {{ .Values.aws.logGroup | quote }}
+        log_stream_name: {{ printf "%s-gateway" .Values.aws.logStreamPrefix | quote }}
+        raw_log: false
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 2048
+          num_consumers: 2
+          block_on_overflow: true
+        retry_on_failure: {enabled: true, initial_interval: 1s, max_interval: 30s, max_elapsed_time: 0s}
+      awscloudwatchlogs/diagnostics:
+        <<: *cloudwatch
+        log_stream_name: {{ printf "%s-diagnostics" .Values.aws.logStreamPrefix | quote }}
+    service:
+      extensions: [file_storage, health_check]
+      telemetry:
+        logs: {level: warn, encoding: json, output_paths: [/var/lib/otel/collector-diagnostics.log]}
+        metrics:
+          readers:
+            - pull:
+                exporter:
+                  prometheus: {host: 0.0.0.0, port: 8888}
+      pipelines:
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/platform, runsecure_normalize, cornerstone_enricher, cornerstone_schema, cornerstone_validator]
+          exporters: [awscloudwatchlogs]
+        logs/self:
+          receivers: [filelog/self]
+          processors: [memory_limiter, resource/platform, runsecure_normalize, cornerstone_enricher, cornerstone_schema, cornerstone_validator]
+          exporters: [awscloudwatchlogs/diagnostics]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runsecure-telemetry-events
+  namespace: runsecure-observability
+data:
+{{- range $path, $_ := .Files.Glob "files/events/*.yaml" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

@@ -30,3 +30,12 @@ AWS API acceptance or create resources. `terraform.tfvars.example` is a field
 inventory, not a deployable account configuration. Terraform does not install
 the chart, create App credentials or start jobs. Use normal reviewed planning
 and deployment procedures only after filling the guidebook's prerequisites.
+
+
+The [Cornerstone archive runbook](../../docs/eks-logging.md) describes the new
+telemetry files, isolated collector chart and staged deployment. The illustrative
+Terraform now includes a dedicated KMS-encrypted S3 archive, bounded normalizer,
+AWS-native source subscriptions, delivery alarms and scoped gateway Pod Identity.
+No collector Helm release, credentials, live logging or notification subscription
+is installed by planning these files. New telemetry image publication and actual
+cloud deployment remain separate reviewed steps.

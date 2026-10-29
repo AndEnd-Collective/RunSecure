@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.telemetry.failed
+  uuid: af41ab2b-fab3-4ee5-a0f5-f30fb4a4c5d7
+  description: Socket-proxy event sink or registry failure exposed through the separate diagnostic sink.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

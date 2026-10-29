@@ -1,0 +1,22 @@
+# Intentionally NON-OPERATIONAL. renderOnly adds a failing init container and
+# impossible placement requirement. These image/endpoint values are test data.
+enabled: true
+renderOnly: true
+image:
+  repository: fixture.invalid/runsecure-collector
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+clusterName: fixture
+environment: Development
+aws:
+  accountId: "123456789012"
+  region: us-east-2
+  logGroup: /runsecure/fixture/telemetry
+  logStreamPrefix: collector
+  logsEndpointIPs: [10.80.0.8/32, 10.80.1.8/32]
+tls:
+  gatewaySecret: fixture-gateway-mtls
+  agentSecret: fixture-agent-mtls
+dns:
+  serviceCIDRs: [172.20.0.10/32]
+gateway:
+  storageClassName: fixture-encrypted-gp3

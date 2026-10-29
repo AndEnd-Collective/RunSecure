@@ -349,6 +349,7 @@ resource "aws_cloudwatch_log_group" "firewall" {
   for_each          = toset(["FLOW", "ALERT"])
   name              = "/runsecure/${var.name}/firewall/${lower(each.key)}"
   retention_in_days = 30
+  kms_key_id        = aws_kms_key.telemetry_archive.arn
 }
 resource "aws_networkfirewall_logging_configuration" "this" {
   firewall_arn = aws_networkfirewall_firewall.this.arn
@@ -367,6 +368,7 @@ resource "aws_networkfirewall_logging_configuration" "this" {
 resource "aws_cloudwatch_log_group" "dns" {
   name              = "/runsecure/${var.name}/dns"
   retention_in_days = 30
+  kms_key_id        = aws_kms_key.telemetry_archive.arn
 }
 resource "aws_cloudwatch_log_resource_policy" "dns" {
   policy_name = "${var.name}-dns-logs"

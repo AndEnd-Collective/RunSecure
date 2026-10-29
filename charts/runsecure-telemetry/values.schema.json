@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["enabled", "renderOnly", "image", "aws", "tls", "dns", "nodeReader", "gateway", "trustedSources"],
+  "properties": {
+    "enabled": {"type": "boolean"},
+    "renderOnly": {"type": "boolean"},
+    "image": {"type": "object", "additionalProperties": false, "required": ["repository", "digest"], "properties": {"repository": {"type": "string"}, "digest": {"type": "string"}}},
+    "environment": {"enum": ["Development", "Testing", "Staging", "Production"]},
+    "clusterName": {"type": "string", "pattern": "^[a-zA-Z0-9_-]*$"},
+    "aws": {"type": "object", "additionalProperties": false, "required": ["accountId", "region", "logGroup", "logStreamPrefix", "logsEndpointIPs"], "properties": {
+      "accountId": {"type": "string", "pattern": "^([0-9]{12})?$"},
+      "region": {"type": "string", "pattern": "^([a-z]{2}-[a-z]+-[0-9]+)?$"},
+      "logGroup": {"type": "string"}, "logStreamPrefix": {"type": "string"},
+      "logsEndpointIPs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+    }},
+    "tls": {"type": "object", "additionalProperties": false, "required": ["gatewaySecret", "agentSecret"], "properties": {
+      "gatewaySecret": {"type": "string", "pattern": "^[a-z0-9.-]*$"},
+      "agentSecret": {"type": "string", "pattern": "^[a-z0-9.-]*$"}
+    }},
+    "dns": {"type": "object", "additionalProperties": false, "required": ["serviceCIDRs", "namespace", "podLabels"], "properties": {
+      "serviceCIDRs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+      "namespace": {"type": "string", "minLength": 1}, "podLabels": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}
+    }},
+    "trustedSources": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["namespace", "container", "podNamePrefix", "signature"], "properties": {
+      "namespace": {"type": "string"}, "container": {"enum": ["orchestrator", "socket-proxy"]}, "podNamePrefix": {"type": "string"}, "signature": {"enum": ["runsecure-orchestrator-v1", "runsecure-socket-proxy-v1"]}
+    }}},
+    "gateway": {"type": "object", "additionalProperties": false, "required": ["storageClassName", "storageSize", "nodeSelector"], "properties": {
+      "storageClassName": {"type": "string", "pattern": "^[a-z0-9.-]*$"},
+      "storageSize": {"type": "string", "pattern": "^[1-9][0-9]*Gi$"},
+      "nodeSelector": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}
+    }},
+    "nodeReader": {"type": "object", "additionalProperties": false, "required": ["installGuardOnly", "activateGuardNamespace", "nodeSelector", "tolerations", "journalDirectory", "journalUnits"], "properties": {
+      "installGuardOnly": {"type": "boolean"},
+      "activateGuardNamespace": {"type": "boolean"},
+      "nodeSelector": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}},
+      "tolerations": {"type": "array", "items": {"type": "object"}},
+      "journalDirectory": {"enum": ["/var/log/journal", "/run/log/journal"]},
+      "journalUnits": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-zA-Z0-9@._-]+\\.service$"}}
+    }},
+    "monitoring": {"type": "object", "additionalProperties": false, "required": ["namespace", "podLabels"], "properties": {
+      "namespace": {"type": "string", "pattern": "^[a-z0-9-]*$"}, "podLabels": {"type": "object", "additionalProperties": {"type": "string"}}
+    }}
+  }
+}
