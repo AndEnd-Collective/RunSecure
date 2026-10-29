@@ -11,13 +11,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func chartGuard(t *testing.T) ([]cel.Program, map[string]any) {
+func chartGuard(t *testing.T) ([]cel.Program, map[string]any, string) {
 	t.Helper()
 	out, err := exec.Command("helm", "template", "telemetry", "../../../../charts/runsecure-telemetry", "-f", "../values.render.yaml").CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm render: %v: %s", err, out)
 	}
-	var policy, daemon map[string]any
+	var policy, daemon, gateway map[string]any
 	dec := yaml.NewDecoder(bytes.NewReader(out))
 	for {
 		var doc map[string]any
@@ -33,10 +33,12 @@ func chartGuard(t *testing.T) ([]cel.Program, map[string]any) {
 			policy = doc
 		case "DaemonSet":
 			daemon = doc
+		case "StatefulSet":
+			gateway = doc
 		}
 	}
-	if policy == nil || daemon == nil {
-		t.Fatal("missing guard/daemon")
+	if policy == nil || daemon == nil || gateway == nil {
+		t.Fatal("missing guard/daemon/gateway")
 	}
 	env, err := cel.NewEnv(cel.Variable("object", cel.DynType), cel.Variable("request", cel.DynType))
 	if err != nil {
@@ -60,7 +62,13 @@ func chartGuard(t *testing.T) ([]cel.Program, map[string]any) {
 	podSpec := template["spec"].(map[string]any)
 	delete(podSpec, "initContainers") // remove render-only commissioning blocker
 	delete(podSpec["nodeSelector"].(map[string]any), "runsecure.io/telemetry-render-only")
-	return programs, map[string]any{"spec": podSpec}
+	gatewaySpec := gateway["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	gatewayImage := gatewaySpec["containers"].([]any)[0].(map[string]any)["image"]
+	if gatewayImage == podSpec["containers"].([]any)[0].(map[string]any)["image"] {
+		t.Fatal("role images must differ")
+	}
+	// Feed the exact gateway image through the node guard, alongside attacker inputs.
+	return programs, map[string]any{"spec": podSpec}, gatewayImage.(string)
 }
 
 func clone(in map[string]any) map[string]any {
@@ -75,7 +83,7 @@ func container(p map[string]any) map[string]any {
 }
 
 func TestGuardPermitsExactReaderAndDeniesEscapes(t *testing.T) {
-	programs, valid := chartGuard(t)
+	programs, valid, gatewayImage := chartGuard(t)
 	cases := []struct {
 		name   string
 		change func(map[string]any)
@@ -85,6 +93,7 @@ func TestGuardPermitsExactReaderAndDeniesEscapes(t *testing.T) {
 		{"host-pid", func(p map[string]any) { spec(p)["hostPID"] = true }},
 		{"host-ipc", func(p map[string]any) { spec(p)["hostIPC"] = true }},
 		{"token", func(p map[string]any) { spec(p)["automountServiceAccountToken"] = true }},
+		{"gateway-image", func(p map[string]any) { container(p)["image"] = gatewayImage }},
 		{"image", func(p map[string]any) { container(p)["image"] = "attacker.invalid/image@sha256:bbbb" }},
 		{"command", func(p map[string]any) { container(p)["command"] = []any{"/bin/sh"} }},
 		{"args", func(p map[string]any) { container(p)["args"] = []any{"--config=env:MALICIOUS"} }},

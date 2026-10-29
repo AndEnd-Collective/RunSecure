@@ -2,9 +2,6 @@
 # impossible placement requirement. These image/endpoint values are test data.
 enabled: true
 renderOnly: true
-image:
-  repository: fixture.invalid/runsecure-collector
-  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 clusterName: fixture
 environment: Development
 aws:
@@ -18,5 +15,12 @@ tls:
   agentSecret: fixture-agent-mtls
 dns:
   serviceCIDRs: [172.20.0.10/32]
+nodeReader:
+  image:
+    repository: fixture.invalid/runsecure-collector-node
+    digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 gateway:
+  image:
+    repository: fixture.invalid/runsecure-collector-gateway
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   storageClassName: fixture-encrypted-gp3

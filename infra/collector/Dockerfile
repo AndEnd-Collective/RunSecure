@@ -10,17 +10,32 @@ COPY --from=cornerstone-src / /build/cornerstone-src/otel-collector/
 COPY infra/collector/processor /build/public-processor/
 COPY infra/collector/builder-config.yaml /build/builder-config.yaml
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    GOBIN=/usr/local/bin go install go.opentelemetry.io/collector/cmd/builder@v0.158.0 && \
-    test "$(builder version 2>&1)" = "ocb version v0.158.0" && \
+    GOBIN=/usr/local/bin go install go.opentelemetry.io/collector/cmd/builder@v0.164.0 && \
+    test "$(builder version 2>&1)" = "ocb version v0.164.0" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} builder --skip-strict-versioning=false --config=/build/builder-config.yaml
 
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS native-runtime
 # Journald receiver invokes a real journalctl. Its journal-format compatibility
 # with the selected Bottlerocket release is a live commissioning requirement.
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install -y --no-install-recommends ca-certificates systemd && \
     journalctl --version && \
     rm -rf /var/lib/apt/lists/*
+# Debian's 2026-10-20 security backport removes the distrusted emSign ECC G3
+# and Comodo AAA roots; require that package floor before copying to scratch.
+RUN ca_version="$(dpkg-query -W -f='${Version}' ca-certificates)" && \
+    dpkg --compare-versions "$ca_version" ge '20250419+deb13u1' && \
+    dpkg-query -W ca-certificates && test -s /etc/ssl/certs/ca-certificates.crt
+
+# No shell, package manager, journal tool or native runtime enters the gateway.
+FROM scratch AS gateway
+COPY --from=native-runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder --chmod=0555 /build/dist/runsecure-collector /usr/local/bin/runsecure-collector
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/runsecure-collector"]
+
+# Preserve Debian's packaged native closure and inventory for the journal reader.
+FROM native-runtime AS node
 COPY --from=builder --chmod=0555 /build/dist/runsecure-collector /usr/local/bin/runsecure-collector
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/runsecure-collector"]

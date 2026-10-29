@@ -50,7 +50,7 @@ spec:
         runsecure.io/telemetry-render-only: never
       initContainers:
         - name: render-only-disabled
-          image: {{ include "telemetry.image" . }}
+          image: {{ include "telemetry.gatewayImage" . }}
           command: [/bin/false]
           securityContext:
             allowPrivilegeEscalation: false
@@ -60,7 +60,7 @@ spec:
 {{- end }}
       containers:
         - name: collector
-          image: {{ include "telemetry.image" . }}
+          image: {{ include "telemetry.gatewayImage" . }}
           command: [/usr/local/bin/runsecure-collector]
           args: [--config=/etc/otel/config.yaml]
           securityContext:
@@ -131,7 +131,7 @@ spec:
         runsecure.io/telemetry-render-only: never
       initContainers:
         - name: render-only-disabled
-          image: {{ include "telemetry.image" . }}
+          image: {{ include "telemetry.nodeImage" . }}
           command: [/bin/false]
           securityContext: {privileged: false, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
 {{- end }}
@@ -139,7 +139,7 @@ spec:
 {{ toYaml .Values.nodeReader.tolerations | indent 8 }}
       containers:
         - name: collector
-          image: {{ include "telemetry.image" . }}
+          image: {{ include "telemetry.nodeImage" . }}
           command: [/usr/local/bin/runsecure-collector]
           args: [--config=/etc/otel/config.yaml]
           securityContext:

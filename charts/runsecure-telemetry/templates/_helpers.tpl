@@ -1,11 +1,17 @@
-{{- define "telemetry.image" -}}
-{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- define "telemetry.gatewayImage" -}}
+{{- printf "%s@%s" .Values.gateway.image.repository .Values.gateway.image.digest -}}
+{{- end -}}
+{{- define "telemetry.nodeImage" -}}
+{{- printf "%s@%s" .Values.nodeReader.image.repository .Values.nodeReader.image.digest -}}
 {{- end -}}
 {{- define "telemetry.validate" -}}
 {{- if .Values.enabled -}}
 {{- if not (regexMatch "^[0-9]{12}$" .Values.aws.accountId) -}}{{ fail "aws.accountId must be the reviewed AWS account ID" }}{{- end -}}
-{{- if not (regexMatch "^[a-zA-Z0-9][a-zA-Z0-9./:_-]+$" .Values.image.repository) -}}{{ fail "image.repository is required" }}{{- end -}}
-{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .Values.image.digest) -}}{{ fail "image.digest must be an independently read-back manifest digest" }}{{- end -}}
+{{- range $role, $image := dict "gateway" .Values.gateway.image "nodeReader" .Values.nodeReader.image -}}
+{{- if not (regexMatch "^[a-zA-Z0-9][a-zA-Z0-9./:_-]+$" $image.repository) -}}{{ fail (printf "%s.image.repository is required" $role) }}{{- end -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $image.digest) -}}{{ fail (printf "%s.image.digest must be an independently read-back manifest digest" $role) }}{{- end -}}
+{{- end -}}
+{{- if eq .Values.gateway.image.digest .Values.nodeReader.image.digest -}}{{ fail "gateway.image and nodeReader.image must identify distinct role images" }}{{- end -}}
 {{- range $key, $value := dict "clusterName" .Values.clusterName "aws.region" .Values.aws.region "aws.logGroup" .Values.aws.logGroup "tls.gatewaySecret" .Values.tls.gatewaySecret "tls.agentSecret" .Values.tls.agentSecret "gateway.storageClassName" .Values.gateway.storageClassName -}}
 {{- if not $value -}}{{ fail (printf "%s is required" $key) }}{{- end -}}
 {{- end -}}
@@ -68,7 +74,7 @@ spec:
         (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0) &&
         (!has(object.spec.ephemeralContainers) || size(object.spec.ephemeralContainers) == 0) &&
         size(object.spec.containers) == 1 && object.spec.containers[0].name == 'collector' &&
-        object.spec.containers[0].image == '{{ include "telemetry.image" . }}' &&
+        object.spec.containers[0].image == '{{ include "telemetry.nodeImage" . }}' &&
         object.spec.containers[0].command == ['/usr/local/bin/runsecure-collector'] &&
         object.spec.containers[0].args == ['--config=/etc/otel/config.yaml'] &&
         (!has(object.spec.containers[0].envFrom) || size(object.spec.containers[0].envFrom) == 0) &&
