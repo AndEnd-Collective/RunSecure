@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"net/http"
 	"os"
 	"time"
@@ -34,13 +35,13 @@ func main() {
 
 	scopePath := os.Getenv("RUNSECURE_SCOPE_FILE")
 	if scopePath == "" {
-		fmt.Fprintln(os.Stderr, "orchestrator: RUNSECURE_SCOPE_FILE env required")
+		_ = cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID).EmitProcessFailed("scope_file_required")
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := Run(ctx, scopePath); err != nil {
-		fmt.Fprintln(os.Stderr, "orchestrator:", err)
+		_ = cornerstone.NewEmitter(os.Stdout, cornerstone.SystemClock, cornerstone.SystemUUID).EmitProcessFailed("process_failed")
 		os.Exit(1)
 	}
 }

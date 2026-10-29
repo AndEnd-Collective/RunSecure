@@ -67,6 +67,15 @@ flowchart LR
   H[Bottlerocket node / platform agents] --> E[Private AWS endpoints + ECR/S3]
 ```
 
+## Cornerstone collection and external archive
+
+The follow-on [logging implementation and deployment runbook](eks-logging.md)
+adds a separately isolated, mTLS-authenticated node reader and Cornerstone
+collector chart, AWS-native infrastructure subscriptions and a private encrypted
+S3 archive. These source templates are unreleased and uncommissioned. Providing
+AWS endpoints alone does not start collection; complete its image, storage,
+identity, admission and delivery acceptance prerequisites.
+
 ## Private platform traffic is a separate trust path
 
 Private traffic stays on VPC-local/interface/gateway endpoint routes and does

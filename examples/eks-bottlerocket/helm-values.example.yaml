@@ -83,3 +83,13 @@ image:
 #     proxyResources: {cpu: 250m, memory: 256Mi, ephemeralStorage: 1Gi}
 # The finite outer firewall inventory must also satisfy actual job transport,
 # including approved exact service/storage hosts. This comment does not enroll.
+
+# Replace from reviewed Terraform outputs; the Pod actor comes from Downward API.
+logging:
+  environment: Testing
+  clusterName: REPLACE_CLUSTER_NAME
+  cloud:
+    provider: aws
+    accountId: "000000000000"
+    region: us-east-2
+    zone: ""

@@ -98,7 +98,7 @@ func TestValidate_DeterministicNamespaceRequired(t *testing.T) {
 
 // ---- fixtures ------------------------------------------------------------
 
-const validManifest = `apiVersion: cornerstone.cerebras.net/v1
+const validManifest = `apiVersion: cornerstone/v1
 kind: ProjectManifest
 metadata:
   name: test-project
@@ -115,7 +115,7 @@ sources:
   python: ["src/**/*.py"]
 `
 
-const validEventLogin = `apiVersion: cornerstone.cerebras.net/v1
+const validEventLogin = `apiVersion: cornerstone/v1
 kind: EventSignature
 metadata:
   name: auth.login
@@ -134,7 +134,7 @@ emit_sites:
     last_seen: 2026-04-25
 `
 
-const validEventLogout = `apiVersion: cornerstone.cerebras.net/v1
+const validEventLogout = `apiVersion: cornerstone/v1
 kind: EventSignature
 metadata:
   name: auth.logout
@@ -148,7 +148,7 @@ signature:
 `
 
 // Same UUID as validEventLogin, different name.
-const validEventLoginDup = `apiVersion: cornerstone.cerebras.net/v1
+const validEventLoginDup = `apiVersion: cornerstone/v1
 kind: EventSignature
 metadata:
   name: auth.relogin
@@ -161,7 +161,7 @@ signature:
     event.format: json
 `
 
-const deprecatedNoNote = `apiVersion: cornerstone.cerebras.net/v1
+const deprecatedNoNote = `apiVersion: cornerstone/v1
 kind: EventSignature
 metadata:
   name: auth.login
@@ -174,7 +174,7 @@ signature:
     event.format: json
 `
 
-const deterministicNoNamespace = `apiVersion: cornerstone.cerebras.net/v1
+const deterministicNoNamespace = `apiVersion: cornerstone/v1
 kind: ProjectManifest
 metadata:
   name: test-project

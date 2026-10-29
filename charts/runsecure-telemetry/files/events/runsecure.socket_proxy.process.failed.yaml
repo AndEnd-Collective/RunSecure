@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.process.failed
+  uuid: 8ebbc7ca-ffc1-494a-8f53-63fe0835dc95
+  description: Socket-proxy process failed before or during serving. Only stable failure class is recorded.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

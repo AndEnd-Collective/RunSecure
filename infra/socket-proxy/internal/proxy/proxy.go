@@ -18,11 +18,12 @@ import (
 
 // Server is the docker-socket-proxy HTTP server.
 type Server struct {
-	rp        *httputil.ReverseProxy
-	images    *imageallow.Allowlist
-	logger    func(format string, args ...any)
-	egressNet string // value of RUNSECURE_EGRESS_NETWORK; "" disables egress gate
-	egressVol string // value of RUNSECURE_EGRESS_VOLUME; "" denies all named-volume mounts
+	rp          *httputil.ReverseProxy
+	images      *imageallow.Allowlist
+	logger      func(format string, args ...any)
+	eventLogger func(kind, code string, status int)
+	egressNet   string // value of RUNSECURE_EGRESS_NETWORK; "" disables egress gate
+	egressVol   string // value of RUNSECURE_EGRESS_VOLUME; "" denies all named-volume mounts
 }
 
 // transportIdleConnTimeout is the per-connection idle timeout for the
@@ -51,22 +52,30 @@ func New(dockerSock string, images *imageallow.Allowlist) *Server {
 		IdleConnTimeout:     transportIdleConnTimeout(),
 		TLSHandshakeTimeout: 0,
 	}
-	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
-	}
-	return &Server{
+	s := &Server{
 		rp:        rp,
 		images:    images,
 		logger:    func(string, ...any) {},
 		egressNet: os.Getenv("RUNSECURE_EGRESS_NETWORK"),
 		egressVol: os.Getenv("RUNSECURE_EGRESS_VOLUME"),
 	}
+	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		if s.eventLogger != nil {
+			s.eventLogger("upstream_failed", "docker_transport_failed", http.StatusBadGateway)
+		}
+		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+	}
+	return s
 }
 
 // SetLogger replaces the default no-op logger.
 func (s *Server) SetLogger(fn func(format string, args ...any)) {
 	s.logger = fn
 }
+
+// SetEventLogger installs the structured audit sink before serving requests.
+// It receives stable classes only, never request bodies, URLs or credentials.
+func (s *Server) SetEventLogger(fn func(kind, code string, status int)) { s.eventLogger = fn }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +122,10 @@ type denyBody struct {
 }
 
 func (s *Server) deny(w http.ResponseWriter, code, detail string, status int) {
-	s.logger("deny code=%s detail=%s status=%d", code, detail, status)
+	s.logger("deny code=%s status=%d", code, status)
+	if s.eventLogger != nil {
+		s.eventLogger("denied", code, status)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(denyBody{Code: code, Detail: detail})

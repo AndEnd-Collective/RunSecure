@@ -17,7 +17,7 @@ spec:
             matchExpressions:
               - key: kubernetes.io/metadata.name
                 operator: In
-                values: [runsecure-eks, ci-example, kube-system]
+                values: [runsecure-eks, ci-example, kube-system, runsecure-observability, runsecure-observability-node]
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}

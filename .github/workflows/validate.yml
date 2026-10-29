@@ -173,12 +173,18 @@ jobs:
 
   cornerstone-validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27'
+      - name: Check canonical telemetry mirrors and test emitter support
+        run: |
+          set -euo pipefail
+          python3 infra/scripts/validate/sync-telemetry.py --check
+          cd infra/telemetry
+          go test -race ./...
       - name: Build corner-lint (vendored at tools/corner-lint)
         run: |
           set -euo pipefail
@@ -188,3 +194,26 @@ jobs:
         run: |
           set -euo pipefail
           /tmp/corner-lint registry validate .
+
+      - name: Test public collector normalization and enforce logic coverage
+        run: |
+          set -euo pipefail
+          cd infra/collector/processor
+          go test -race -cover ./... | tee /tmp/collector-coverage.txt
+          python3 - <<'PYTEST'
+          import re
+          values = re.findall(r'coverage: ([0-9.]+)%', open('/tmp/collector-coverage.txt').read())
+          assert values and all(float(value) >= 99 for value in values), values
+          PYTEST
+      - name: Install pinned Helm for admission expression tests
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/collector-helm.tar.gz https://get.helm.sh/helm-v3.21.2-linux-amd64.tar.gz
+          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  /tmp/collector-helm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/collector-helm.tar.gz -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+      - name: Execute node-reader admission expressions against hostile Pods
+        run: |
+          set -euo pipefail
+          cd infra/collector/tests/admission
+          go test ./...

@@ -1,11 +1,7 @@
-// Package cornerstone implements the in-tree emitter for Cerebras Cornerstone
-// semantic-logging events.
-//
-// Schemas: https://cerebras.github.io/Cornerstone/schemas/
-// Canonical repo: /Users/naor.penso/Code/Projects/cornerstone-docs
-//
-// No upstream Go SDK exists at the time of writing. This package is a small,
-// dependency-free emitter; corner-lint (Go CLI) provides validation in CI.
+// Package cornerstone implements RunSecure's in-tree Cornerstone emitter.
+// It preserves the public event signature and legacy fields while adding
+// project-local definition correlation and explicit emitting-process identity.
+// This implementation is not an upstream SDK.
 package cornerstone
 
 import "errors"
@@ -42,6 +38,7 @@ const (
 // Field names use dot-notation per the schema (event.uuid, time.stamp, etc.).
 type Event struct {
 	EventUUID             string            `json:"event.uuid"`
+	EventDefinitionUUID   string            `json:"event.definition.uuid,omitempty"`
 	EventSignature        string            `json:"event.signature"`
 	EventSubType          string            `json:"event.sub.type,omitempty"`
 	EventType             EventType         `json:"event.type"`

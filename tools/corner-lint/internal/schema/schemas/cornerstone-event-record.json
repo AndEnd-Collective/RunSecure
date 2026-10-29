@@ -8,7 +8,7 @@
   "properties": {
     "apiVersion": {
       "type": "string",
-      "const": "cornerstone.cerebras.net/v1"
+      "const": "cornerstone/v1"
     },
     "kind": {
       "type": "string",
