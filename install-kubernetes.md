@@ -240,13 +240,13 @@ or act in an unenrolled namespace. Shared mode grants no workload Role in the
 management namespace. The controller is a trusted boundary: its credential and
 all enrolled namespace permissions cover every project in its scope.
 
-Once one namespace is explicit, every repository must have a distinct namespace
-and approved `runnerConfig`. Reserved/controller namespaces, duplicate identities,
+Once a namespace or shared-only setting is declared, every repository must have
+a distinct namespace and approved `runnerConfig`. Reserved/controller namespaces, duplicate identities,
 missing policies and malformed runtime, label, image and resource values fail
 closed. A workflow cannot choose its namespace or submit a Pod manifest. Shared
 mode does not call the Contents API for policy, including on the default branch.
-Change approved configuration through the values file and restart the controller
-with the normal Helm upgrade; it loads a fixed configuration at startup.
+Change approved configuration through the values file with a normal Helm upgrade;
+the scope checksum restarts the controller to load the new fixed configuration.
 
 `runnerConfig` and nested chart values use camelCase. The rendered `scope.yml`
 uses canonical snake_case (`runner_config`, `http_egress`, `node_selector`, etc.).
@@ -417,6 +417,16 @@ done
 
 Update `image.orchestrator.digest`, `image.proxy.digest`, and
 `image.socketProxy.digest` in your values file, then upgrade:
+
+The chart binds the rendered scope ConfigMap to the controller Pod template with
+its managed `checksum/scope-config` annotation. A Helm upgrade that changes
+approved policy, enrollment, runner images or placement restarts the singleton
+controller through the existing `Recreate` strategy and drain window. User Pod
+annotations are preserved; this managed checksum cannot be overridden. Declaring
+`runnerConfig`, `runnerImage` or project `kubernetes` settings requires explicit
+namespace enrollment for every repository; omitting all shared settings retains
+legacy repository policy loading. TCP egress cannot use Squid's port 3128, or
+port 53 when `dns.host: false` activates dnsmasq.
 
 ```sh
 helm upgrade runsecure-production charts/runsecure-orchestrator/ \

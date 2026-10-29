@@ -108,7 +108,7 @@ var (
 
 // ValidateEgress checks tcp_egress and http_egress for validity:
 // - TCP entries require canonical decimal ports 1-65535 with no duplicates
-// - Ports 80 and 443 are reserved for HTTP(S)
+// - Ports 80/443 are reserved for HTTP(S), 3128 for Squid, and 53 for active dnsmasq
 // - HTTP domain format must be valid (no injection characters)
 func (r *Runner) ValidateEgress() error {
 	seen := map[int]bool{}
@@ -123,6 +123,9 @@ func (r *Runner) ValidateEgress() error {
 		}
 		if port == 80 || port == 443 {
 			return fmt.Errorf("tcp_egress port %d reserved; use http_egress", port)
+		}
+		if port == 3128 || (port == 53 && r.DNS.Host != nil && !*r.DNS.Host) {
+			return fmt.Errorf("tcp_egress port %d reserved for proxy listener", port)
 		}
 		if text != strconv.Itoa(port) {
 			return fmt.Errorf("invalid tcp_egress port %q (want canonical decimal without leading zeros)", text)

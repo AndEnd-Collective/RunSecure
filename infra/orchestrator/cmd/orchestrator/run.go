@@ -490,6 +490,9 @@ func (p *productionDeps) RunnerYMLContext(
 		}
 
 		if p.scopeRef.SharedKubernetes() {
+			if r.Namespace == "" {
+				return nil, errors.New("shared Kubernetes requires explicit project namespace enrollment")
+			}
 			if r.RunnerConfig == nil {
 				return nil, errors.New("shared Kubernetes requires approved runner_config")
 			}

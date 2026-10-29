@@ -526,6 +526,104 @@ else
     fail "Controller world egress permits a private or special destination range"
 fi
 
+# Configuration delivery uses the actual rendered Deployment and ConfigMap.
+if python3 - "$HELM_BIN" "$CHART_DIR" "$SHARED_PROJECTS" "$SHARED_CONTROLLER_DIGEST" <<'PYTEST'
+import copy
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+helm, chart, projects, digest = sys.argv[1:]
+class UniqueKeys(yaml.SafeLoader):
+    pass
+
+def mapping(loader, node, deep=False):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        assert key not in result, f"duplicate rendered YAML key: {key}"
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+values = {
+    "scope": {"name": "ci-scope", "repos": json.loads(projects)},
+    "image": {"orchestrator": {"digest": digest}},
+    "podAnnotations": {"operator.example/retained": "yes", "checksum/scope-config": "untrusted"},
+}
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / "values.json"
+    def render(config, bypass=False):
+        path.write_text(json.dumps(config))
+        command = [helm, "template", "test-release", chart, "-f", str(path)]
+        if bypass:
+            command.append("--skip-schema-validation")
+        return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def template(config):
+        result = render(config)
+        assert result.returncode == 0, result.stderr
+        objects = list(yaml.load_all(result.stdout, Loader=UniqueKeys))
+        deployment = next(obj for obj in objects if obj["kind"] == "Deployment")
+        annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+        assert annotations["operator.example/retained"] == "yes"
+        assert re.fullmatch(r"[0-9a-f]{64}", annotations["checksum/scope-config"])
+        assert deployment["spec"]["replicas"] == 1
+        assert deployment["spec"]["strategy"]["type"] == "Recreate"
+        assert deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] >= 90
+        return deployment["spec"]["template"]
+
+    failures = []
+    try:
+        baseline = template(values)
+        assert baseline == template(values), "identical configuration changed Pod template"
+        for kind in ("policy", "enrollment", "image", "placement"):
+            changed = copy.deepcopy(values)
+            project = changed["scope"]["repos"][0]
+            if kind == "policy":
+                project["runnerConfig"]["httpEgress"] = ["replacement.example.com"]
+            elif kind == "enrollment":
+                project["namespace"] = "project-replacement"
+            elif kind == "image":
+                project["runnerImage"] = "registry.example/runner@sha256:" + "a" * 64
+            else:
+                project["kubernetes"] = {"ephemeralStorage": "20Gi"}
+            updated = template(changed)
+            assert updated != baseline, f"{kind} edit did not change Pod template"
+            assert updated["metadata"]["annotations"]["checksum/scope-config"] != baseline["metadata"]["annotations"]["checksum/scope-config"]
+    except (AssertionError, KeyError) as error:
+        failures.append(f"scope rollout: {error}")
+
+    for setting, value in (
+        ("runnerConfig", values["scope"]["repos"][0]["runnerConfig"]),
+        ("runnerImage", "registry.example/runner@sha256:" + "a" * 64),
+        ("kubernetes", {"ephemeralStorage": "20Gi"}),
+        ("kubernetes", {}),
+    ):
+        incomplete = copy.deepcopy(values)
+        incomplete["scope"]["repos"] = [{"repo": "acme/alpha", "maxConcurrent": 1, setting: value}]
+        for bypass in (False, True):
+            result = render(incomplete, bypass)
+            if result.returncode == 0:
+                failures.append(f"{setting} without namespaces accepted (schema bypass={bypass})")
+            elif not bypass and "schema" not in result.stderr:
+                failures.append(f"{setting} missing namespace was not rejected by schema")
+    legacy = copy.deepcopy(values)
+    legacy["scope"]["repos"] = [{"repo": "acme/alpha", "maxConcurrent": 1}]
+    assert render(legacy).returncode == 0, "genuine legacy configuration rejected"
+    assert not failures, "; ".join(failures)
+PYTEST
+then
+    pass "Configuration delivery: deterministic rollout, protected annotations and explicit enrollment"
+else
+    fail "Configuration delivery: rollout or enrollment contract failed"
+fi
+
 # ── Print results ────────────────────────────────────────────────────────────
 
 echo ""

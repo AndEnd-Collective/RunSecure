@@ -176,13 +176,17 @@ func approvedStartupScope(t *testing.T) *config.Scope {
 }
 
 func TestInitializeSharedBackendRejectsInvalidPolicyBeforeExternalMutations(t *testing.T) {
+	proxyDNS := false
 	cases := []struct {
 		name     string
 		override any
 		ports    []string
+		dnsHost  *bool
 		http     []string
 		want     string
 	}{
+		{name: "Squid listener", ports: []string{"gateway.example.com:3128"}, want: "3128"},
+		{name: "dnsmasq listener", ports: []string{"gateway.example.com:53"}, dnsHost: &proxyDNS, want: "53"},
 		{name: "forbidden private HTTP literal", http: []string{"10.1.2.3"}, want: "literal IP"},
 		{name: "forbidden metadata TCP literal", ports: []string{"169.254.169.254:5432"}, want: "literal IP"},
 		{name: "malformed allowed override", override: 123, want: "security"},
@@ -196,6 +200,7 @@ func TestInitializeSharedBackendRejectsInvalidPolicyBeforeExternalMutations(t *t
 			setValidKubeImages(t)
 			s := approvedStartupScope(t)
 			s.Repos[0].RunnerConfig.TCPEgress = tc.ports
+			s.Repos[0].RunnerConfig.DNS.Host = tc.dnsHost
 			s.Repos[0].RunnerConfig.HTTPEgress = tc.http
 			if tc.override != nil {
 				s.Repos[0].RunnerConfig.Orchestrator.SecurityOverrides = map[string]any{"allow_wildcards": tc.override}
@@ -276,5 +281,36 @@ func TestInitializeSharedBackendRevalidatesNormalizedSelectorBoundary(t *testing
 				require.Equal(t, []string{"acme/alpha"}, gh.listedRepos)
 			})
 		}
+	}
+}
+
+func TestInitializeBackendRejectsSharedSettingsWithoutNamespacesBeforeAPIs(t *testing.T) {
+	for _, setting := range []string{"runner_config", "runner_image", "kubernetes"} {
+		t.Run(setting, func(t *testing.T) {
+			setValidKubeImages(t)
+			s := approvedStartupScope(t)
+			s.Repos[0].Namespace = ""
+			if setting != "runner_config" {
+				s.Repos[0].RunnerConfig = nil
+			}
+			if setting == "runner_image" {
+				s.Repos[0].RunnerImage = "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}
+			if setting == "kubernetes" {
+				s.Repos[0].Kubernetes.EphemeralStorage = "20Gi"
+			}
+			gh := &fakeColdStartGitHub{}
+			cs := fake.NewSimpleClientset()
+			calls := 0
+			_, _, err := initializeBackend(context.Background(), s, []string{"acme/alpha"}, gh, nil, func() (backend.Backend, error) {
+				calls++
+				return backendkube.New(kube.NewClient(cs)), nil
+			})
+			require.ErrorContains(t, err, "namespace")
+			require.Zero(t, calls)
+			require.Empty(t, cs.Actions())
+			require.Empty(t, gh.listedRepos)
+			require.Empty(t, gh.deletedIDs)
+		})
 	}
 }

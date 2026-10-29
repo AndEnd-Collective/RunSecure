@@ -44,10 +44,10 @@ spec:
     metadata:
       labels:
         {{- include "runsecure-orchestrator.labels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- $annotations := deepCopy (.Values.podAnnotations | default dict) -}}
+        {{- $_ := set $annotations "checksum/scope-config" (include (print $.Template.BasePath "/configmap-scope.yaml") . | sha256sum) -}}
+        {{- toYaml $annotations | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "runsecure-orchestrator.serviceAccountName" . }}

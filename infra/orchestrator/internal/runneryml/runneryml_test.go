@@ -195,3 +195,19 @@ func TestValidateEgressTCPNumericBoundsAndCanonicalPorts(t *testing.T) {
 		require.NoError(t, (&Runner{TCPEgress: ports}).ValidateEgress())
 	}
 }
+
+func TestValidateEgressProxyListenerPorts(t *testing.T) {
+	host, proxy := true, false
+	for _, dnsHost := range []*bool{nil, &host, &proxy} {
+		r := &Runner{TCPEgress: []string{"gateway.example.com:3128"}, DNS: DNSConfig{Host: dnsHost}}
+		require.ErrorContains(t, r.ValidateEgress(), "3128")
+		r.TCPEgress = []string{"gateway.example.com:53"}
+		if dnsHost == &proxy {
+			require.ErrorContains(t, r.ValidateEgress(), "53")
+		} else {
+			require.NoError(t, r.ValidateEgress())
+		}
+		r.TCPEgress = []string{"gateway.example.com:5432"}
+		require.NoError(t, r.ValidateEgress())
+	}
+}

@@ -483,3 +483,27 @@ func TestSharedScopeSelectorLimitUsesNormalizedTotalAndIsIdempotent(t *testing.T
 		}
 	}
 }
+
+func TestSharedSettingsRequireNamespaceEnrollment(t *testing.T) {
+	for _, declaration := range []string{
+		"runner_config: {runtime: node:24, labels: [container], resources: {memory: 1g, cpus: 1, pids: 256}}",
+		"runner_image: registry.example/runner@sha256:" + strings.Repeat("a", 64),
+		"kubernetes: {ephemeral_storage: 20Gi}",
+		"runner_config: null", "runner_image: ''", "kubernetes: {}",
+		"<<: {kubernetes: {}}",
+	} {
+		t.Run(declaration, func(t *testing.T) {
+			s := sharedScope(t, "  - repo: acme/alpha\n    max_concurrent: 1\n    "+declaration+"\n")
+			require.ErrorContains(t, s.Validate(), "namespace")
+		})
+	}
+	legacy := sharedScope(t, "  - repo: acme/alpha\n    max_concurrent: 1\n")
+	require.NoError(t, legacy.Validate())
+	require.False(t, legacy.SharedKubernetes())
+}
+
+func TestRepoBlockRejectsInvalidFieldTypes(t *testing.T) {
+	var repo RepoBlock
+	require.Error(t, yaml.Unmarshal([]byte("kubernetes: invalid"), &repo))
+	require.Error(t, yaml.Unmarshal([]byte("max_concurrent: invalid"), &repo))
+}

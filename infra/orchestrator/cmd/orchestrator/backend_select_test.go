@@ -449,3 +449,32 @@ func TestConfigureKubeBackendAcceptsLongRepositoryWithoutAPI(t *testing.T) {
 	_, err = configureKubeBackend(kube.NewClient(nil), &config.Scope{Backend: "kube", Name: "shared", Repos: []config.RepoBlock{{Repo: "acme/bad*repo", Namespace: "project-alpha"}}})
 	require.Error(t, err)
 }
+
+func TestRunnerYMLSharedSettingsWithoutNamespaceNeverFetchContents(t *testing.T) {
+	for _, setting := range []string{"runner_config", "runner_image", "kubernetes"} {
+		t.Run(setting, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				encoded := base64.StdEncoding.EncodeToString([]byte("runtime: python:3.12\nhttp_egress: [unapproved.example.com]\n"))
+				require.NoError(t, json.NewEncoder(w).Encode(contentsResp{Content: encoded, Encoding: "base64"}))
+			}))
+			defer server.Close()
+			s := approvedStartupScope(t)
+			s.Repos[0].Namespace = ""
+			if setting != "runner_config" {
+				s.Repos[0].RunnerConfig = nil
+			}
+			if setting == "runner_image" {
+				s.Repos[0].RunnerImage = "registry.example/runner@sha256:" + strings.Repeat("a", 64)
+			}
+			if setting == "kubernetes" {
+				s.Repos[0].Kubernetes.EphemeralStorage = "20Gi"
+			}
+			pd := &productionDeps{gh: makeGHClient(t, server.URL), st: state.New(), scopeRef: s}
+			_, err := pd.RunnerYMLContext(context.Background(), "acme/alpha")
+			require.ErrorContains(t, err, "namespace")
+			require.Zero(t, calls, "shared-only settings cannot fall back to repository policy")
+		})
+	}
+}

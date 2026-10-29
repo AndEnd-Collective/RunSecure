@@ -217,7 +217,35 @@
                 "$ref": "#/$defs/projectPodSettings"
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "runnerConfig"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "runnerImage"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "kubernetes"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "namespace"
+                  ]
+                }
+              }
+            ]
           }
         }
       }

@@ -125,7 +125,7 @@ Issuer name to use in the Certificate: self-signed or user-provided.
 {{/* Validate enrollment before rendering any runtime resources. */}}
 {{- define "runsecure-orchestrator.validateProjects" -}}
 {{- $shared := false -}}
-{{- range .Values.scope.repos -}}{{- if .namespace -}}{{- $shared = true -}}{{- end -}}{{- end -}}
+{{- range .Values.scope.repos -}}{{- if or .namespace (hasKey . "runnerConfig") (hasKey . "runnerImage") (hasKey . "kubernetes") -}}{{- $shared = true -}}{{- end -}}{{- end -}}
 {{- $repos := dict -}}{{- $namespaces := dict -}}
 {{- range .Values.scope.repos -}}
 {{- if hasKey $repos (lower .repo) -}}{{- fail "duplicate repository enrollment" -}}{{- end -}}
