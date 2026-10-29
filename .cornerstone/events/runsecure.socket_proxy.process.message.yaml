@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.process.message
+  uuid: 89d13c9c-bd56-4a3a-b364-cd8830a0640c
+  description: HTTP server diagnostic occurred. The raw message is discarded because its contents may be remote controlled.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

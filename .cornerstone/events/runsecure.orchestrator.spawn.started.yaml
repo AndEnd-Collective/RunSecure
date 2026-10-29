@@ -1,4 +1,4 @@
-apiVersion: cornerstone.cerebras.net/v1
+apiVersion: cornerstone/v1
 kind: EventSignature
 
 metadata:

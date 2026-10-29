@@ -113,6 +113,16 @@ jobs:
                 # fully enforced by the GitHub-hosted lints-and-units job.
                 echo "SKIP $t (Go toolchain + module network; enforced in lints-and-units)"
                 continue ;;
+              test-telemetry-chart.sh)
+                # The hardened lint runner has no Helm binary or download
+                # allowance for get.helm.sh. Keep the pure telemetry checks
+                # here; hosted lints-and-units installs pinned Helm and runs
+                # the full chart/identity contract without a skip.
+                python3 infra/collector/sync-signatures.py --check || FAIL=$((FAIL + 1))
+                PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+                  -s examples/eks-bottlerocket/archive -p 'test_*.py' || FAIL=$((FAIL + 1))
+                echo "SKIP telemetry Helm assertions here (required in hosted lints-and-units)"
+                continue ;;
             esac
             echo "::group::$t"
             bash "$t" || FAIL=$((FAIL + 1))

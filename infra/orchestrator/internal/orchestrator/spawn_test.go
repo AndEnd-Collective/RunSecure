@@ -259,14 +259,20 @@ func TestSpawn_ContextCancellationWhileObservingRunner(t *testing.T) {
 	fake.mu.Lock()
 	fake.runnerStatus = "offline"
 	fake.runnerBusy = false
+	fake.runnerBlock = true
 	fake.mu.Unlock()
-	d.be.inspectExitDelay = 20 * time.Millisecond
+	d.be.waitDelay = time.Second
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(time.Millisecond)
-		cancel()
+		done <- NewSpawnWorker(d).Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "cancelled"})
 	}()
-	err := NewSpawnWorker(d).Execute(ctx, SpawnIntent{Scope: "s", Repo: "o/r", SpawnID: "cancelled"})
+	// Cancel only after lifecycle observation actually started. A fixed sleep
+	// races JIT acquisition under race instrumentation and slower event sinks.
+	require.Eventually(t, func() bool { fake.mu.Lock(); defer fake.mu.Unlock(); return fake.runnerGetCalled > 0 }, time.Second, time.Millisecond)
+	cancel()
+	err := <-done
 	require.ErrorIs(t, err, context.Canceled)
 	require.Contains(t, d.emBuf.String(), `"failure.reason":"runner_observation_cancelled"`)
 }

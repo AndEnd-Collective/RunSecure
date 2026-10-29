@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.telemetry.infrastructure.log
+  uuid: 728f38f1-ac65-4dc5-8591-fcdb8325437c
+  description: Capture of infrastructure log content. Result describes capture, never application success or trusted controller provenance. Payload remains untrusted, especially job output; source and trust tags are required by the capture producer.
+  status: active
+  tags: [runsecure, telemetry, logcapture]
+signature:
+  event.signature: runsecure-telemetry-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

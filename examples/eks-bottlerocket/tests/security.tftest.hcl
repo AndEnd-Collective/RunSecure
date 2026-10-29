@@ -1,6 +1,7 @@
 # Every run is a MOCKED PLAN. No AWS credentials or infrastructure are used.
 mock_provider "aws" {
   override_during = plan
+  mock_data "aws_network_interface" { defaults = { private_ip = "10.80.0.8" } }
   mock_data "aws_caller_identity" {
     defaults = { account_id = "123456789012" }
   }
@@ -8,7 +9,7 @@ mock_provider "aws" {
     defaults = { endpoint = "https://fixture.cluster.eks.amazonaws.com" }
   }
   mock_resource "aws_vpc_endpoint" {
-    defaults = { dns_entry = [{ dns_name = "fixture.vpce.amazonaws.com", hosted_zone_id = "ZFIXTURE" }] }
+    defaults = { dns_entry = [{ dns_name = "fixture.vpce.amazonaws.com", hosted_zone_id = "ZFIXTURE" }], network_interface_ids = ["eni-aaaaaaaa", "eni-bbbbbbbb"] }
   }
   mock_resource "aws_networkfirewall_firewall" {
     defaults = {

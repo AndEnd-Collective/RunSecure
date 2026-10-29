@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.started
+  uuid: a7020c64-9961-429c-891f-1972b367412e
+  description: Socket-proxy listener startup. Only TLS mode and image allowlist count are included.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

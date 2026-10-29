@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.orchestrator.process.failed
+  uuid: ad794f8c-bccf-4029-a81e-dead04a2ab3c
+  description: Controller process failed. Failure codes are stable; raw configuration and credential material are omitted.
+  status: active
+  tags: [runsecure, orchestrator]
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

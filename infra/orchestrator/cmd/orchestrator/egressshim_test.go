@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/config"
+	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/egress"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/orchestrator"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/runneryml"
@@ -198,11 +199,9 @@ func TestBuildBasePolicy_MalformedScopeOverride_ReturnsError(t *testing.T) {
 	require.Error(t, err, "malformed scope override must abort startup")
 }
 
-// TestRunnerYML_DeprecationWarning_EmittedToStderr verifies that when a project's
-// runner.yml uses the deprecated egress.allow_domains key, RunnerYML emits a
-// [RunSecure] WARNING to stderr. This exercises the wiring added in run.go that
-// calls yml.DeprecationWarnings() after every successful Parse.
-func TestRunnerYML_DeprecationWarning_EmittedToStderr(t *testing.T) {
+// A legacy configuration warning remains visible as a registered, structured
+// process message rather than an unstructured stderr line.
+func TestRunnerYML_DeprecationWarning_EmittedAsCornerstone(t *testing.T) {
 	// Write a runner.yml that uses the deprecated egress.allow_domains key.
 	dir := t.TempDir()
 	ghDir := filepath.Join(dir, ".github")
@@ -214,7 +213,9 @@ egress:
     - api.github.com
 `), 0o644))
 
+	var buf bytes.Buffer
 	pd := &productionDeps{
+		em: cornerstone.NewEmitter(&buf, cornerstone.SystemClock, cornerstone.SystemUUID),
 		scopeRef: &config.Scope{
 			Repos: []config.RepoBlock{
 				{Repo: "owner/repo", ProjectDir: dir},
@@ -222,24 +223,12 @@ egress:
 		},
 	}
 
-	// Redirect stderr so we can assert on the warning output.
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = w
-
 	snap, parseErr := pd.RunnerYML("owner/repo")
-
-	// Restore stderr before any assertions so test output is not lost.
-	w.Close()
-	os.Stderr = origStderr
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
 
 	require.NoError(t, parseErr)
 	require.NotNil(t, snap)
-	require.Contains(t, buf.String(), "[RunSecure] WARNING:",
-		"deprecation warning must be emitted to stderr")
+	require.Contains(t, buf.String(), cornerstone.EventProcessMessage,
+		"deprecation warning must be emitted as a registered event")
 	require.Contains(t, buf.String(), "egress.allow_domains is deprecated",
 		"warning must name the deprecated key")
 }

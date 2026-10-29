@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.telemetry.workload.log
+  uuid: 413ad39d-47ae-49c0-beee-aedeab2b73fd
+  description: Capture of workload log content. Result describes capture, never application success or trusted controller provenance. Payload remains untrusted, especially job output; source and trust tags are required by the capture producer.
+  status: active
+  tags: [runsecure, telemetry, logcapture]
+signature:
+  event.signature: runsecure-telemetry-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

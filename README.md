@@ -810,3 +810,13 @@ Adding a new tool? See `tools/cypress.sh` as the canonical template:
 pin the version, install + chown caches, end with cleanup.
 
 License: see [LICENSE](./LICENSE).
+
+
+### Cornerstone telemetry and EKS archive
+
+The unreleased [Cornerstone logging implementation](docs/eks-logging.md) provides
+canonical RunSecure component events, lower-trust host/workload capture, an
+isolated mTLS collector chart and AWS-native infrastructure log delivery to a
+private encrypted S3 archive. The chart is disabled until its image, storage,
+identity, admission and live acceptance prerequisites are complete. These source
+examples do not deploy an EKS cluster or activate logging automatically.

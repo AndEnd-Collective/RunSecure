@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.orchestrator.process.message
+  uuid: bb6fad91-e9d5-469d-a310-45deb7d78e80
+  description: Controller operational diagnostic; credential-like content is redacted.
+  status: active
+  tags: [runsecure, orchestrator]
+signature:
+  event.signature: runsecure-orchestrator-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true
