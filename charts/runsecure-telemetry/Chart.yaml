@@ -1,0 +1,6 @@
+apiVersion: v2
+name: runsecure-telemetry
+description: Guarded node log collection and Cornerstone CloudWatch archival gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

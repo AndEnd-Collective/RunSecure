@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.request.denied
+  uuid: a7b09d28-17cb-4227-b1ba-d8c68ccadf69
+  description: Docker API request denied by unchanged policy. Only stable denial code and HTTP status are logged; request body, headers and URL are excluded.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

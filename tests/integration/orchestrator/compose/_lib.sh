@@ -253,11 +253,13 @@ RUNSECURE_ROOT="$(cd "${RUNSECURE_ROOT}" && pwd)"
 # Go binaries in their own modules; the build is cached if already up-to-date.
 build_orchestrator_stack_images() {
   docker build \
+    --build-context "telemetry=${RUNSECURE_ROOT}/infra/telemetry" \
     -f "${RUNSECURE_ROOT}/infra/orchestrator/Dockerfile" \
     -t runsecure-orchestrator:local \
     "${RUNSECURE_ROOT}/infra/orchestrator" \
     >/dev/null
   docker build \
+    --build-context "telemetry=${RUNSECURE_ROOT}/infra/telemetry" \
     -f "${RUNSECURE_ROOT}/infra/socket-proxy/Dockerfile" \
     -t runsecure-socket-proxy:local \
     "${RUNSECURE_ROOT}/infra/socket-proxy" \

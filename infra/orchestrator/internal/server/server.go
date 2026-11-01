@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -18,6 +19,7 @@ type Server struct {
 	readyz      http.Handler
 	metrics     http.Handler
 	snapshot    http.Handler
+	em          *cornerstone.Emitter
 }
 
 // AllDeps is the union of all server-side dependency interfaces.
@@ -51,6 +53,7 @@ func New(healthzAddr, debugAddr string, deps AllDeps, em *cornerstone.Emitter) *
 		readyz:      NewReadyz(deps),
 		metrics:     NewMetrics(deps),
 		snapshot:    NewSnapshot(deps),
+		em:          em,
 	}
 }
 
@@ -70,6 +73,7 @@ func (s *Server) httpServers() (*http.Server, *http.Server) {
 		ReadTimeout:       HTTPReadTimeout(),
 		WriteTimeout:      HTTPWriteTimeout(),
 		IdleTimeout:       HTTPIdleTimeout(),
+		ErrorLog:          log.New(s.em, "", 0),
 	}
 	debugSrv := &http.Server{
 		Addr:              s.debugAddr,
@@ -78,6 +82,7 @@ func (s *Server) httpServers() (*http.Server, *http.Server) {
 		ReadTimeout:       HTTPReadTimeout(),
 		WriteTimeout:      HTTPWriteTimeout(),
 		IdleTimeout:       HTTPIdleTimeout(),
+		ErrorLog:          log.New(s.em, "", 0),
 	}
 	return healthzSrv, debugSrv
 }

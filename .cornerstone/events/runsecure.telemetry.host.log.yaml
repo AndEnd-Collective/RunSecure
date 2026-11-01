@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.telemetry.host.log
+  uuid: 57a837ff-4190-467b-b32b-0832d53430f5
+  description: Capture of host log content. Result describes capture, never application success or trusted controller provenance. Payload remains untrusted, especially job output; source and trust tags are required by the capture producer.
+  status: active
+  tags: [runsecure, telemetry, logcapture]
+signature:
+  event.signature: runsecure-telemetry-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

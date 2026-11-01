@@ -34,6 +34,11 @@ const (
 	EventConfigReloaded             = "runsecure.orchestrator.config.reloaded"
 	EventConfigInvalid              = "runsecure.orchestrator.config.invalid"
 	EventHealthProbe                = "runsecure.orchestrator.health.probe"
+	EventProcessStarted             = "runsecure.orchestrator.process.started"
+	EventProcessStopping            = "runsecure.orchestrator.process.stopping"
+	EventProcessFailed              = "runsecure.orchestrator.process.failed"
+	EventProcessMessage             = "runsecure.orchestrator.process.message"
+	EventTelemetryFailed            = "runsecure.orchestrator.telemetry.failed"
 )
 
 // AllEventNames returns every registered event name. The test in
@@ -62,5 +67,10 @@ func AllEventNames() []string {
 		EventConfigReloaded,
 		EventConfigInvalid,
 		EventHealthProbe,
+		EventProcessStarted,
+		EventProcessStopping,
+		EventProcessFailed,
+		EventProcessMessage,
+		EventTelemetryFailed,
 	}
 }

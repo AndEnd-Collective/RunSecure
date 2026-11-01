@@ -109,6 +109,34 @@ spec:
               protocol: TCP
 
           env:
+            - name: CORNERSTONE_ENV
+              value: {{ .Values.logging.environment | quote }}
+            - name: RUNSECURE_K8S_CLUSTER
+              value: {{ .Values.logging.clusterName | quote }}
+            - name: RUNSECURE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RUNSECURE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNSECURE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RUNSECURE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RUNSECURE_CLOUD_PROVIDER
+              value: {{ .Values.logging.cloud.provider | quote }}
+            - name: RUNSECURE_CLOUD_ACCOUNT_ID
+              value: {{ .Values.logging.cloud.accountId | quote }}
+            - name: RUNSECURE_CLOUD_REGION
+              value: {{ .Values.logging.cloud.region | quote }}
+            - name: RUNSECURE_CLOUD_ZONE
+              value: {{ .Values.logging.cloud.zone | quote }}
             - name: RUNSECURE_SCOPE_FILE
               value: /etc/runsecure/scope.yml
             - name: RUNSECURE_BACKEND

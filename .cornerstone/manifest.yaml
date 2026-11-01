@@ -1,17 +1,17 @@
 # .cornerstone/manifest.yaml
 # Project-local Cornerstone registry. See:
-# https://github.com/Cerebras/Cornerstone/blob/master/schemas/cornerstone-manifest.json
-# This project emits Cornerstone-shaped JSON directly to stderr. The
+# https://github.com/AndEnd-Collective/cornerstone (separately authorized dependency)
+# This project emits Cornerstone-shaped JSON directly to stdout (failure diagnostics use stderr). The
 # instrument skill bakes defaults + transformations into the generated code;
 # the collector picks them up via an OTLP / filelog receiver.
 
-apiVersion: cornerstone.cerebras.net/v1
+apiVersion: cornerstone/v1
 kind: ProjectManifest
 
 metadata:
   name: runsecure-orchestrator
   # owner: your-team
-  # description: One-line summary of what this project emits.
+  description: Typed RunSecure controller and socket events plus explicitly lower-trust log captures.
 
 emission:
   style: raw-json

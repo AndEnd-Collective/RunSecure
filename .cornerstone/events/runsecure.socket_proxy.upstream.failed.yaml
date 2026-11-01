@@ -1,0 +1,15 @@
+apiVersion: cornerstone/v1
+kind: EventSignature
+metadata:
+  name: runsecure.socket_proxy.upstream.failed
+  uuid: 092ae181-28d5-477e-b331-19c35c6ac3d5
+  description: Docker socket transport failed. Raw transport error and request contents are excluded.
+  status: active
+  tags: [runsecure, socket-proxy]
+signature:
+  event.signature: runsecure-socket-proxy-v1
+  configuration:
+    time.stamp: ISO 8601
+    event.format: json
+    event.structure: full
+    single.line: true

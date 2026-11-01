@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/config"
+	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/cornerstone"
 	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/imageallow"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +32,32 @@ func newAllowlist(t *testing.T, lines ...string) *imageallow.Allowlist {
 	a, err := imageallow.Load(path)
 	require.NoError(t, err)
 	return a
+}
+
+func TestBuildHTTPServerProducesStructuredSafeDenialAndUpstreamEvents(t *testing.T) {
+	var out bytes.Buffer
+	emitter := cornerstone.NewEmitter(&out)
+	server := buildHTTPServerWithEmitter(config.Config{DockerSock: "/nonexistent/sock", ListenAddr: ":9999"}, newAllowlist(t, "ghcr.io/img@sha256:aabb"), emitter)
+	for _, path := range []string{"/disallowed?token=privatevalue", "/info"} {
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	require.Contains(t, out.String(), "runsecure.socket_proxy.request.denied")
+	require.Contains(t, out.String(), "runsecure.socket_proxy.upstream.failed")
+	require.NotContains(t, out.String(), "privatevalue")
+	require.NotNil(t, server.ErrorLog)
+	server.ErrorLog.Print("remote-controlled-privatevalue")
+	require.NotContains(t, out.String(), "remote-controlled-privatevalue")
+}
+
+func TestServeUntilCanceledHandlesNormalErrorAndShutdown(t *testing.T) {
+	server := &http.Server{}
+	require.NoError(t, serveUntilCanceled(context.Background(), server, func() error { return http.ErrServerClosed }))
+	sentinel := errors.New("listener failure")
+	require.ErrorIs(t, serveUntilCanceled(context.Background(), server, func() error { return sentinel }), sentinel)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, serveUntilCanceled(ctx, &http.Server{}, func() error { <-ctx.Done(); return http.ErrServerClosed }))
 }
 
 // TestBuildHTTPServer_Timeouts checks that buildHTTPServer wires the expected

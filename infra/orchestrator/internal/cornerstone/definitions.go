@@ -1,0 +1,32 @@
+package cornerstone
+
+// Project-local registry correlation, checked against every YAML record by tests.
+var eventDefinitions = map[string]string{
+	"runsecure.orchestrator.auth.degraded":                 "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1f",
+	"runsecure.orchestrator.breaker.closed":                "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1b",
+	"runsecure.orchestrator.breaker.opened":                "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1a",
+	"runsecure.orchestrator.config.invalid":                "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a21",
+	"runsecure.orchestrator.config.reloaded":               "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a20",
+	"runsecure.orchestrator.drift.reconciled":              "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1e",
+	"runsecure.orchestrator.health.probe":                  "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a22",
+	"runsecure.orchestrator.job.assigned":                  "2c0f457f-c0bc-461e-83d4-51e471e74a70",
+	"runsecure.orchestrator.poll.queued_jobs_observed":     "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a12",
+	"runsecure.orchestrator.poll.tick":                     "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a11",
+	"runsecure.orchestrator.process.failed":                "ad794f8c-bccf-4029-a81e-dead04a2ab3c",
+	"runsecure.orchestrator.process.message":               "bb6fad91-e9d5-469d-a310-45deb7d78e80",
+	"runsecure.orchestrator.process.started":               "31e356a8-ac36-45c4-802f-7a8228627475",
+	"runsecure.orchestrator.process.stopping":              "4b57e441-ddad-43c9-b4fe-f18f212562ea",
+	"runsecure.orchestrator.ratelimit.paused":              "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1c",
+	"runsecure.orchestrator.ratelimit.resumed":             "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a1d",
+	"runsecure.orchestrator.runner.completed":              "298c8cdc-02cb-4b40-ab6c-c4ad65857525",
+	"runsecure.orchestrator.runner.exited_unassigned":      "20578baf-f72a-4412-adc1-c5a1ce936751",
+	"runsecure.orchestrator.runner.leak_cleaned":           "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a19",
+	"runsecure.orchestrator.runner.online":                 "d1edd05b-1ce9-439c-9af2-31f60e5aad43",
+	"runsecure.orchestrator.spawn.completed":               "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a16",
+	"runsecure.orchestrator.spawn.failed":                  "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a17",
+	"runsecure.orchestrator.spawn.jit_acquired":            "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a14",
+	"runsecure.orchestrator.spawn.runner_created":          "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a15",
+	"runsecure.orchestrator.spawn.started":                 "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a13",
+	"runsecure.orchestrator.spawn.timeout_forced_teardown": "6f2a4b18-9c1d-4e3f-8a2b-1c5d7e9f0a18",
+	"runsecure.orchestrator.telemetry.failed":              "e3d8ecc5-c08d-4da2-81e9-ab5c9c839746",
+}

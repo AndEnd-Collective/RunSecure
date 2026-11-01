@@ -231,7 +231,7 @@ func manifestTemplate(name, language, style string) string {
 # https://github.com/Cerebras/Cornerstone/blob/master/schemas/cornerstone-manifest.json
 %s
 
-apiVersion: cornerstone.cerebras.net/v1
+apiVersion: cornerstone/v1
 kind: ProjectManifest
 
 metadata:

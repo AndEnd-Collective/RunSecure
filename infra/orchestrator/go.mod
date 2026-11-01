@@ -3,6 +3,7 @@ module github.com/AndEnd-Collective/runsecure/infra/orchestrator
 go 1.27.1
 
 require (
+	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -56,3 +57,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/AndEnd-Collective/runsecure/infra/telemetry => ../telemetry

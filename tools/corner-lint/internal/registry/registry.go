@@ -199,11 +199,11 @@ func (r *Registry) Validate(projectRoot string) []Issue {
 	var issues []Issue
 
 	// Manifest sanity
-	if r.Manifest.APIVersion != "cornerstone.cerebras.net/v1" {
+	if r.Manifest.APIVersion != "cornerstone/v1" {
 		issues = append(issues, Issue{
 			Severity: "error",
 			File:     filepath.Join(r.Root, ManifestFileName),
-			Message:  fmt.Sprintf("unsupported apiVersion %q (want cornerstone.cerebras.net/v1)", r.Manifest.APIVersion),
+			Message:  fmt.Sprintf("unsupported apiVersion %q (want cornerstone/v1)", r.Manifest.APIVersion),
 		})
 	}
 	if r.Manifest.Kind != "ProjectManifest" {

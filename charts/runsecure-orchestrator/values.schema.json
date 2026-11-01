@@ -399,6 +399,58 @@
     },
     "podAnnotations": {
       "type": "object"
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "clusterName",
+        "cloud"
+      ],
+      "properties": {
+        "environment": {
+          "type": "string",
+          "enum": [
+            "Development",
+            "Testing",
+            "Staging",
+            "Production"
+          ]
+        },
+        "clusterName": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "cloud": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "accountId",
+            "region",
+            "zone"
+          ],
+          "properties": {
+            "provider": {
+              "type": "string",
+              "maxLength": 253
+            },
+            "accountId": {
+              "type": "string",
+              "maxLength": 253
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 253
+            },
+            "zone": {
+              "type": "string",
+              "maxLength": 253
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {

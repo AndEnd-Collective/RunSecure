@@ -115,6 +115,7 @@ resource "aws_vpc_security_group_egress_rule" "node_dns" {
 resource "aws_cloudwatch_log_group" "cluster" {
   name              = "/aws/eks/${var.name}/cluster"
   retention_in_days = 90
+  kms_key_id        = aws_kms_key.telemetry_archive.arn
 }
 
 resource "aws_eks_cluster" "this" {
