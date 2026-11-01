@@ -5,7 +5,9 @@
 # stable` made the image non-reproducible, and worse, syft's
 # binary-classifier-cataloger stopped recognising rustc at 1.98.0 — so the
 # toolchain disappeared from the SBOM, rust CVEs became unscannable, and the
-# publish gate failed closed on every release.
+# publish gate failed closed on every release. (syft's classifier matches
+# libstd's `clang LLVM (rustc version ...)` DWARF producer string, which
+# rustc 1.98+ no longer emits; checked through syft 1.55.0.)
 #
 # images/rust.Dockerfile therefore pins RUST_STABLE_PIN to the newest rustc the
 # scanner can still inventory. This workflow is what moves that pin: every
@@ -21,7 +23,8 @@
 # A failed certification is a NORMAL outcome: it means upstream rust is ahead
 # of the pinned syft. The run still succeeds and reports why the pin was not
 # moved, so this does not generate a weekly red run that everyone learns to
-# ignore. The only hard failures here are infrastructure problems.
+# ignore. The only hard failures here are infrastructure problems: a build
+# that does not complete, or a certify leg that reports no result.
 # ============================================================================
 
 name: weekly-rust-toolchain
@@ -158,8 +161,11 @@ jobs:
 
       # Same script, same arguments, same pinned scanners as the rust jobs in
       # publish-images.yml. If this cannot pass, the release cannot either.
+      # The certification checks may fail without failing the job: a rejected
+      # candidate is recorded below and decided by the bump job.
       - name: Certify — Grype gate + rust inventory presence
-        id: certify
+        id: scan
+        continue-on-error: true
         env:
           SLUG: ${{ matrix.slug }}
         run: |
@@ -171,52 +177,101 @@ jobs:
             binary-classifier-cataloger rust
 
       - name: Certify — rust terminal-stage hardening contract
+        id: hardening
+        continue-on-error: true
         run: |
           set -euo pipefail
           bash tests/validation/test-language-terminal-stages.sh
 
+      - name: Record certification result
+        env:
+          SLUG: ${{ matrix.slug }}
+          SCAN: ${{ steps.scan.outcome }}
+          HARDENING: ${{ steps.hardening.outcome }}
+        run: |
+          set -euo pipefail
+          FAILED=""
+          [ "$SCAN" = success ] || FAILED="${FAILED} grype-gate-and-rust-inventory"
+          [ "$HARDENING" = success ] || FAILED="${FAILED} terminal-stage-hardening"
+          if [ -z "$FAILED" ]; then
+            echo pass > "certify-result-${SLUG}"
+          else
+            echo "fail:${FAILED}" > "certify-result-${SLUG}"
+          fi
+          echo "certify ${SLUG}: $(cat "certify-result-${SLUG}")" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: certify-result-${{ matrix.slug }}
+          path: certify-result-${{ matrix.slug }}
+          if-no-files-found: error
+          retention-days: 7
+
   # --- Move the pin only if EVERY arch certified ---------------------------
   bump:
     needs: [resolve, certify]
-    # `always()` so this job still runs when a certify matrix leg failed, and
-    # the explicit result check decides. Without it the job would be skipped
-    # and the "not adopted" summary would never be written.
+    # `always()` so this job still runs when a certify leg broke, and reports
+    # it instead of being skipped.
     if: always() && needs.resolve.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     steps:
-      - name: Report a failed certification and stop
+      - name: Fail on a certify infrastructure error
         if: needs.certify.result != 'success'
+        env:
+          CERTIFY_RESULT: ${{ needs.certify.result }}
+        run: |
+          echo "::error::certify did not complete (${CERTIFY_RESULT}); no verdict on the candidate"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: certify-result-*
+          path: certify-results
+          merge-multiple: true
+
+      - name: Combine per-architecture results
+        id: verdict
+        run: |
+          set -euo pipefail
+          bash infra/scripts/rust-certify-verdict.sh certify-results amd64 arm64 >> "$GITHUB_OUTPUT"
+
+      - name: Report a failed certification and stop
+        if: steps.verdict.outputs.certified != 'true'
         env:
           CURRENT: ${{ needs.resolve.outputs.current }}
           CANDIDATE: ${{ needs.resolve.outputs.candidate }}
-          CERTIFY_RESULT: ${{ needs.certify.result }}
         run: |
           {
             echo "### Rust ${CANDIDATE} NOT adopted"
             echo
             echo "The pin stays at **${CURRENT}**."
             echo
-            echo "Certification across linux/amd64 and linux/arm64: **${CERTIFY_RESULT}**."
-            echo "See the per-architecture \`certify\` jobs for which one failed."
+            echo "Per-architecture certification:"
             echo
-            echo "This is expected when upstream rust is ahead of the pinned syft:"
-            echo "the toolchain would not appear in the SBOM, so rust CVEs would not"
-            echo "be scannable and the publish gate would fail closed."
+            for f in certify-results/certify-result-*; do
+              echo "- \`${f#certify-results/certify-result-}\`: $(cat "$f")"
+            done
             echo
-            echo "Nothing to do — the next bump of \`SYFT_VERSION\` in"
-            echo "\`infra/scripts/install-pinned-scanners.sh\` may unblock it."
+            echo "This is expected while syft cannot inventory the candidate: the"
+            echo "toolchain would not appear in the SBOM, so rust CVEs would not be"
+            echo "scannable and the publish gate would fail closed."
+            echo
+            echo "syft identifies rust on Linux from libstd's DWARF producer string"
+            echo "\`clang LLVM (rustc version X.Y.Z ...)\`, which rustc 1.98+ no longer"
+            echo "ships (syft 1.55.0 included). The pin can move once a syft release"
+            echo "recognises newer libstd builds and \`SYFT_VERSION\` in"
+            echo "\`infra/scripts/install-pinned-scanners.sh\` is bumped to it."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: needs.certify.result == 'success'
-        with:
-          token: ${{ secrets.RELEASE_TOKEN }}
-
       - name: Open the pin-bump PR
-        if: needs.certify.result == 'success'
+        if: steps.verdict.outputs.certified == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CURRENT: ${{ needs.resolve.outputs.current }}

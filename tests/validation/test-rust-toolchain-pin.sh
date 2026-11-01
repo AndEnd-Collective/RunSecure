@@ -100,8 +100,9 @@ check(
     "weekly certification builds the candidate through the pin",
 )
 check(
-    "needs.certify.result == 'success'" in workflow,
-    "the pin-bump PR is gated on the certify job succeeding",
+    "steps.verdict.outputs.certified == 'true'" in workflow
+    and "rust-certify-verdict.sh certify-results amd64 arm64" in workflow,
+    "the pin-bump PR is gated on every architecture's certification verdict",
 )
 
 # The release publishes and scans both architectures, so certifying one would
@@ -128,6 +129,36 @@ check(
     "the bump job depends on resolve and certify",
 )
 
+# A rejected candidate is a normal outcome and must leave the run green; only
+# infrastructure (a build, a missing result) may fail it.
+certify_steps = doc.get("jobs", {}).get("certify", {}).get("steps", [])
+by_id = {step.get("id"): step for step in certify_steps if step.get("id")}
+check(
+    all(by_id.get(i, {}).get("continue-on-error") is True for i in ("scan", "hardening")),
+    "certification checks record a rejection instead of failing the run",
+)
+check(
+    not any(
+        step.get("continue-on-error")
+        for step in certify_steps
+        if step.get("id") not in ("scan", "hardening")
+    ),
+    "build and result-recording steps still fail the run on infrastructure errors",
+)
+uploads = [s for s in certify_steps if "upload-artifact" in str(s.get("uses", ""))]
+check(
+    len(uploads) == 1 and uploads[0].get("with", {}).get("if-no-files-found") == "error",
+    "each certify leg must upload its result",
+)
+bump_steps = doc.get("jobs", {}).get("bump", {}).get("steps", [])
+check(
+    any(
+        step.get("if") == "needs.certify.result != 'success'" and "exit 1" in step.get("run", "")
+        for step in bump_steps
+    ),
+    "a certify leg that did not complete fails the bump job",
+)
+
 for status, message in results:
     print(f"{status}\t{message}")
 PY
@@ -152,14 +183,23 @@ done < "$RESULTS_FILE"
 # `curl | awk '{...; exit}'` under pipefail killed curl with exit 23 once awk
 # stopped reading, so no candidate was ever certified. Run the resolver
 # against a manifest shaped like the real one and pin the download-first form.
+# record DESCRIPTION COMMAND... — pass when COMMAND succeeds.
 record() {
-    if [ "$1" -eq 0 ]; then
-        echo "  PASS: $2"
+    local desc=$1
+    shift
+    if "$@"; then
+        echo "  PASS: $desc"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL: $2"
+        echo "  FAIL: $desc"
         FAIL=$((FAIL + 1))
     fi
+}
+
+# status_of COMMAND... — print the command's exit status, discarding its output.
+status_of() {
+    "$@" >/dev/null 2>&1
+    echo $?
 }
 
 RESOLVER="${RUNSECURE_ROOT}/infra/scripts/rust-stable-version.sh"
@@ -178,29 +218,54 @@ trap 'rm -f "$RESULTS_FILE"; rm -rf "$MANIFEST_DIR"' EXIT
 } > "${MANIFEST_DIR}/channel.toml"
 
 GOT=$(bash "$RESOLVER" "${MANIFEST_DIR}/channel.toml" 2>/dev/null)
-[ "$GOT" = "1.99.1" ]
-record $? "resolver reads rustc's version, not cargo's, from a full-size manifest (got '${GOT}')"
+record "resolver reads rustc's version, not cargo's, from a full-size manifest (got '${GOT}')" \
+    [ "$GOT" = "1.99.1" ]
 
 printf '[pkg.cargo]\nversion = "1.99.0 (a 2026-10-20)"\n' > "${MANIFEST_DIR}/no-rustc.toml"
-bash "$RESOLVER" "${MANIFEST_DIR}/no-rustc.toml" >/dev/null 2>&1
-[ $? -eq 1 ]
-record $? "resolver fails when the manifest has no [pkg.rustc] version"
+record "resolver fails when the manifest has no [pkg.rustc] version" \
+    test "$(status_of bash "$RESOLVER" "${MANIFEST_DIR}/no-rustc.toml")" -eq 1
 
 : > "${MANIFEST_DIR}/empty.toml"
-bash "$RESOLVER" "${MANIFEST_DIR}/empty.toml" >/dev/null 2>&1
-[ $? -eq 1 ]
-record $? "resolver fails on an empty manifest"
+record "resolver fails on an empty manifest" \
+    test "$(status_of bash "$RESOLVER" "${MANIFEST_DIR}/empty.toml")" -eq 1
 
-bash "$RESOLVER" "${MANIFEST_DIR}/absent.toml" >/dev/null 2>&1
-[ $? -eq 1 ]
-record $? "resolver fails when the manifest was not downloaded"
+record "resolver fails when the manifest was not downloaded" \
+    test "$(status_of bash "$RESOLVER" "${MANIFEST_DIR}/absent.toml")" -eq 1
 
-grep -Fq "CANDIDATE=\$(bash infra/scripts/rust-stable-version.sh \"\$MANIFEST\")" "$WORKFLOW" \
-    && grep -Fq "curl --proto '=https' --tlsv1.2 -sSf -o \"\$MANIFEST\"" "$WORKFLOW"
-record $? "weekly workflow downloads the manifest to a file, then resolves from it"
+VERDICT="${RUNSECURE_ROOT}/infra/scripts/rust-certify-verdict.sh"
+verdict() {
+    local dir=$1
+    shift
+    bash "$VERDICT" "$dir" "$@" 2>/dev/null
+}
+mkdir -p "${MANIFEST_DIR}/v-pass" "${MANIFEST_DIR}/v-reject" "${MANIFEST_DIR}/v-missing" "${MANIFEST_DIR}/v-bad"
+echo pass > "${MANIFEST_DIR}/v-pass/certify-result-amd64"
+echo pass > "${MANIFEST_DIR}/v-pass/certify-result-arm64"
+echo pass > "${MANIFEST_DIR}/v-reject/certify-result-amd64"
+echo "fail: grype-gate-and-rust-inventory" > "${MANIFEST_DIR}/v-reject/certify-result-arm64"
+echo pass > "${MANIFEST_DIR}/v-missing/certify-result-amd64"
+echo pass > "${MANIFEST_DIR}/v-bad/certify-result-amd64"
+echo "maybe" > "${MANIFEST_DIR}/v-bad/certify-result-arm64"
 
-! grep -A2 'channel-rust-stable.toml' "$WORKFLOW" | grep -q '^ *|'
-record $? "weekly workflow does not pipe the channel manifest download into a parser"
+record "verdict certifies only when every architecture passed" \
+    [ "$(verdict "${MANIFEST_DIR}/v-pass" amd64 arm64)" = "certified=true" ]
+
+record "verdict rejects the candidate when one architecture failed certification" \
+    [ "$(verdict "${MANIFEST_DIR}/v-reject" amd64 arm64)" = "certified=false" ]
+
+record "verdict fails when an architecture reported no result" \
+    test "$(status_of verdict "${MANIFEST_DIR}/v-missing" amd64 arm64)" -eq 1
+
+record "verdict fails on a malformed result" \
+    test "$(status_of verdict "${MANIFEST_DIR}/v-bad" amd64 arm64)" -eq 1
+
+record "weekly workflow resolves from the downloaded manifest" \
+    grep -Fq "CANDIDATE=\$(bash infra/scripts/rust-stable-version.sh \"\$MANIFEST\")" "$WORKFLOW"
+record "weekly workflow downloads the manifest to a file" \
+    grep -Fq "curl --proto '=https' --tlsv1.2 -sSf -o \"\$MANIFEST\"" "$WORKFLOW"
+
+record "weekly workflow does not pipe the channel manifest download into a parser" \
+    test "$(grep -A2 'channel-rust-stable.toml' "$WORKFLOW" | grep -c '^ *|')" -eq 0
 
 echo ""
 echo "=== Rust Toolchain Pin Contract ==="
