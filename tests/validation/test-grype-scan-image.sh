@@ -22,6 +22,7 @@ cat >"${FAKE_BIN}/syft" <<'EOF'
 set -euo pipefail
 OUTPUT=''
 SELECTION=''
+OVERRIDE=''
 PLATFORM=''
 args=("$@")
 for ((index = 0; index < ${#args[@]}; index++)); do
@@ -33,10 +34,35 @@ for ((index = 0; index < ${#args[@]}; index++)); do
             index=$((index + 1))
             PLATFORM=${args[$index]}
             ;;
+        --override-default-catalogers)
+            index=$((index + 1))
+            OVERRIDE=${args[$index]}
+            printf 'override=%s\n' "$OVERRIDE" >>"$FAKE_LOG"
+            ;;
     esac
 done
 printf 'platform=%s\n' "${PLATFORM:-default}" >>"$FAKE_LOG"
 [[ -n "$OUTPUT" ]]
+# file-content-cataloger: libstd captured from the image. FAKE_RUST_MODE picks
+# the toolchain directory and the bytes rustc embedded in it.
+if [[ "$OVERRIDE" == file-content-cataloger ]]; then
+    TOOLCHAIN=1.99.1-aarch64-unknown-linux-gnu
+    IDENTITY='rustc version 1.99.1 (58cf8f9c3 2026-10-13)'
+    case "${FAKE_RUST_MODE:-good}" in
+        good) ;;
+        mismatch) TOOLCHAIN=1.98.0-aarch64-unknown-linux-gnu ;;
+        no-identity) IDENTITY='rustc 1.99.1' ;;
+        two-identities) IDENTITY='rustc version 1.99.1 (58cf8f9c3 2026-10-13)\000rustc version 1.97.1 (8bab26f4f 2026-07-14)' ;;
+        absent)
+            printf '%s\n' '{"artifacts":[],"files":[],"descriptor":{"configuration":{"catalogers":{"used":["file-content-cataloger"]}}}}' >"$OUTPUT"
+            exit 0
+            ;;
+    esac
+    CONTENTS=$(printf "\177ELF\000\000GCC: (GNU) 9.5.0\000${IDENTITY}\000\377\376" | base64 | tr -d '\n')
+    printf '{"artifacts":[],"files":[{"location":{"path":"/home/runner/.rustup/toolchains/%s/lib/rustlib/aarch64-unknown-linux-gnu/lib/libstd-f9f1a1f02cfcb825.so"},"contents":"%s"}],"descriptor":{"configuration":{"catalogers":{"used":["file-content-cataloger","file-metadata-cataloger"]}}}}\n' \
+        "$TOOLCHAIN" "$CONTENTS" >"$OUTPUT"
+    exit 0
+fi
 if [[ "$SELECTION" == +binary-classifier-cataloger ]]; then
     if [[ "${FAKE_PRESENCE_MODE:-good}" == good ]]; then
         printf '%s\n' '{
@@ -191,6 +217,50 @@ if PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
     fail "missing exact runtime presence should fail closed"
 else
     pass "missing exact runtime presence fails closed"
+fi
+
+# --- rust toolchain identity (file-content-cataloger:rust) -----------------
+rust_presence() {
+    PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+        FAKE_RUST_MODE="$1" bash "$SCANNER" --platform linux/arm64 image:test \
+        "${TEST_TMP}/rust-$1.sarif" ca-certificates '' '' \
+        file-content-cataloger rust >"${TEST_TMP}/rust-$1.out" 2>&1
+}
+: >"$FAKE_LOG"
+if rust_presence good; then
+    pass "rust toolchain identity in libstd proves presence"
+else
+    fail "rust toolchain identity in libstd should pass"
+fi
+if grep -Fq 'Rust toolchain present: rustc version 1.99.1 (58cf8f9c3 2026-10-13)' "${TEST_TMP}/rust-good.out"; then
+    pass "rust identity proof reports the exact toolchain"
+else
+    fail "rust identity proof did not report the toolchain"
+fi
+if grep -Fxq 'override=file-content-cataloger' "$FAKE_LOG" \
+    && [[ $(grep -Fxc 'platform=linux/arm64' "$FAKE_LOG") -eq 2 ]]; then
+    pass "rust identity is read by Syft alone from the requested platform"
+else
+    fail "rust identity must come from a file-content-only Syft run on the requested platform"
+fi
+if grep -Eq '^grype=.*presence\.syft\.json' "$FAKE_LOG"; then
+    fail "rust identity inventory must never feed Grype"
+else
+    pass "rust identity inventory is isolated from Grype"
+fi
+for mode in absent no-identity two-identities mismatch; do
+    if rust_presence "$mode"; then
+        fail "rust identity proof must fail closed: ${mode}"
+    else
+        pass "rust identity proof fails closed: ${mode}"
+    fi
+done
+if PATH="${FAKE_BIN}:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_SBOM_MODE=good \
+    bash "$SCANNER" image:test "${TEST_TMP}/fc-python.sarif" ca-certificates \
+    '' '' file-content-cataloger python >/dev/null 2>&1; then
+    fail "file-content presence must be limited to rust"
+else
+    pass "file-content presence is limited to rust"
 fi
 
 RAW_SARIF="${TEST_TMP}/raw.sarif"

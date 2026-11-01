@@ -705,8 +705,9 @@ jobs:
             expected_cataloger: ''
             expected_cataloger_package: ''
             # rustup ships rustc outside a package database. Prove the exact
-            # Rust binary separately; this heuristic SBOM is never fed to Grype.
-            expected_presence_cataloger: binary-classifier-cataloger
+            # toolchain separately from libstd's embedded rustc identity, read
+            # by Syft's file-content cataloger; this SBOM is never fed to Grype.
+            expected_presence_cataloger: file-content-cataloger
             expected_presence_package: rust
           - name: node
             lang_version: "24"
@@ -746,7 +747,7 @@ jobs:
             expected_dpkg_package: ca-certificates
             expected_cataloger: ''
             expected_cataloger_package: ''
-            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_cataloger: file-content-cataloger
             expected_presence_package: rust
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -857,7 +858,7 @@ jobs:
             expected_dpkg_package: ca-certificates
             expected_cataloger: ''
             expected_cataloger_package: ''
-            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_cataloger: file-content-cataloger
             expected_presence_package: rust
           - name: node
             lang_version: "24"
@@ -897,7 +898,7 @@ jobs:
             expected_dpkg_package: ca-certificates
             expected_cataloger: ''
             expected_cataloger_package: ''
-            expected_presence_cataloger: binary-classifier-cataloger
+            expected_presence_cataloger: file-content-cataloger
             expected_presence_package: rust
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
