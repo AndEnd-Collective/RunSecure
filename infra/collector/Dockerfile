@@ -8,6 +8,7 @@ WORKDIR /build
 # It is never copied into the final image or committed to this public repo.
 COPY --from=cornerstone-src / /build/cornerstone-src/otel-collector/
 COPY infra/collector/processor /build/public-processor/
+COPY infra/telemetry /build/telemetry/
 COPY infra/collector/builder-config.yaml /build/builder-config.yaml
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     GOBIN=/usr/local/bin go install go.opentelemetry.io/collector/cmd/builder@v0.164.0 && \

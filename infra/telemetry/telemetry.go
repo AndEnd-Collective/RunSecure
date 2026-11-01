@@ -1,6 +1,6 @@
 // Package telemetry is RunSecure's in-tree JSON emission support, not an
-// upstream SDK. Run sync-telemetry.py after edits; consumer copies are generated
-// to preserve the orchestrator and socket-proxy's isolated Docker build contexts.
+// upstream SDK. Consumers replace this module by relative path and receive it
+// as the `telemetry` named Docker build context.
 package telemetry
 
 import (

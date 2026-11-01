@@ -46,3 +46,7 @@ providers:
 # qualify the real private processors and rescan; no advisory is suppressed.
 replaces:
   - golang.org/x/net => golang.org/x/net v0.62.0
+  # The generated distribution is the main module, so the processor's own
+  # replace of the shared telemetry module does not apply; repeat it here,
+  # relative to output_path.
+  - github.com/AndEnd-Collective/runsecure/infra/telemetry => ../telemetry

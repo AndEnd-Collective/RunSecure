@@ -5,11 +5,12 @@ package cornerstone
 import (
 	"crypto/rand"
 	"fmt"
-	"github.com/AndEnd-Collective/runsecure/infra/socket-proxy/internal/telemetry"
 	"io"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/AndEnd-Collective/runsecure/infra/telemetry"
 )
 
 const ProjectSignature = "runsecure-socket-proxy-v1"

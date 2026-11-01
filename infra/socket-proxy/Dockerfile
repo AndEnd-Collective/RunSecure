@@ -6,6 +6,9 @@ ARG GO_VERSION=1.27
 # native platform is used implicitly. Both paths produce a static binary.
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
+# go.mod replaces the shared telemetry module with ../telemetry; it arrives
+# as the `telemetry` named build context (--build-context telemetry=infra/telemetry).
+COPY --from=telemetry . /telemetry/
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

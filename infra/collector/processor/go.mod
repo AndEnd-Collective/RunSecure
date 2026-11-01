@@ -3,6 +3,7 @@ module runsecure/collector/processor
 go 1.27.1
 
 require (
+	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-00010101000000-000000000000
 	go.opentelemetry.io/collector/component v1.70.0
 	go.opentelemetry.io/collector/consumer v1.70.0
 	go.opentelemetry.io/collector/pdata v1.70.0
@@ -24,3 +25,5 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 )
+
+replace github.com/AndEnd-Collective/runsecure/infra/telemetry => ../../telemetry

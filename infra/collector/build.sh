@@ -21,6 +21,7 @@ mkdir -p "$OUT/bin"
 cp "$ROOT/infra/collector/builder-config.yaml" "$OUT/builder-config.yaml"
 ln -sfn "$SOURCE" "$OUT/cornerstone-src"
 ln -sfn "$ROOT/infra/collector/processor" "$OUT/public-processor"
+ln -sfn "$ROOT/infra/telemetry" "$OUT/telemetry"
 GOBIN="$OUT/bin" go install "go.opentelemetry.io/collector/cmd/builder@$OCB"
 [[ "$("$OUT/bin/builder" version 2>&1)" == "ocb version $OCB" ]] || { echo 'OCB version mismatch' >&2; exit 1; }
 (cd "$OUT" && CGO_ENABLED=0 "$OUT/bin/builder" --skip-strict-versioning=false --config=builder-config.yaml)

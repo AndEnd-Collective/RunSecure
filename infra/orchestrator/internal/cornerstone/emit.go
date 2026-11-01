@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/telemetry"
+	"github.com/AndEnd-Collective/runsecure/infra/telemetry"
 	"github.com/google/uuid"
 )
 

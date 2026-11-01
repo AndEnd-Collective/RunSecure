@@ -12,16 +12,21 @@ API, credential file or general environment enumeration is used for enrichment.
 Redaction is defense in depth: never pass request bodies, arbitrary application
 output or complete credential-bearing configuration into a controller event.
 
-Canonical Go sources and tests live here. Generated copies under each
-consumer's `internal/telemetry` retain isolated Docker/module build contexts:
+This module is the only copy. The orchestrator, socket-proxy and collector
+processor modules `require` it and `replace` it by relative path
+(`../telemetry`, `../../telemetry`). Image builds keep each component's
+own module as the build context and add this directory as the `telemetry`
+named context:
 
 ```sh
-python3 infra/scripts/validate/sync-telemetry.py
-python3 infra/scripts/validate/sync-telemetry.py --check
-bash tests/validation/test-telemetry-mirrors.sh
-go test -race ./... # from this directory
+docker build --build-context telemetry=infra/telemetry \
+  -f infra/orchestrator/Dockerfile infra/orchestrator
 ```
 
-The sync check compares every Go source/test byte and rejects foreign Go files.
-CI tests the canonical source and checks its copies; consumer coverage gates
-exercise the same tests inside each module. Do not edit a generated copy.
+The OCB-generated collector distribution is a separate main module, so
+`infra/collector/builder-config.yaml` repeats the replace. Verify with:
+
+```sh
+bash tests/validation/test-telemetry-single-source.sh
+go test -race ./... # from this directory
+```

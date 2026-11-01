@@ -15,12 +15,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/AndEnd-Collective/runsecure/infra/telemetry"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/processor"
-	"runsecure/collector/processor/internal/telemetry"
 )
 
 const maxInputBytes = 1024 * 1024
