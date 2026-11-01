@@ -133,6 +133,8 @@ jobs:
       - name: Run unit tests
         run: |
           set -uo pipefail
+          # Unit tests also run fake tools from their temp dirs; /tmp is noexec.
+          export TMPDIR="$RUNNER_TEMP"
           FAIL=0
           for t in tests/unit/test-*.sh; do
             [ -f "$t" ] || continue
