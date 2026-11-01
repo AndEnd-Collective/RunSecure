@@ -111,9 +111,10 @@ CNI isolation, private image pulls, Pod Identity, CSI encryption, mTLS rotation,
 queue/disk/loss alerts and real AWS/S3 archive readback. None was live-tested by
 this receipt. No completed structured Codex Security scan is claimed.
 
-PR74's one-shot credentialed self-CI startup and cancellation of its superseded
-queued run remain pending owner approval after automatic approval review
-rejected those exact actions; neither was retried for this qualification.
-Hosted checks and local results must not be presented as completion of that
-pending self-CI job. This change also does not resolve the older EC2 runner's
-OSV uncertainty or establish clean security coverage there.
+PR74's self-CI ran on the one-shot `bootstrap-self-runner.sh` runner (one
+job, then exit; no daemon): `lints-on-self` passed on
+`c445ad9` in [dogfood run 41283996600](https://github.com/AndEnd-Collective/RunSecure/actions/runs/41283996600),
+after the superseded runs were cancelled. Hosted validation, smoke/integration,
+Kubernetes integration and runner-image scans also passed on that head. This
+does not resolve the older EC2 runner's OSV uncertainty or establish clean
+security coverage there.
