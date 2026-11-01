@@ -11,6 +11,7 @@
 # Usage:
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo
 #   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo --max-jobs 5
+#   ./infra/scripts/run.sh --project /path/to/project --repo owner/repo --idle-timeout 60
 #
 # Invocation patterns — preferred to direct:
 #   1. Self-CI on this repo:
@@ -40,6 +41,7 @@ RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROJECT_DIR=""
 REPO=""
 MAX_JOBS=5
+IDLE_TIMEOUT=0
 FORCE_REBUILD=false
 
 # --- Parse arguments first (so --help works without Docker) -----------------
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --project)    PROJECT_DIR="$2"; shift 2 ;;
         --repo)       REPO="$2"; shift 2 ;;
         --max-jobs)   MAX_JOBS="$2"; shift 2 ;;
+        --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
         --force)      FORCE_REBUILD=true; shift ;;
         -h|--help)
             echo "Usage: run.sh --project /path/to/project --repo owner/repo [options]"
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --project PATH    Path to the project directory (must contain .github/runner.yml)"
             echo "  --repo OWNER/REPO GitHub repository (e.g., NaorPenso/datacentric)"
             echo "  --max-jobs N      Maximum jobs to process (default: 5)"
+            echo "  --idle-timeout S  Exit when a runner claims no job within S seconds (default: 0, wait indefinitely)"
             echo "  --force           Force rebuild of project image"
             echo "  -h, --help        Show this help"
             exit 0
@@ -79,6 +83,11 @@ fi
 
 if [[ -z "$REPO" ]]; then
     echo "[RunSecure] ERROR: --repo is required."
+    exit 1
+fi
+
+if [[ ! "$IDLE_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "[RunSecure] ERROR: --idle-timeout must be a whole number of seconds."
     exit 1
 fi
 
@@ -172,7 +181,9 @@ _gh_scope_warning() {
     out=$(gh auth status 2>&1 || true)
     # Token scopes line looks like: "  - Token scopes: 'repo', 'workflow', 'admin:org', …"
     local scopes_line
-    scopes_line=$(echo "$out" | grep -i 'Token scopes' | head -1)
+    # No scopes line (fine-grained token, GH_TOKEN) is not an error: under
+    # pipefail a grep miss would otherwise abort the orchestrator here.
+    scopes_line=$(echo "$out" | grep -i 'Token scopes' | head -1 || true)
     if [[ -z "$scopes_line" ]]; then
         return 0
     fi
@@ -248,22 +259,69 @@ echo ""
 echo "[RunSecure] Ready to process up to $MAX_JOBS jobs. Press Ctrl+C to stop."
 echo ""
 
+# The GitHub-side registration of the runner currently launched, if any. An
+# ephemeral runner deregisters itself after its job; one that never ran a job
+# (idle release, kill, crash) stays registered until it is deleted here.
+RUNNER_ID=""
+COMPOSE_PID=""
+
+_deregister_runner() {
+    [[ -n "$RUNNER_ID" ]] || return 0
+    if gh api -X DELETE "repos/$REPO/actions/runners/$RUNNER_ID" >/dev/null 2>&1; then
+        echo "[RunSecure] Removed runner registration $RUNNER_ID"
+    fi
+    RUNNER_ID=""
+}
+
 cleanup() {
     echo ""
     echo "[RunSecure] Shutting down..."
+    if [[ -n "$COMPOSE_PID" ]] && kill -0 "$COMPOSE_PID" 2>/dev/null; then
+        kill "$COMPOSE_PID" 2>/dev/null || true
+    fi
     local _cleanup_compose="${RUNSECURE_ROOT}/infra/runtime-compose.yml"
     if [[ -f "$_cleanup_compose" ]]; then
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$_cleanup_compose" down --remove-orphans 2>/dev/null || true
     else
         $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" down --remove-orphans 2>/dev/null || true
     fi
+    _deregister_runner
     # Reuse the same lock-release helper installed earlier — keeps the
     # PID-ownership check in one place.
     _release_lock
 }
 # Extend the early lock-only trap to also tear down compose. The lock-release
-# is still PID-owned-only via _release_lock, so this is safe.
+# is still PID-owned-only via _release_lock, so this is safe. TERM/INT exit
+# explicitly so `kill` and Ctrl+C run the same teardown.
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+# Wait for the launched runner. With --idle-timeout, a runner that has not
+# claimed a job by then is deleted on GitHub; GitHub refuses to delete a busy
+# runner, so a job assigned at the last moment still runs. Sets SLOT_RELEASED.
+IDLE_POLL_SECONDS=5
+_wait_for_runner() {
+    local waited=0 claimed=false
+    SLOT_RELEASED=false
+    while kill -0 "$COMPOSE_PID" 2>/dev/null; do
+        if [[ "$IDLE_TIMEOUT" -gt 0 && "$claimed" == false ]]; then
+            if [[ "$(gh api "repos/$REPO/actions/runners/$RUNNER_ID" --jq '.busy' 2>/dev/null)" == "true" ]]; then
+                claimed=true
+            elif [[ "$waited" -ge "$IDLE_TIMEOUT" ]] \
+                && gh api -X DELETE "repos/$REPO/actions/runners/$RUNNER_ID" >/dev/null 2>&1; then
+                echo "[RunSecure] No job claimed within ${IDLE_TIMEOUT}s; released runner $RUNNER_ID"
+                RUNNER_ID=""
+                SLOT_RELEASED=true
+                kill "$COMPOSE_PID" 2>/dev/null || true
+                wait "$COMPOSE_PID" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        sleep "$IDLE_POLL_SECONDS"
+        waited=$((waited + IDLE_POLL_SECONDS))
+    done
+}
 
 for i in $(seq 1 "$MAX_JOBS"); do
     echo "--- Job $i/$MAX_JOBS: Requesting JIT token ---"
@@ -285,6 +343,7 @@ EOF
     }
 
     JIT_CONFIG=$(echo "$JIT_RESPONSE" | jq -r '.encoded_jit_config // empty')
+    RUNNER_ID=$(echo "$JIT_RESPONSE" | jq -r '.runner.id // empty')
 
     if [[ -z "$JIT_CONFIG" ]]; then
         echo "[RunSecure] No JIT config received. Trying registration token fallback..."
@@ -317,7 +376,8 @@ EOF
     # runtime-compose.yml was already generated by generate-egress-conf.sh above
     RUNTIME_COMPOSE="$RUN_SH_REPO_ROOT/infra/runtime-compose.yml"
 
-    # Launch runner + proxy via docker compose
+    # Launch runner + proxy via docker compose. Backgrounded so the idle check
+    # and signal traps can act while it runs.
     RUNNER_IMAGE="$IMAGE_NAME" \
     RUNNER_JIT_CONFIG="$JIT_CONFIG" \
     RUNNER_NAME="${CONTAINER_PREFIX}-job${i}" \
@@ -325,10 +385,23 @@ EOF
     RUNNER_CPUS="$CPUS" \
     RUNNER_PIDS="$PIDS" \
     $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$RUNTIME_COMPOSE" \
-        up --abort-on-container-exit --exit-code-from runner
+        up --abort-on-container-exit --exit-code-from runner &
+    COMPOSE_PID=$!
+    _wait_for_runner
+    if [[ "$SLOT_RELEASED" == false ]]; then
+        wait "$COMPOSE_PID"
+    fi
+    COMPOSE_PID=""
 
     # Clean up for next iteration
     $DC -f "${RUNSECURE_ROOT}/infra/docker-compose.yml" -f "$RUNTIME_COMPOSE" down --remove-orphans 2>/dev/null || true
+    _deregister_runner
+
+    if [[ "$SLOT_RELEASED" == true ]]; then
+        echo ""
+        echo "=== RunSecure: no queued jobs — exiting ==="
+        exit 0
+    fi
 
     echo ""
     echo "--- Job $i/$MAX_JOBS: Complete ---"

@@ -10,7 +10,8 @@
 #   You opened a PR and the `lints-on-self` check is pending. That check
 #   targets the [self-hosted, Linux, ARM64, container, runsecure-dogfood] label set, which
 #   needs a RunSecure runner online. Run this once to drain the queue,
-#   it'll exit after MAX_JOBS jobs.
+#   it'll exit after MAX_JOBS jobs, or once a runner claims no job within
+#   IDLE_TIMEOUT seconds (default 60).
 #
 # Usage:
 #   ./infra/scripts/dev/bootstrap-self-runner.sh           # default 5 jobs
@@ -28,6 +29,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
 MAX_JOBS="${1:-${MAX_JOBS:-5}}"
+IDLE_TIMEOUT="${IDLE_TIMEOUT:-60}"
 LOG_DIR="$REPO_ROOT/_orchestrator-logs"
 mkdir -p "$LOG_DIR"
 
@@ -58,6 +60,7 @@ echo "[bootstrap] starting orchestrator in background..."
     --project . \
     --repo AndEnd-Collective/RunSecure \
     --max-jobs "$MAX_JOBS" \
+    --idle-timeout "$IDLE_TIMEOUT" \
     > "$LOG_DIR/run.log" 2>&1 &
 ORCH_PID=$!
 echo "$ORCH_PID" > "$LOG_DIR/orch.pid"
@@ -69,4 +72,4 @@ echo ""
 echo "Stop early:"
 echo "  kill \$(cat $LOG_DIR/orch.pid)"
 echo ""
-echo "Will exit after $MAX_JOBS jobs OR when no jobs are queued for ~50 seconds."
+echo "Will exit after $MAX_JOBS jobs OR once a runner claims no job within ${IDLE_TIMEOUT}s."
