@@ -24,17 +24,12 @@ ARG RUST_VERSION=stable
 # installed whatever rustup served that day, so the image was not reproducible
 # and could change under us between two builds of the same commit.
 #
-# It also broke the release. Syft's binary-classifier-cataloger stopped
-# recognising rustc at 1.98.0, so the toolchain vanished from the SBOM and the
-# publish gate failed closed with
-#   ERROR: expected runtime presence inventory is missing:
-#          binary-classifier-cataloger:rust
-# meaning rust CVEs would not have been scannable at all. Verified against the
-# CI-pinned syft v1.48.0 by building this image at each version:
-#   1.99.0  not classified
-#   1.98.1  not classified
-#   1.97.1  classified as rust 1.97.1   <- newest that works
-#   1.96.1  classified as rust 1.96.1
+# The release gate (grype-scan-image.sh `file-content-cataloger:rust`) proves
+# the toolchain is present by having Syft read libstd from the exact image and
+# requiring the identity rustc embeds there, `rustc version X.Y.Z (commit
+# date)`, in the matching toolchain directory. Syft's own binary classifier
+# stopped recognising rustc at 1.98.0 (it matches a DWARF producer string
+# 1.98+ no longer emits), which is what held this pin at 1.97.1.
 #
 # The pin lives here, not in the callers, because `stable` is passed in from
 # publish-images.yml, smoke-test.yml, the validation and acceptance suites and
@@ -44,7 +39,7 @@ ARG RUST_VERSION=stable
 #
 # DO NOT bump this by hand. .github/workflows/weekly-rust-toolchain.yml tries
 # the latest stable every week, builds this image with it, and only opens a
-# bump PR once the scanner still inventories rust and the Grype gate passes.
+# bump PR once the rust identity proof and the Grype gate pass on every arch.
 ARG RUST_STABLE_PIN=1.97.1
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------

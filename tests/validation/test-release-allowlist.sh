@@ -281,10 +281,18 @@ assert {
     ("rust", "stable", "linux/amd64"),
     ("rust", "stable", "linux/arm64"),
 }
-rust_scans = [row for row in language_scans if row["name"] == "rust"]
-assert len(rust_scans) == 2
+# The terminal image and the build-only rust-build stage both carry rustup;
+# both prove it from libstd's rustc identity on both architectures.
+rust_scans = [
+    row
+    for job in ("grype-scan-languages", "grype-scan-build-stages")
+    for row in jobs[job]["strategy"]["matrix"]["include"]
+    if row["name"] == "rust"
+]
+assert len(rust_scans) == 4
+assert {row["platform"] for row in rust_scans} == {"linux/amd64", "linux/arm64"}
 assert all(
-    row["expected_presence_cataloger"] == "binary-classifier-cataloger"
+    row["expected_presence_cataloger"] == "file-content-cataloger"
     and row["expected_presence_package"] == "rust"
     for row in rust_scans
 )

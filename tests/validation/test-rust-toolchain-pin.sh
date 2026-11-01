@@ -2,19 +2,14 @@
 # ============================================================================
 # RunSecure — Rust Toolchain Pin Contract
 # ============================================================================
-# Rust was the one toolchain in the repo installed from a floating channel.
-# Two things went wrong because of that:
-#   1. the image was not reproducible — `--default-toolchain stable` installed
-#      whatever rustup served that day;
-#   2. syft's binary-classifier-cataloger stopped recognising rustc at 1.98.0,
-#      so the toolchain silently left the SBOM, rust CVEs became unscannable,
-#      and every publish failed closed on
-#        ERROR: expected runtime presence inventory is missing:
-#               binary-classifier-cataloger:rust
+# Rust was the one toolchain in the repo installed from a floating channel, so
+# the image was not reproducible — `--default-toolchain stable` installed
+# whatever rustup served that day.
 #
 # images/rust.Dockerfile now resolves RUST_VERSION=stable to an explicit
 # RUST_STABLE_PIN, and .github/workflows/weekly-rust-toolchain.yml is the only
-# thing allowed to move it — after re-running the release certification.
+# thing allowed to move it — after re-running the release certification, which
+# proves the toolchain from libstd's rustc identity (file-content-cataloger).
 #
 # Pure file-content checks; no Docker required.
 # ============================================================================
@@ -88,8 +83,8 @@ check(
 # The weekly workflow is the only sanctioned way to move the pin, and it must
 # gate on the same inventory-presence check the release gate uses.
 check(
-    "binary-classifier-cataloger" in workflow and "grype-scan-image.sh" in workflow,
-    "weekly certification runs the release Grype gate with the rust presence check",
+    "file-content-cataloger rust" in workflow and "grype-scan-image.sh" in workflow,
+    "weekly certification runs the release Grype gate with the rust identity proof",
 )
 check(
     "install-pinned-scanners.sh" in workflow,

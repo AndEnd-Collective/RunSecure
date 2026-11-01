@@ -2,26 +2,24 @@
 # RunSecure — Weekly Rust Toolchain Certification
 # ============================================================================
 # Rust is the only toolchain we cannot simply follow. `--default-toolchain
-# stable` made the image non-reproducible, and worse, syft's
-# binary-classifier-cataloger stopped recognising rustc at 1.98.0 — so the
-# toolchain disappeared from the SBOM, rust CVEs became unscannable, and the
-# publish gate failed closed on every release. (syft's classifier matches
-# libstd's `clang LLVM (rustc version ...)` DWARF producer string, which
-# rustc 1.98+ no longer emits; checked through syft 1.55.0.)
+# stable` made the image non-reproducible, so images/rust.Dockerfile pins
+# RUST_STABLE_PIN. This workflow is what moves that pin: every Sunday it tries
+# the current upstream stable, builds the image with it, and runs the same
+# certification the release pipeline runs. The pin is bumped ONLY if that
+# certification passes, via a PR — never silently, and never ahead of what the
+# release gate can prove is in the image.
 #
-# images/rust.Dockerfile therefore pins RUST_STABLE_PIN to the newest rustc the
-# scanner can still inventory. This workflow is what moves that pin: every
-# Sunday it tries the current upstream stable, builds the image with it, and
-# runs the same certification the release pipeline runs. The pin is bumped ONLY
-# if that certification passes, via a PR — never silently, and never ahead of
-# the scanner.
+# The release gate proves the toolchain from the rustc identity embedded in
+# libstd (grype-scan-image.sh `file-content-cataloger:rust`). It used syft's
+# binary-classifier-cataloger until rustc 1.98 dropped the DWARF producer
+# string that classifier matches, which held the pin at 1.97.1.
 #
 # Scheduled Sunday so a passing bump PR can be reviewed and merged before
 # weekly-version-bump tags on Monday 02:30 UTC, i.e. the toolchain is certified
 # before it is published.
 #
-# A failed certification is a NORMAL outcome: it means upstream rust is ahead
-# of the pinned syft. The run still succeeds and reports why the pin was not
+# A failed certification is a NORMAL outcome: it means the candidate cannot be
+# proven in the image or carries a fixable HIGH/CRITICAL. The run still succeeds and reports why the pin was not
 # moved, so this does not generate a weekly red run that everyone learns to
 # ignore. The only hard failures here are infrastructure problems: a build
 # that does not complete, or a certify leg that reports no result.
@@ -174,7 +172,7 @@ jobs:
             "runner-rust:candidate-${SLUG}" \
             "rust-candidate-${SLUG}.sarif" \
             ca-certificates '' '' \
-            binary-classifier-cataloger rust
+            file-content-cataloger rust
 
       - name: Certify — rust terminal-stage hardening contract
         id: hardening
@@ -259,15 +257,10 @@ jobs:
               echo "- \`${f#certify-results/certify-result-}\`: $(cat "$f")"
             done
             echo
-            echo "This is expected while syft cannot inventory the candidate: the"
-            echo "toolchain would not appear in the SBOM, so rust CVEs would not be"
-            echo "scannable and the publish gate would fail closed."
-            echo
-            echo "syft identifies rust on Linux from libstd's DWARF producer string"
-            echo "\`clang LLVM (rustc version X.Y.Z ...)\`, which rustc 1.98+ no longer"
-            echo "ships (syft 1.55.0 included). The pin can move once a syft release"
-            echo "recognises newer libstd builds and \`SYFT_VERSION\` in"
-            echo "\`infra/scripts/install-pinned-scanners.sh\` is bumped to it."
+            echo "The publish gate would reject this toolchain the same way, so it is"
+            echo "not adopted. See the per-architecture \`certify\` jobs: the Grype gate"
+            echo "(fixable HIGH/CRITICAL) and the rust identity proof (libstd must carry"
+            echo "\`rustc version <candidate> (...)\` in its toolchain directory) run there."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open the pin-bump PR
@@ -292,13 +285,6 @@ jobs:
           )
           if n != 1:
               raise SystemExit(f"expected exactly one RUST_STABLE_PIN={current} line, replaced {n}")
-          # Keep the recorded evidence table from outliving the version it describes.
-          updated = re.sub(
-              r"(#   )[0-9]+\.[0-9]+\.[0-9]+(  classified as rust )[0-9]+\.[0-9]+\.[0-9]+(   <- newest that works)",
-              rf"\g<1>{candidate}\g<2>{candidate}\g<3>",
-              updated,
-              count=1,
-          )
           p.write_text(updated)
           PY
           git config user.name 'github-actions[bot]'
@@ -315,9 +301,9 @@ jobs:
             printf "Bumps \`RUST_STABLE_PIN\` in \`images/rust.Dockerfile\` from \`%s\` to \`%s\`.\n\n" \
               "$CURRENT" "$CANDIDATE"
             printf '%s\n\n' "The candidate was built through \`RUST_VERSION=stable\` — the same resolution path every consumer uses — on **both linux/amd64 and linux/arm64**, and passed the identical certification the release pipeline runs on each, with the same checksum-pinned Syft and Grype:"
-            printf '%s\n' "- \`infra/scripts/grype-scan-image.sh\` with \`binary-classifier-cataloger:rust\`, proving the toolchain is still inventoried in the SBOM and that no fixable HIGH/CRITICAL is present"
+            printf '%s\n' "- \`infra/scripts/grype-scan-image.sh\` with \`file-content-cataloger:rust\`, proving libstd carries the candidate's rustc identity and that no fixable HIGH/CRITICAL is present"
             printf '%s\n\n' "- \`tests/validation/test-language-terminal-stages.sh\`"
-            printf '%s\n' "The pin is only ever moved by this workflow, and only after every published architecture certifies, so rust can never get ahead of what the scanner can see."
+            printf '%s\n' "The pin is only ever moved by this workflow, and only after every published architecture certifies, so rust can never get ahead of what the release gate can prove."
           } > /tmp/rust-pr-body.md
 
           if gh pr create \

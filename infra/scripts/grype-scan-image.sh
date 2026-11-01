@@ -53,8 +53,9 @@ command -v grype >/dev/null 2>&1 || {
 SCAN_TMP=$(mktemp -d)
 SBOM_FILE="${SCAN_TMP}/packages.syft.json"
 PRESENCE_SBOM_FILE="${SCAN_TMP}/presence.syft.json"
+PRESENCE_CONFIG="${SCAN_TMP}/presence.syft.yaml"
 cleanup() {
-    rm -f "$SBOM_FILE" "$PRESENCE_SBOM_FILE"
+    rm -f "$SBOM_FILE" "$PRESENCE_SBOM_FILE" "$PRESENCE_CONFIG"
     rmdir "$SCAN_TMP" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -136,6 +137,53 @@ if [[ -n "$EXPECTED_CATALOGER" ]]; then
     }
 fi
 
+# rustup installs rust outside any package database, and syft's rust classifier
+# matches libstd's DWARF producer `clang LLVM (rustc version ...)`, which
+# rustc 1.98+ no longer emits. Instead, have syft read every rustup libstd from
+# the exact image and require the identity rustc embeds in its .comment section
+# (`rustc version X.Y.Z (commit YYYY-MM-DD)`, present in every release). A
+# toolchain directory named for a version must carry that same version.
+verify_rust_toolchain_identity() {
+    cat >"$PRESENCE_CONFIG" <<'YAML'
+file:
+  content:
+    skip-files-above-size: 67108864
+    globs:
+      - "**/.rustup/toolchains/*/lib/rustlib/*/lib/libstd-*.so"
+YAML
+    syft "$IMAGE_REF" \
+        ${SYFT_PLATFORM_ARGS[@]+"${SYFT_PLATFORM_ARGS[@]}"} \
+        --config "$PRESENCE_CONFIG" \
+        --override-default-catalogers file-content-cataloger \
+        --output "syft-json=${PRESENCE_SBOM_FILE}"
+
+    jq -e '
+        any(.descriptor.configuration.catalogers.used[]?; . == "file-content-cataloger")
+        and ([.files[]? | select(.contents)] | length > 0)
+    ' "$PRESENCE_SBOM_FILE" >/dev/null || {
+        echo "ERROR: expected runtime presence inventory is missing: file-content-cataloger:rust (no rustup libstd captured)" >&2
+        return 1
+    }
+
+    local path contents identity version toolchain
+    while IFS=$'\t' read -r path contents; do
+        identity=$(printf '%s' "$contents" | base64 -d \
+            | LC_ALL=C grep -aoE 'rustc version [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)' \
+            | sort -u || true)
+        if [[ $(printf '%s' "$identity" | grep -c '^rustc version') -ne 1 ]]; then
+            echo "ERROR: ${path} does not carry exactly one rustc identity" >&2
+            return 1
+        fi
+        version=$(awk '{print $3}' <<<"$identity")
+        toolchain=$(sed -E 's|.*/\.rustup/toolchains/([^/]+)/.*|\1|' <<<"$path")
+        if [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+- && "$toolchain" != "${version}-"* ]]; then
+            echo "ERROR: toolchain ${toolchain} carries ${identity}" >&2
+            return 1
+        fi
+        echo "Rust toolchain present: ${identity} (${path})"
+    done < <(jq -r '.files[] | select(.contents) | [.location.path, .contents] | @tsv' "$PRESENCE_SBOM_FILE")
+}
+
 # Some toolchains are shipped as upstream binaries rather than an ecosystem
 # package database. Prove those binaries separately with one explicitly required
 # Syft cataloger, but never feed this generic presence inventory to Grype. The
@@ -145,6 +193,14 @@ if [[ -n "$EXPECTED_PRESENCE_CATALOGER" ]]; then
         echo "ERROR: presence cataloger requires an expected package" >&2
         exit 1
     }
+fi
+if [[ "$EXPECTED_PRESENCE_CATALOGER" == file-content-cataloger ]]; then
+    [[ "$EXPECTED_PRESENCE_PACKAGE" == rust ]] || {
+        echo "ERROR: file-content presence is only defined for rust, not ${EXPECTED_PRESENCE_PACKAGE}" >&2
+        exit 1
+    }
+    verify_rust_toolchain_identity || exit 1
+elif [[ -n "$EXPECTED_PRESENCE_CATALOGER" ]]; then
     syft "$IMAGE_REF" \
         ${SYFT_PLATFORM_ARGS[@]+"${SYFT_PLATFORM_ARGS[@]}"} \
         --select-catalogers="+${EXPECTED_PRESENCE_CATALOGER}" \
