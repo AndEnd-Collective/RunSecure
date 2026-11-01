@@ -148,6 +148,60 @@ while IFS=$'\t' read -r status message; do
     fi
 done < "$RESULTS_FILE"
 
+# The weekly resolve step failed every run from 2026-10-11 to 2026-11-01:
+# `curl | awk '{...; exit}'` under pipefail killed curl with exit 23 once awk
+# stopped reading, so no candidate was ever certified. Run the resolver
+# against a manifest shaped like the real one and pin the download-first form.
+record() {
+    if [ "$1" -eq 0 ]; then
+        echo "  PASS: $2"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $2"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+RESOLVER="${RUNSECURE_ROOT}/infra/scripts/rust-stable-version.sh"
+WORKFLOW="${RUNSECURE_ROOT}/.github/workflows/weekly-rust-toolchain.yml"
+MANIFEST_DIR=$(mktemp -d)
+trap 'rm -f "$RESULTS_FILE"; rm -rf "$MANIFEST_DIR"' EXIT
+
+{
+    printf 'manifest-version = "2"\ndate = "2026-10-30"\n\n'
+    printf '[pkg.cargo]\nversion = "1.99.0 (aaaaaaaaa 2026-10-20)"\n\n'
+    printf '[pkg.rustc]\nversion = "1.99.1 (bbbbbbbbb 2026-10-28)"\n\n'
+    # The real manifest is ~1 MB of per-target tables after [pkg.rustc].
+    for i in $(seq 1 20000); do
+        printf '[pkg.rust-std.target.t%d]\navailable = true\n' "$i"
+    done
+} > "${MANIFEST_DIR}/channel.toml"
+
+GOT=$(bash "$RESOLVER" "${MANIFEST_DIR}/channel.toml" 2>/dev/null)
+[ "$GOT" = "1.99.1" ]
+record $? "resolver reads rustc's version, not cargo's, from a full-size manifest (got '${GOT}')"
+
+printf '[pkg.cargo]\nversion = "1.99.0 (a 2026-10-20)"\n' > "${MANIFEST_DIR}/no-rustc.toml"
+bash "$RESOLVER" "${MANIFEST_DIR}/no-rustc.toml" >/dev/null 2>&1
+[ $? -eq 1 ]
+record $? "resolver fails when the manifest has no [pkg.rustc] version"
+
+: > "${MANIFEST_DIR}/empty.toml"
+bash "$RESOLVER" "${MANIFEST_DIR}/empty.toml" >/dev/null 2>&1
+[ $? -eq 1 ]
+record $? "resolver fails on an empty manifest"
+
+bash "$RESOLVER" "${MANIFEST_DIR}/absent.toml" >/dev/null 2>&1
+[ $? -eq 1 ]
+record $? "resolver fails when the manifest was not downloaded"
+
+grep -Fq "CANDIDATE=\$(bash infra/scripts/rust-stable-version.sh \"\$MANIFEST\")" "$WORKFLOW" \
+    && grep -Fq "curl --proto '=https' --tlsv1.2 -sSf -o \"\$MANIFEST\"" "$WORKFLOW"
+record $? "weekly workflow downloads the manifest to a file, then resolves from it"
+
+! grep -A2 'channel-rust-stable.toml' "$WORKFLOW" | grep -q '^ *|'
+record $? "weekly workflow does not pipe the channel manifest download into a parser"
+
 echo ""
 echo "=== Rust Toolchain Pin Contract ==="
 echo ""
