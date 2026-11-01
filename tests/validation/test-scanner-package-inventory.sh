@@ -22,8 +22,8 @@ RUNSECURE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 IMAGE_REF="${1:-runner-node:24}"
 EXPECTED_PACKAGE="${2:-nodejs}"
 
-SYFT_FALLBACK='anchore/syft:v1.48.0@sha256:b4f1df79f97b817682d8b5ff941eb6bfe74f6172553a5e312c75bbc2eabc405c'
-GRYPE_FALLBACK='anchore/grype:v0.116.0@sha256:fd4ab4d1042b522c896e73bdf09ab8bf384fa417df99d6dd0d6e1008c7e7c821'
+SYFT_FALLBACK='anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a'
+GRYPE_FALLBACK='anchore/grype:v0.121.0@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea'
 
 TEST_TMP=$(mktemp -d "${RUNSECURE_ROOT}/.scanner-test.XXXXXX")
 SBOM_JSON="${TEST_TMP}/sbom.json"
