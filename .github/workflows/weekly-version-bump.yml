@@ -272,3 +272,13 @@ jobs:
 
           echo "::error title=Go dependency PR creation failed::The dependency refresh remains on ${BRANCH}; gh exited with status ${PR_STATUS}."
           exit "$PR_STATUS"
+
+      # Each refresh starts from main, so older bot/go-deps-* branches are
+      # superseded by this one. Without pruning they accumulated for months.
+      # Branches with an open PR are left for a reviewer to close.
+      - name: Prune superseded dependency branches
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+        run: bash infra/scripts/prune-bot-branches.sh bot/go-deps- "bot/go-deps-${NEXT_VERSION}"
