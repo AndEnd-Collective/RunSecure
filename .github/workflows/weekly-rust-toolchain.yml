@@ -68,12 +68,12 @@ jobs:
           if [ -n "$REQUESTED" ]; then
             CANDIDATE="$REQUESTED"
           else
-            # The stable channel manifest reports the cargo version in its
-            # `version` field, so take the rustc version from the rustc package.
-            CANDIDATE=$(curl --proto '=https' --tlsv1.2 -sSf \
-              https://static.rust-lang.org/dist/channel-rust-stable.toml \
-              | awk '/^\[pkg\.rustc\]/{f=1} f&&/^version = /{print $3; exit}' \
-              | tr -d '"')
+            # Download first: piping curl into a parser that exits early kills
+            # curl with exit 23 under pipefail.
+            MANIFEST="${RUNNER_TEMP}/channel-rust-stable.toml"
+            curl --proto '=https' --tlsv1.2 -sSf -o "$MANIFEST" \
+              https://static.rust-lang.org/dist/channel-rust-stable.toml
+            CANDIDATE=$(bash infra/scripts/rust-stable-version.sh "$MANIFEST")
           fi
           if ! echo "$CANDIDATE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::could not resolve a concrete rust version (got '${CANDIDATE}')"
