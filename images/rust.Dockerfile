@@ -40,7 +40,7 @@ ARG RUST_VERSION=stable
 # DO NOT bump this by hand. .github/workflows/weekly-rust-toolchain.yml tries
 # the latest stable every week, builds this image with it, and only opens a
 # bump PR once the rust identity proof and the Grype gate pass on every arch.
-ARG RUST_STABLE_PIN=1.97.1
+ARG RUST_STABLE_PIN=1.99.1
 
 # ---- OCI labels (static — dynamic ones added by publish-images.yml) --------
 LABEL org.opencontainers.image.title="RunSecure Rust Composition Stage"
