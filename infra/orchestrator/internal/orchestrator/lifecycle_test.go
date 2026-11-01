@@ -206,11 +206,16 @@ func TestLifecycleDeadlineMakesFinalRunnerObservation(t *testing.T) {
 	fake.runnerStatusAfter = "online"
 	fake.runnerBusyAfter = true
 	fake.mu.Unlock()
-	d.be.waitDelay = 15 * time.Millisecond
+	// The final observation runs finalObservationLead (timeout/2) before the
+	// deadline and is bounded by it, so the window must comfortably exceed a
+	// loopback HTTP round trip. Polling stays slower than the deadline so the
+	// second GetRunner is the final observation, and the backend exits after
+	// the deadline so its post-exit observation cannot stand in for it.
+	d.be.waitDelay = 600 * time.Millisecond
 	d.lifecycle = LifecycleTiming{
-		OnlineTimeout:     5 * time.Millisecond,
-		AssignmentTimeout: 5 * time.Millisecond,
-		PollInterval:      50 * time.Millisecond,
+		OnlineTimeout:     400 * time.Millisecond,
+		AssignmentTimeout: 400 * time.Millisecond,
+		PollInterval:      2 * time.Second,
 	}
 
 	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
@@ -236,9 +241,11 @@ func TestLifecycleOnlineDeadlineFinalObservationAuthFailure(t *testing.T) {
 	fake.runnerErrAfter = 2
 	fake.mu.Unlock()
 	d.be.waitDelay = 2 * time.Second
+	// A 400ms deadline gives the final observation 200ms to complete; polling
+	// is slower than the deadline so only the final observation sees the 403.
 	d.lifecycle = LifecycleTiming{
-		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 200 * time.Millisecond,
-		PollInterval: 200 * time.Millisecond,
+		OnlineTimeout: 400 * time.Millisecond, AssignmentTimeout: 2 * time.Second,
+		PollInterval: 2 * time.Second,
 	}
 
 	result := NewSpawnWorker(d).waitForLifecycle(
@@ -265,9 +272,11 @@ func TestLifecycleAssignmentDeadlineFinalObservationRateLimit(t *testing.T) {
 	fake.runnerErrAfter = 2
 	fake.mu.Unlock()
 	d.be.waitDelay = 2 * time.Second
+	// A 400ms deadline gives the final observation 200ms to complete; polling
+	// is slower than the deadline so only the final observation sees the 429.
 	d.lifecycle = LifecycleTiming{
-		OnlineTimeout: 200 * time.Millisecond, AssignmentTimeout: 5 * time.Millisecond,
-		PollInterval: 200 * time.Millisecond,
+		OnlineTimeout: 2 * time.Second, AssignmentTimeout: 400 * time.Millisecond,
+		PollInterval: 2 * time.Second,
 	}
 
 	result := NewSpawnWorker(d).waitForLifecycle(
@@ -515,10 +524,13 @@ func TestLifecycleTransientObservationStillPollsBeforeAssignment(t *testing.T) {
 	fake.runnerErrCode = http.StatusNotFound
 	fake.runnerErrAfter = 1
 	fake.mu.Unlock()
-	d.be.inspectExitDelay = 20 * time.Millisecond
+	// The online deadline must leave room for several bounded GetRunner round
+	// trips, and must expire before the fake backend reports its wall-clock
+	// timeout so the result is classified as an online-deadline failure.
+	d.be.inspectExitDelay = 600 * time.Millisecond
 	d.lifecycle = LifecycleTiming{
-		OnlineTimeout: 5 * time.Millisecond, AssignmentTimeout: 20 * time.Millisecond,
-		PollInterval: time.Millisecond,
+		OnlineTimeout: 200 * time.Millisecond, AssignmentTimeout: 400 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
 	}
 
 	err := NewSpawnWorker(d).Execute(context.Background(), SpawnIntent{
