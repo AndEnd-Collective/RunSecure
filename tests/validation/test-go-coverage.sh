@@ -79,31 +79,22 @@ is_allowlisted() {
 check_module() {
   local mod_dir="$1"
   local mod_name="$2"
-  local coverfile
-  coverfile="$(mktemp /tmp/go-cov-XXXXXX.out)"
 
   info "Testing ${mod_name} (dir: ${mod_dir})"
 
-  if ! (cd "$mod_dir" && go test ./... \
+  # One run supplies both the pass/fail verdict and the per-package totals
+  # printed by -cover. A failing run prints its output so the failing test,
+  # its assertion, and the -test.shuffle seed are visible.
+  local per_pkg_output
+  if ! per_pkg_output=$(cd "$mod_dir" && go test ./... \
         -covermode=atomic \
-        -coverprofile="$coverfile" \
-        -count=1 \
-        >/dev/null 2>&1); then
+        -cover \
+        -count=1 2>&1); then
     fail "${mod_name}: 'go test ./...' failed"
+    printf '%s\n' "$per_pkg_output"
     OVERALL_FAIL=1
-    rm -f "$coverfile"
     return
   fi
-
-  # Parse per-package coverage from the cover profile.
-  # 'go tool cover -func' output: <file>:<line>: <fn>  <pct>%
-  # The last line for each package is NOT labeled — we need per-package totals.
-  # Strategy: run 'go test -v ./pkg/...' with -coverprofile per package, or
-  # use the per-package output from 'go test ./... -v -cover'.
-  # Simpler: use 'go test ./... -cover' output directly (not the profile file).
-
-  local per_pkg_output
-  per_pkg_output=$(cd "$mod_dir" && go test ./... -cover -count=1 2>&1) || true
 
   local module_fail=0
 
@@ -136,8 +127,6 @@ check_module() {
       fi
     fi
   done <<< "$per_pkg_output"
-
-  rm -f "$coverfile"
 
   if [[ "$module_fail" -eq 0 ]]; then
     ok "${mod_name}: all logic packages ≥${UNIT_THRESHOLD}%"
