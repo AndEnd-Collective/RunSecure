@@ -11,6 +11,12 @@ namespace-scoped NetworkPolicies and RBAC.
 For the Compose backend (Linux/macOS host with Docker), see
 [`install.md`](install.md).
 
+For an illustrative private EKS foundation with Bottlerocket workers, exact
+GitHub network controls, staged DNS/bootstrap and operational acceptance gates,
+see the [EKS guidebook](docs/eks-guidebook.md) and
+[Terraform/Helm examples](examples/eks-bottlerocket/). Target-cluster acceptance
+is required; the existing kind/Calico tests are not EKS commissioning evidence.
+
 ---
 
 ## 1. Prerequisites
@@ -305,7 +311,7 @@ required before capacity is considered recovered.
 | `auth.app.appId` | `""` | GitHub App ID (string). |
 | `auth.app.installationId` | `""` | GitHub App installation ID (string). |
 | `auth.app.privateKeySecretName` | `""` | Name of a pre-existing Secret with key `private-key` (PEM). |
-| `tls.enabled` | `false` | Enable mTLS on the orchestrator→socket-proxy hop. |
+| `tls.enabled` | `false` | Emit optional compatibility cert-manager resources; Kubernetes has no socket-proxy hop or added runtime mTLS channel. |
 | `tls.selfSigned` | `true` | Emit a cert-manager self-signed Issuer. Set `false` to reference an existing Issuer. |
 | `tls.issuerName` | `""` | Name of an existing Issuer/ClusterIssuer when `tls.selfSigned=false`. |
 | `image.*.digest` | placeholder | Pin by digest — see step 6. Digest takes precedence over tag. |

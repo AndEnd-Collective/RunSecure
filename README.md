@@ -13,6 +13,13 @@ keys, push to my AWS, and stay alive between jobs."
 > jobs and spawns hardened ephemeral runners on demand. Coexists with
 > `run.sh` — neither replaces the other.
 
+For Kubernetes, use the [Helm installation guide](install-kubernetes.md).
+The [EKS/Bottlerocket guidebook](docs/eks-guidebook.md) and
+[illustrative Terraform example](examples/eks-bottlerocket/) explain private
+platform paths, GitHub destination controls, acceptance gates and
+[SLSA evidence requirements](docs/eks-slsa.md). They do not deploy a cluster or
+establish a SLSA level.
+
 ---
 
 ## Why you might want this

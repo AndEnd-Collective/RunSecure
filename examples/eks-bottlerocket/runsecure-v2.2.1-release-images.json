@@ -1,0 +1,20 @@
+{
+  "build_sha": "b1eabf01953ccff0baa0a103e671cd3ef27cae81",
+  "images": {
+    "base": "ghcr.io/andend-collective/runsecure/base@sha256:2e86c1346ee5f248bb836b19ad09d950b6514f5122594ea3699f7777b55443f4",
+    "node-22": "ghcr.io/andend-collective/runsecure/node@sha256:32c777cde82236d34bc1b9bf9e08dbda056b419490f15493c8ade364d4175e56",
+    "node-24": "ghcr.io/andend-collective/runsecure/node@sha256:42b801e5931cb25de7d63160d1f0a481dd0b1d4861e73680a57193677c75990a",
+    "node-build-22": "ghcr.io/andend-collective/runsecure/node-build@sha256:369b1fb1ad7fbe8d101d1aea3ba8ba57e7d12b8c8c2ec99ab2666c0a40a938e5",
+    "node-build-24": "ghcr.io/andend-collective/runsecure/node-build@sha256:5a8230859e4d077982c043f5b4cfa3d85078186e1a6f7288491bfef95c66eeac",
+    "orchestrator": "ghcr.io/andend-collective/runsecure/orchestrator@sha256:a7e18269db81e856101b34dda87392ca0e6a7b6578f586872338c34d613e1800",
+    "proxy": "ghcr.io/andend-collective/runsecure/proxy@sha256:00b80bf41e8ad5e5254471afaaee3efc8ed831a16de321102dfd856340d1450a",
+    "python-3.12": "ghcr.io/andend-collective/runsecure/python@sha256:157c8b2598080d9f19da50dcb7ba5b98557397cd08c9680ba77cfc0c736f4136",
+    "python-build-3.12": "ghcr.io/andend-collective/runsecure/python-build@sha256:78ea3535ae61ce411220686cb54b7e95285e162065a9fad89700678a31222c3d",
+    "rust-build-stable": "ghcr.io/andend-collective/runsecure/rust-build@sha256:3bba98b3e214f86ea875a1968fe5aaec6bcf9e079c1352a8af617e61b38dc825",
+    "rust-stable": "ghcr.io/andend-collective/runsecure/rust@sha256:339001ee9ab03d0f093f6f01e4ea0d339a9d942f8210f2cf3ebcae940c0c20fc",
+    "socket-proxy": "ghcr.io/andend-collective/runsecure/socket-proxy@sha256:78fa59f75b67bea824cff5b6f24110998f5e6100a8690b3ea4ea21880f9c2743"
+  },
+  "publish_run_id": 40801083301,
+  "release": "2.2.1",
+  "schema_version": 2
+}
