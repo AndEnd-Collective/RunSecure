@@ -9,8 +9,9 @@ commissioning remains a separate reviewed change.
 RunSecure components emit canonical Cornerstone events with stable existing
 orchestrator signatures, event-definition identity, explicit emitting Pod/cloud
 context and bounded secret redaction. A single maintained standard-library Go
-helper is mirrored deterministically into the existing isolated Go build
-contexts. Its mirror check prevents drift without changing Docker build callers.
+module (`infra/telemetry`) is consumed by relative-path replace and supplied to
+each component's image build as the `telemetry` named context, so no copies
+exist and each image's main build context stays scoped to its own module.
 
 An authenticated node reader collects CRI container output, Bottlerocket journal
 and CNI host logs. It attributes records from host-controlled paths and metadata,
@@ -24,8 +25,8 @@ The gateway uses a minimal scratch/CA/static-binary image and runs in a
 dedicated Restricted observability namespace. A separate
 node-reader namespace needs narrowly guarded host-path access; it does not get
 a Docker socket, host namespaces, Kubernetes API authority or an AWS identity.
-Only that node-reader image carries the native journal tooling and Debian
-package inventory; both role images receive independent scans and manifest pins.
+Only that node-reader image carries journalctl, limited to its shared-library
+closure with that closure's Debian package inventory; both role images receive independent scans and manifest pins.
 An admission guard and negative server-side admission preflight are prerequisites
 to starting that reader. Agent-to-gateway transport uses a dedicated mTLS trust
 root and network policies. Job namespaces cannot ingest directly.

@@ -48,8 +48,10 @@ runtime. The CA stage requires Debian's `20250419+deb13u1` security backport
 or newer; the exported gateway bundle is checked for the distrusted emSign ECC
 Root CA G3 / Comodo AAA roots' absence and Amazon Root CA 1's presence. See the
 [Debian CA changelog](https://metadata.ftp-master.debian.org/changelogs//main/c/ca-certificates/ca-certificates_20250419%2Bdeb13u1_changelog).
-The `node` target retains Debian trixie's actual `journalctl`, its
-packaged native runtime and package inventory; apt upgrades remain required.
+The `node` target is a scratch image holding Debian trixie's actual
+`journalctl` and only its shared-library closure (plus the LZ4/XZ libraries
+systemd dlopens), with each owning package's dpkg status and `os-release` so
+scanners keep inventory and distro matching; apt upgrades remain required.
 Both use the same custom binary and contain no private source or Git credentials.
 The node reader is tested against a separate producer's real systemd journal,
 mounted read-only with all capabilities dropped; compatibility with the selected

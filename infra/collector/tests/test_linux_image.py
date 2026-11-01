@@ -23,42 +23,78 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
 '''
 
 
+# The node reader keeps only journalctl's shared-library closure. Packages
+# whose libraries it loads must stay visible to scanners; tools outside that
+# closure must not ship at all.
+NODE_REQUIRED_PACKAGES = {'libc6', 'systemd', 'libsystemd-shared', 'libmount1', 'libblkid1', 'libacl1', 'zlib1g', 'libssl3t64'}
+NODE_FORBIDDEN_PACKAGES = {'perl-base', 'ncurses-base', 'ncurses-bin', 'libtinfo6', 'gcc-14-base', 'libgcc-s1', 'libstdc++6', 'util-linux', 'mount', 'login', 'bsdutils', 'bash', 'dash', 'coreutils', 'apt', 'dpkg'}
+
+
+def image_layer_files(image, read=lambda name: False):
+    """Shipped layer file names plus the bytes of entries selected by read.
+
+    docker export injects container-local /dev/console, /etc/mtab and resolver
+    files even into a scratch image, so inspect the saved layers instead.
+    """
+    files, contents = set(), {}
+    with tempfile.TemporaryDirectory() as temporary:
+        saved = Path(temporary)/'image.tar'
+        subprocess.run(['docker', 'image', 'save', '--output', str(saved), image], check=True, capture_output=True)
+        with tarfile.open(saved) as archive_set:
+            manifest = json.load(archive_set.extractfile('manifest.json'))
+            if len(manifest) != 1:
+                raise AssertionError(f'expected one image in save output, got {len(manifest)}')
+            for layer in manifest[0]['Layers']:
+                with tarfile.open(fileobj=archive_set.extractfile(layer), mode='r|*') as archive:
+                    for entry in archive:
+                        if not (entry.isfile() or entry.issym() or entry.islnk()):
+                            continue
+                        name = entry.name.removeprefix('./')
+                        files.add(name)
+                        if entry.isfile() and read(name):
+                            contents[name] = archive.extractfile(entry).read()
+    return files, contents
+
+
 @unittest.skipUnless(GATEWAY_IMAGE and NODE_IMAGE, 'Set COLLECTOR_GATEWAY_IMAGE and COLLECTOR_NODE_IMAGE to unpublished role images')
 class LinuxImage(unittest.TestCase):
     def test_gateway_contains_only_static_collector_and_ca_bundle(self):
-        # Inspect shipped image layers: docker export injects container-local
-        # /dev/console, /etc/mtab and resolver files even into a scratch image.
-        with tempfile.TemporaryDirectory() as temporary:
-            saved = Path(temporary)/'gateway-image.tar'
-            subprocess.run(['docker', 'image', 'save', '--output', str(saved), GATEWAY_IMAGE], check=True, capture_output=True)
-            files, bundle = set(), None
-            with tarfile.open(saved) as image:
-                manifest = json.load(image.extractfile('manifest.json'))
-                self.assertEqual(1, len(manifest))
-                for layer in manifest[0]['Layers']:
-                    with tarfile.open(fileobj=image.extractfile(layer), mode='r|*') as archive:
-                        for entry in archive:
-                            if not (entry.isfile() or entry.issym() or entry.islnk()):
-                                continue
-                            name = entry.name.removeprefix('./')
-                            files.add(name)
-                            if name == 'etc/ssl/certs/ca-certificates.crt':
-                                bundle = archive.extractfile(entry).read().decode('ascii')
-            allowed = {'usr/local/bin/runsecure-collector', 'etc/ssl/certs/ca-certificates.crt'}
-            unexpected = sorted(files-allowed)
-            self.assertEqual(0, len(unexpected), f'{len(unexpected)} unexpected image files; first 20: {unexpected[:20]}')
-            self.assertEqual(allowed, files)
-            self.assertGreater(len(bundle), 100000)
-            trust = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            trust.load_verify_locations(cadata=bundle)
-            names = {value for cert in trust.get_ca_certs() for rdn in cert['subject'] for key, value in rdn if key == 'commonName'}
-            self.assertIn('Amazon Root CA 1', names)
-            normalized = {''.join(c.lower() for c in name if c.isalnum()) for name in names}
-            self.assertNotIn('emsigneccrootcag3', normalized)
-            self.assertNotIn('aaacertificateservices', normalized)
+        files, contents = image_layer_files(GATEWAY_IMAGE, lambda name: name == 'etc/ssl/certs/ca-certificates.crt')
+        bundle = contents.get('etc/ssl/certs/ca-certificates.crt', b'').decode('ascii')
+        allowed = {'usr/local/bin/runsecure-collector', 'etc/ssl/certs/ca-certificates.crt'}
+        unexpected = sorted(files-allowed)
+        self.assertEqual(0, len(unexpected), f'{len(unexpected)} unexpected image files; first 20: {unexpected[:20]}')
+        self.assertEqual(allowed, files)
+        self.assertGreater(len(bundle), 100000)
+        trust = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        trust.load_verify_locations(cadata=bundle)
+        names = {value for cert in trust.get_ca_certs() for rdn in cert['subject'] for key, value in rdn if key == 'commonName'}
+        self.assertIn('Amazon Root CA 1', names)
+        normalized = {''.join(c.lower() for c in name if c.isalnum()) for name in names}
+        self.assertNotIn('emsigneccrootcag3', normalized)
+        self.assertNotIn('aaacertificateservices', normalized)
         for tool in ['/bin/sh', '/usr/bin/journalctl']:
             result = subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--entrypoint', tool, GATEWAY_IMAGE], capture_output=True, text=True)
             self.assertNotEqual(0, result.returncode, tool+' unexpectedly available')
+
+    def test_node_runtime_is_journal_closure_with_inventory(self):
+        status = lambda name: name == 'var/lib/dpkg/status' or name.startswith('var/lib/dpkg/status.d/')
+        files, contents = image_layer_files(NODE_IMAGE, lambda name: status(name) or name == 'usr/lib/os-release')
+        packages = {line.split(':', 1)[1].strip() for name, data in contents.items() if status(name) for line in data.decode('utf-8').splitlines() if line.startswith('Package:')}
+        # Without os-release a scanner inventories the packages but matches no
+        # distro advisories, reporting a falsely clean image.
+        self.assertIn('etc/os-release', files)
+        release = dict(line.split('=', 1) for line in contents['usr/lib/os-release'].decode('utf-8').splitlines() if '=' in line)
+        self.assertEqual(('debian', '"13"'), (release.get('ID'), release.get('VERSION_ID')))
+        self.assertLessEqual(NODE_REQUIRED_PACKAGES, packages, 'scanner inventory lost for journalctl closure packages')
+        self.assertEqual(set(), NODE_FORBIDDEN_PACKAGES & packages)
+        self.assertIn('usr/bin/journalctl', files)
+        self.assertIn('usr/local/bin/runsecure-collector', files)
+        for tool in ['bin/sh', 'usr/bin/sh', 'bin/bash', 'usr/bin/perl', 'usr/bin/apt-get', 'usr/bin/dpkg', 'bin/mount', 'usr/bin/mount']:
+            self.assertNotIn(tool, files)
+        result = subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--entrypoint', '/usr/bin/journalctl', NODE_IMAGE, '--version'], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('systemd', result.stdout)
 
     def test_actual_agent_and_gateway_configs(self):
         render = subprocess.check_output(['helm', 'template', 'telemetry', str(ROOT/'charts/runsecure-telemetry'), '-f', str(Path(__file__).parent/'values.render.yaml')], text=True)
@@ -186,6 +222,7 @@ journal_pid=$!
 trap 'kill "$journal_pid" 2>/dev/null || true' EXIT
 sleep 1
 echo fixture-journal-message | systemd-cat -t runsecure-fixture
+printf 'compressed-fixture-%02048d\\n' 0 | systemd-cat -t runsecure-fixture
 journalctl --sync
 '''
             command = ['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '0:0', '--tmpfs', '/run:rw,nosuid,nodev,noexec,size=32m', '--tmpfs', '/var/log:rw,nosuid,nodev,noexec,size=32m', '--tmpfs', '/tmp:rw,nosuid,nodev,size=32m', '-v', volume+':/run/log/journal:rw', '--entrypoint', '/bin/sh', producer, '-ec', script]
@@ -196,6 +233,8 @@ journalctl --sync
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn('"MESSAGE":"fixture-journal-message"', result.stdout)
             self.assertIn('"SYSLOG_IDENTIFIER":"runsecure-fixture"', result.stdout)
+            # journald compresses objects above 512 bytes; the reader must decode them.
+            self.assertIn('"MESSAGE":"compressed-fixture-'+'0'*2048+'"', result.stdout)
         finally:
             subprocess.run(['docker', 'volume', 'rm', volume], check=True, capture_output=True)
             if built:

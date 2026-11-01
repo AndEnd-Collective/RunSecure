@@ -88,8 +88,9 @@ lacking the Cornerstone processors or the public normalization adapter.
 
 Two image targets share the custom static binary. The non-root gateway is a
 scratch image containing only the binary and a qualified CA bundle. The node
-reader separately carries Debian's real `journalctl` and native package
-inventory. Only the node reader needs that native surface; its remaining
+reader separately carries Debian's real `journalctl`, limited to its
+shared-library closure and that closure's package inventory. Only the node
+reader needs that native surface; its remaining
 advisories must be assessed independently of the minimal gateway scan.
 
 ```sh

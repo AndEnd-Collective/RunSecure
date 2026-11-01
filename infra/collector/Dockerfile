@@ -35,8 +35,37 @@ COPY --from=builder --chmod=0555 /build/dist/runsecure-collector /usr/local/bin/
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/runsecure-collector"]
 
-# Preserve Debian's packaged native closure and inventory for the journal reader.
-FROM native-runtime AS node
+# journalctl's shared-library closure, plus the LZ4/XZ decompressors systemd
+# dlopens to read compressed journal objects. Each owning package's dpkg
+# status stanza travels with its files, and os-release identifies the distro,
+# so scanners keep both the inventory and the advisories that match it.
+FROM native-runtime AS journal-closure
+RUN set -eu; \
+    mkdir -p /closure/var/lib/dpkg/status.d; \
+    for merged in /lib /lib64; do [ ! -L "$merged" ] || cp -a "$merged" "/closure$merged"; done; \
+    cp -a --parents /etc/os-release "$(readlink -f /etc/os-release)" /closure/; \
+    files="/usr/bin/journalctl $(ldd /usr/bin/journalctl | awk '$2 == "=>" {print $3} $1 ~ /^\/.*ld-linux/ {print $1}')"; \
+    for lib in liblz4.so.1 liblzma.so.5; do \
+      files="$files $(dpkg -L "$(dpkg -S "*/$lib" | cut -d: -f1 | head -n1)" | grep "/$lib\$")"; \
+    done; \
+    : > /tmp/closure-owners; \
+    for f in $files; do \
+      link="$(readlink -f "$(dirname "$f")")/$(basename "$f")"; \
+      real="$(readlink -f "$f")"; \
+      cp -a --parents "$link" /closure/; \
+      cp -a --parents "$real" /closure/; \
+      owner="$(dpkg -S "$real" 2>/dev/null || dpkg -S "$link")"; \
+      echo "${owner%%:*}" >> /tmp/closure-owners; \
+    done; \
+    sort -u /tmp/closure-owners > /tmp/closure-packages; \
+    test "$(wc -l < /tmp/closure-packages)" -ge 10; \
+    while read -r pkg; do dpkg-query -s "$pkg" > "/closure/var/lib/dpkg/status.d/$pkg"; done < /tmp/closure-packages; \
+    cat /tmp/closure-packages
+
+# No shell, package manager or tool outside journalctl's closure enters the node.
+FROM scratch AS node
+COPY --from=journal-closure /closure/ /
+COPY --from=native-runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder --chmod=0555 /build/dist/runsecure-collector /usr/local/bin/runsecure-collector
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/runsecure-collector"]
