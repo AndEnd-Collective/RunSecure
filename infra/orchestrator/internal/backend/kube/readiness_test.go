@@ -39,8 +39,21 @@ func TestReadinessIsBoundedAndRotatesAcrossAllProjects(t *testing.T) {
 	cs.ClearActions()
 	require.Error(t, probe.Ready(context.Background(), "other-scope"))
 	require.Empty(t, cs.Actions())
+	unavailable := true
 	cs.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("API unavailable")
+		if unavailable {
+			return true, nil, errors.New("API unavailable")
+		}
+		return false, nil, nil
 	})
+	cs.ClearActions()
 	require.ErrorContains(t, probe.Ready(context.Background(), "scope"), "API unavailable")
+	failedNS := cs.Actions()[0].GetNamespace()
+	cs.ClearActions()
+	require.ErrorContains(t, probe.Ready(context.Background(), "scope"), "API unavailable")
+	require.Equal(t, failedNS, cs.Actions()[0].GetNamespace())
+	unavailable = false
+	cs.ClearActions()
+	require.NoError(t, probe.Ready(context.Background(), "scope"))
+	require.Equal(t, failedNS, cs.Actions()[0].GetNamespace())
 }

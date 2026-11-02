@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,10 +29,12 @@ import (
 
 // kubeBackend implements backend.Backend over a kube.Client.
 type kubeBackend struct {
-	c          *kube.Client
-	scope      string
-	namespaces map[string]string
-	readyNext  atomic.Uint64
+	c           *kube.Client
+	scope       string
+	namespaces  map[string]string
+	readyNext   atomic.Uint64
+	readyMu     sync.Mutex
+	readyFailed map[string]error
 }
 
 // New returns a backend.Backend that manages runner stacks in Kubernetes.
@@ -58,8 +61,34 @@ func (b *kubeBackend) Ready(ctx context.Context, scope string) error {
 	}
 	sort.Strings(namespaces)
 	ns := namespaces[(b.readyNext.Add(1)-1)%uint64(len(namespaces))]
+	b.readyMu.Lock()
+	// Keep known failures fail-closed and retry them before advancing the
+	// rotation, so a transient outage can recover on the next probe.
+	for _, candidate := range namespaces {
+		if b.readyFailed[candidate] != nil {
+			ns = candidate
+			break
+		}
+	}
+	b.readyMu.Unlock()
 	_, err := b.c.ListSpawnsInNamespace(ctx, scope, ns)
-	return err
+	b.readyMu.Lock()
+	defer b.readyMu.Unlock()
+	if err != nil {
+		if b.readyFailed == nil {
+			b.readyFailed = map[string]error{}
+		}
+		b.readyFailed[ns] = err
+	} else {
+		delete(b.readyFailed, ns)
+	}
+	var failures []error
+	for _, candidate := range namespaces {
+		if failure := b.readyFailed[candidate]; failure != nil {
+			failures = append(failures, failure)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // NewForProjects binds one controller scope to immutable, explicit project namespaces.
