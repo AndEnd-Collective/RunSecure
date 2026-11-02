@@ -130,7 +130,7 @@ func containsStringSlice(a []string, s string) bool {
 	return false
 }
 
-var repoIdentity = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var repoIdentity = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 var runnerRuntime = regexp.MustCompile(`^(node|python|rust)(:[A-Za-z0-9][A-Za-z0-9_.-]*)?$`)
 var runnerMemory = regexp.MustCompile(`^[1-9][0-9]*[kKmMgG]$`)
 var runnerLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.=-]*$`)

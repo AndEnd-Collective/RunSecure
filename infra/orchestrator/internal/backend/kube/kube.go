@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,9 +29,12 @@ import (
 
 // kubeBackend implements backend.Backend over a kube.Client.
 type kubeBackend struct {
-	c          *kube.Client
-	scope      string
-	namespaces map[string]string
+	c           *kube.Client
+	scope       string
+	namespaces  map[string]string
+	readyNext   atomic.Uint64
+	readyMu     sync.Mutex
+	readyFailed map[string]error
 }
 
 // New returns a backend.Backend that manages runner stacks in Kubernetes.
@@ -37,7 +42,54 @@ func New(c *kube.Client) backend.Backend {
 	return &kubeBackend{c: c}
 }
 
-var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// Ready bounds each HTTP readiness probe to one namespace. Full reconciliation
+// still runs during startup; rotating probes subsequently cover every enrolled
+// namespace without exceeding the management endpoint's two-second deadline.
+func (b *kubeBackend) Ready(ctx context.Context, scope string) error {
+	if b.namespaces == nil {
+		_, err := b.c.ListSpawns(ctx, scope)
+		return err
+	}
+	if scope != b.scope {
+		return errors.New("kube backend: unapproved readiness scope")
+	}
+	namespaces := make([]string, 0, len(b.namespaces))
+	for _, ns := range b.namespaces {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+	ns := namespaces[(b.readyNext.Add(1)-1)%uint64(len(namespaces))]
+	b.readyMu.Lock()
+	// Keep known failures fail-closed and retry them before advancing the
+	// rotation, so a transient outage can recover on the next probe.
+	for _, candidate := range namespaces {
+		if b.readyFailed[candidate] != nil {
+			ns = candidate
+			break
+		}
+	}
+	b.readyMu.Unlock()
+	_, err := b.c.ListSpawnsInNamespace(ctx, scope, ns)
+	b.readyMu.Lock()
+	defer b.readyMu.Unlock()
+	if err != nil {
+		if b.readyFailed == nil {
+			b.readyFailed = map[string]error{}
+		}
+		b.readyFailed[ns] = err
+	} else {
+		delete(b.readyFailed, ns)
+	}
+	var failures []error
+	for _, candidate := range namespaces {
+		if failure := b.readyFailed[candidate]; failure != nil {
+			failures = append(failures, failure)
+		}
+	}
+	return errors.Join(failures...)
+}
 
 // NewForProjects binds one controller scope to immutable, explicit project namespaces.
 func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) (backend.Backend, error) {
