@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,7 @@ type kubeBackend struct {
 	c          *kube.Client
 	scope      string
 	namespaces map[string]string
+	readyNext  atomic.Uint64
 }
 
 // New returns a backend.Backend that manages runner stacks in Kubernetes.
@@ -38,6 +40,27 @@ func New(c *kube.Client) backend.Backend {
 }
 
 var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// Ready bounds each HTTP readiness probe to one namespace. Full reconciliation
+// still runs during startup; rotating probes subsequently cover every enrolled
+// namespace without exceeding the management endpoint's two-second deadline.
+func (b *kubeBackend) Ready(ctx context.Context, scope string) error {
+	if b.namespaces == nil {
+		_, err := b.c.ListSpawns(ctx, scope)
+		return err
+	}
+	if scope != b.scope {
+		return errors.New("kube backend: unapproved readiness scope")
+	}
+	namespaces := make([]string, 0, len(b.namespaces))
+	for _, ns := range b.namespaces {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+	ns := namespaces[(b.readyNext.Add(1)-1)%uint64(len(namespaces))]
+	_, err := b.c.ListSpawnsInNamespace(ctx, scope, ns)
+	return err
+}
 
 // NewForProjects binds one controller scope to immutable, explicit project namespaces.
 func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) (backend.Backend, error) {

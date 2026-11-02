@@ -118,8 +118,7 @@ func Run(ctx context.Context, scopePath string) (runErr error) {
 		return fmt.Errorf("orchestrator: scope security_overrides invalid: %w", err)
 	}
 	serverDeps.setBackendReady(func(ctx context.Context) error {
-		_, err := be.Reconcile(ctx, s.Name)
-		return err
+		return checkBackendReady(ctx, be, s.Name)
 	})
 	pdeps := &productionDeps{
 		gh:          gh,
