@@ -507,3 +507,18 @@ func TestRepoBlockRejectsInvalidFieldTypes(t *testing.T) {
 	require.Error(t, yaml.Unmarshal([]byte("kubernetes: invalid"), &repo))
 	require.Error(t, yaml.Unmarshal([]byte("max_concurrent: invalid"), &repo))
 }
+
+func TestSharedScopeRepositoryNamesWithLeadingPunctuation(t *testing.T) {
+	for _, name := range []string{".github", ".Release", ".Security", "_tools", "-tools"} {
+		t.Run(name, func(t *testing.T) {
+			s := sharedScope(t, strings.Replace(approvedProject, "acme/alpha", "acme/"+name, 1))
+			require.NoError(t, s.Validate())
+		})
+	}
+	for _, name := range []string{".", "..", "../escape", "nested/repository", "%2egithub"} {
+		t.Run("reject-"+name, func(t *testing.T) {
+			s := sharedScope(t, strings.Replace(approvedProject, "acme/alpha", "acme/"+name, 1))
+			require.Error(t, s.Validate())
+		})
+	}
+}
