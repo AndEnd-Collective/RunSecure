@@ -37,7 +37,7 @@ func New(c *kube.Client) backend.Backend {
 	return &kubeBackend{c: c}
 }
 
-var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var validProjectRepo = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // NewForProjects binds one controller scope to immutable, explicit project namespaces.
 func NewForProjects(c *kube.Client, scope string, namespaces map[string]string) (backend.Backend, error) {
