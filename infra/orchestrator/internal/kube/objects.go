@@ -22,6 +22,7 @@ package kube
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/AndEnd-Collective/runsecure/infra/orchestrator/internal/security"
 	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -350,6 +351,19 @@ func ProxyPod(in backend.SpawnInput, secretName string) *corev1.Pod {
 // RunnerPod
 // ──────────────────────────────────────────────────────────────────────────────
 
+// A digest-pinned localhost reference is an operator-preloaded image. Registry
+// lookups cannot resolve it; preserve Always for remote images and mutable tags.
+func runnerImagePullPolicy(image string) corev1.PullPolicy {
+	_, digest, pinned := strings.Cut(image, "@sha256:")
+	if !strings.HasPrefix(image, "localhost/") || !pinned || len(digest) != 64 || strings.ToLower(digest) != digest {
+		return corev1.PullAlways
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
+
 // RunnerPod builds the runner Pod with a single container.
 //
 //   - HTTP_PROXY / HTTPS_PROXY / http_proxy / https_proxy point to
@@ -426,7 +440,7 @@ func RunnerPod(in backend.SpawnInput, secretName, proxyServiceDNS string) *corev
 	runner := corev1.Container{
 		Name:            "runner",
 		Image:           in.RunnerImage,
-		ImagePullPolicy: corev1.PullAlways,
+		ImagePullPolicy: runnerImagePullPolicy(in.RunnerImage),
 		// G2/G3: pin the launcher explicitly (belt-and-suspenders) so a
 		// custom runner image that omits or overrides its ENTRYPOINT still
 		// starts the JIT agent. In k8s, Command overrides the image ENTRYPOINT;
