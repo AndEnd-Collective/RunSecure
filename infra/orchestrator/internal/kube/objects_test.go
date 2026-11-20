@@ -1478,3 +1478,27 @@ func TestLongRepositoryLabelIsValidDeterministicAndBounded(t *testing.T) {
 		t.Fatal("legacy safe label changed")
 	}
 }
+
+func TestRunnerPodPreloadedImagesKeepImmutableReferences(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		image  string
+		policy corev1.PullPolicy
+	}{
+		{"localhost/lab/runner@sha256:" + digest, corev1.PullIfNotPresent},
+		{"localhost/lab/runner:latest", corev1.PullAlways},
+		{"localhost/lab/runner@sha256:short", corev1.PullAlways},
+		{"localhost/lab/runner@sha256:" + strings.Repeat("z", 64), corev1.PullAlways},
+		{"ghcr.io/acme/runner@sha256:" + digest, corev1.PullAlways},
+	} {
+		t.Run(tc.image, func(t *testing.T) {
+			in := testInput()
+			in.RunnerImage = tc.image
+			pod := kube.RunnerPod(in, "jit", "proxy")
+			container := pod.Spec.Containers[0]
+			if container.Image != tc.image || container.ImagePullPolicy != tc.policy {
+				t.Fatalf("image/policy = %q/%q, want %q/%q", container.Image, container.ImagePullPolicy, tc.image, tc.policy)
+			}
+		})
+	}
+}
