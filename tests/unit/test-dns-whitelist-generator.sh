@@ -168,6 +168,31 @@ expect_rejected "wildcard-everything entry is rejected" \
 expect_rejected "empty whitelist is rejected instead of denying every name" \
     "$(printf '# nothing allowed yet\n\n')" "contains no domains"
 
+expect_rejected "whitelist entry with an empty label is rejected" \
+    "$(printf 'co..uk\n')" "is not a valid domain name"
+
+# --- Case 4: hosts_file without dns.servers stays a valid, closed config -----
+PROJ4="${WORK}/proj4"
+mkdir -p "$PROJ4/.github"
+printf '192.0.2.10 svc.internal.example\n' > "$PROJ4/hosts.txt"
+printf 'allowed.example\n' > "$PROJ4/allow.txt"
+cat > "$PROJ4/.github/runner.yml" <<EOF
+runtime: node:24
+dns:
+  host: false
+  hosts_file: ${PROJ4}/hosts.txt
+  whitelist_file: ${PROJ4}/allow.txt
+EOF
+if bash "$GENERATE" "$PROJ4" >"${WORK}/out4" 2>&1 && [[ -f "$DNSMASQ_CONF" ]]; then
+    if directives | grep -qE '^server='; then
+        fail "hosts-only config" "emitted a forwarder with no dns.servers: $(directives | grep '^server' | tr '\n' ' ')"
+    else
+        pass "hosts_file + whitelist without dns.servers: generator succeeds and forwards nothing"
+    fi
+else
+    fail "hosts-only config" "generator failed: $(tail -3 "${WORK}/out4" | tr '\n' ' ')"
+fi
+
 # --- Print results ----------------------------------------------------------
 echo ""
 echo "=== DNS Whitelist Generator Tests ==="

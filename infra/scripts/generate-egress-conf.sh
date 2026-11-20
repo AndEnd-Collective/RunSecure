@@ -344,8 +344,14 @@ _generate_dnsmasq_conf() {
                             [[ "$srv" == "null" || -z "$srv" ]] && continue
                             whitelist_servers+=("$srv")
                         done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
+                        # dns.hosts_file without dns.servers is a valid config
+                        # (validate-schema.sh accepts it): names resolve from
+                        # the hosts file only and nothing is forwarded. The
+                        # whitelist then has no upstream to attach, and every
+                        # name outside the hosts file is refused already.
                         if [[ ${#whitelist_servers[@]} -eq 0 ]]; then
-                            _err "dns.whitelist_file requires dns.servers: whitelisted domains need an upstream to be forwarded to"
+                            _log "  No dns.servers: nothing is forwarded, whitelist entries are validated but have no upstream"
+                            echo "# No dns.servers — nothing is forwarded; names outside dns.hosts_file are refused"
                         fi
                         whitelist_count=0
                         while IFS= read -r domain || [[ -n "$domain" ]]; do
@@ -354,10 +360,10 @@ _generate_dnsmasq_conf() {
                             # The file is fetched content: accept domain names
                             # only, so a line cannot smuggle a second directive
                             # or a whole top-level domain into dnsmasq.conf.
-                            if [[ ! "$domain" =~ ^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ || "${domain#.}" != *.* ]]; then
+                            if [[ ! "$domain" =~ ^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ || "${domain#.}" != *.* || "$domain" == *..* ]]; then
                                 _err "dns.whitelist_file entry '$domain' is not a valid domain name"
                             fi
-                            for srv in "${whitelist_servers[@]}"; do
+                            for srv in ${whitelist_servers[@]+"${whitelist_servers[@]}"}; do
                                 echo "server=/${domain#.}/${srv}"
                             done
                             whitelist_count=$((whitelist_count + 1))
