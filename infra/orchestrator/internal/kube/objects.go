@@ -40,10 +40,10 @@ import (
 
 // Label key constants — the single source of truth for label names.
 const (
-	LabelScope   = "runsecure.io/scope"
-	LabelRepo    = "runsecure.io/repo"
-	LabelSpawnID = "runsecure.io/spawn-id"
-	LabelRole    = "runsecure.io/role"
+	LabelScope   = "runsecure.ai/scope"
+	LabelRepo    = "runsecure.ai/repo"
+	LabelSpawnID = "runsecure.ai/spawn-id"
+	LabelRole    = "runsecure.ai/role"
 
 	RoleRunner = "runner"
 	RoleProxy  = "proxy"

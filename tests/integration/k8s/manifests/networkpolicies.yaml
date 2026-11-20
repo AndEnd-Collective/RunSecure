@@ -33,7 +33,7 @@ metadata:
   name: default-deny-all
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
+    runsecure.ai/scope: itest
 spec:
   podSelector: {}
   policyTypes:
@@ -47,23 +47,23 @@ metadata:
   name: rs-runner-egress-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: runner
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: runner
 spec:
   podSelector:
     matchLabels:
-      runsecure.io/role: runner
-      runsecure.io/spawn-id: spawn01
+      runsecure.ai/role: runner
+      runsecure.ai/spawn-id: spawn01
   policyTypes:
     - Egress
   egress:
     - to:
         - podSelector:
             matchLabels:
-              runsecure.io/role: proxy
-              runsecure.io/spawn-id: spawn01
+              runsecure.ai/role: proxy
+              runsecure.ai/spawn-id: spawn01
       ports:
         - protocol: TCP
           port: 3128
@@ -96,23 +96,23 @@ metadata:
   name: rs-proxy-ingress-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: proxy
 spec:
   podSelector:
     matchLabels:
-      runsecure.io/role: proxy
-      runsecure.io/spawn-id: spawn01
+      runsecure.ai/role: proxy
+      runsecure.ai/spawn-id: spawn01
   policyTypes:
     - Ingress
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              runsecure.io/role: runner
-              runsecure.io/spawn-id: spawn01
+              runsecure.ai/role: runner
+              runsecure.ai/spawn-id: spawn01
       ports:
         - protocol: TCP
           port: 3128
@@ -124,15 +124,15 @@ metadata:
   name: rs-proxy-egress-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: proxy
 spec:
   podSelector:
     matchLabels:
-      runsecure.io/role: proxy
-      runsecure.io/spawn-id: spawn01
+      runsecure.ai/role: proxy
+      runsecure.ai/spawn-id: spawn01
   policyTypes:
     - Egress
   egress:

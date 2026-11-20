@@ -270,7 +270,7 @@ resource "aws_launch_template" "nodes" {
     pod-pids-limit = 256
     seccomp-default = true
     [settings.kubernetes.node-labels]
-    "runsecure.io/pool" = "${each.key}"
+    "runsecure.ai/pool" = "${each.key}"
     [settings.host-containers.admin]
     enabled = false
     [settings.host-containers.control]
@@ -290,7 +290,7 @@ resource "aws_eks_node_group" "nodes" {
   release_version = var.bottlerocket_release_version
   instance_types  = [var.instance_type]
   capacity_type   = "ON_DEMAND"
-  labels          = { "runsecure.io/pool" = each.key }
+  labels          = { "runsecure.ai/pool" = each.key }
   dynamic "taint" {
     for_each = each.key == "execution" ? [1] : []
     content {

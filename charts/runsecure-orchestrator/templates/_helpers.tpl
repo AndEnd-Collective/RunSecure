@@ -40,7 +40,7 @@ helm.sh/chart: {{ include "runsecure-orchestrator.chart" . }}
 {{ include "runsecure-orchestrator.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-runsecure.io/scope: {{ .Values.scope.name | quote }}
+runsecure.ai/scope: {{ .Values.scope.name | quote }}
 {{- end }}
 
 {{/*

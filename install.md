@@ -117,7 +117,7 @@ cp infra/orchestrator/scopes/example.yml \
 Edit `$HOME/.config/runsecure/datacentric.scope.yml`:
 
 ```yaml
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: datacentric
 description: Datacentric repo runners.
 global_max_runners: 5
@@ -396,3 +396,17 @@ rm ~/.config/runsecure/datacentric.scope.yml \
 ```
 
 Revoke the PAT on GitHub for completeness.
+
+## 11. Upgrading from a release that used `runsecure.io`
+
+The scope config `apiVersion` changed from `runsecure.io/v1alpha1` to
+`runsecure.ai/v1alpha1`, with no fallback. Edit the scope file before starting
+the new orchestrator; a file still on the old value is rejected at startup
+with `unsupported apiVersion`.
+
+The Compose backend's container labels (`runsecure.role`, `runsecure.scope`,
+`runsecure.spawn_id`) carry no domain and are unchanged, so containers from
+the previous version are still recognised and cleaned up.
+
+For the Kubernetes backend, where the label prefix changed as well, see
+[install-kubernetes.md](install-kubernetes.md#13-upgrading-from-a-release-that-used-runsecureio).

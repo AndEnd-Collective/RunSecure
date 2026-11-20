@@ -32,8 +32,8 @@ if [[ "${BUILD_IMAGE:-0}" == 1 ]]; then
     if [[ "$target" == gateway ]]; then image="$COLLECTOR_GATEWAY_IMAGE"; else image="$COLLECTOR_NODE_IMAGE"; fi
     docker build --file "$ROOT/infra/collector/Dockerfile" --target "$target" \
       --build-context "cornerstone-src=$SOURCE/otel-collector" \
-      --label "runsecure.io/cornerstone-source=$PIN" \
-      --label "runsecure.io/collector-role=$target" \
+      --label "runsecure.ai/cornerstone-source=$PIN" \
+      --label "runsecure.ai/collector-role=$target" \
       --tag "$image" "$ROOT"
   done
 fi

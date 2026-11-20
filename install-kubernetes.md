@@ -370,8 +370,8 @@ For each CI job the orchestrator spawns:
     DNS peers (53/UDP+TCP) + internet (via Squid allow-list at L7).
   - `ProxyIngressNetworkPolicy` — only this spawn's runner Pod may connect to
     this spawn's proxy. Cross-spawn connections are blocked by pinning both the
-    target (`runsecure.io/role=proxy`) and source (`runsecure.io/role=runner`)
-    selectors to the same `runsecure.io/spawn-id`. This policy is load-bearing:
+    target (`runsecure.ai/role=proxy`) and source (`runsecure.ai/role=runner`)
+    selectors to the same `runsecure.ai/spawn-id`. This policy is load-bearing:
     without it, the namespace default-deny blocks runner→proxy connections even
     when the runner has a matching egress rule.
 - **Proxy Pod** — runs Squid + HAProxy + optional dnsmasq. Receives egress
@@ -584,7 +584,7 @@ controller. Runner proxy domain policy is separate. Controls are exercised by
 | Claim | Mechanism | Verified by |
 |---|---|---|
 | Runner can only resolve cluster DNS and reach its own proxy | `RunnerEgressNetworkPolicy` (runner → exact DNS Service `/32s` plus exact namespace/Pod-label-selected DNS Pods on 53, and same-spawn proxy on 3128/TCP) + `ProxyIngressNetworkPolicy` | `run-k8s-tests.sh` step 5a (both DNS peer forms plus DNS-named proxy connection) |
-| Cross-spawn isolation | `ProxyIngressNetworkPolicy` pins `runsecure.io/spawn-id` in the From selector — spawn A's runner cannot reach spawn B's proxy | `run-k8s-tests.sh` step 5d |
+| Cross-spawn isolation | `ProxyIngressNetworkPolicy` pins `runsecure.ai/spawn-id` in the From selector — spawn A's runner cannot reach spawn B's proxy | `run-k8s-tests.sh` step 5d |
 | Orchestrator SA is namespace-scoped least-privilege | `Role` (not `ClusterRole`); verbs limited to `pods/services/secrets/networkpolicies` in the scope namespace | `run-k8s-tests.sh` step 6 (RBAC assertions) |
 | Runner CPU, memory, and temporary storage are bounded | Equal CPU/memory Pod requests and limits from `runner.yml`; 512 MiB memory-backed `/tmp` | `run-k8s-tests.sh` step 7c (generated runner-object contract) |
 | Process-count containment is an explicit cluster prerequisite | Kubernetes has no per-Pod PID-limit field; eligible nodes require bounded kubelet `podPidsLimit` | Deployment prerequisite review; Compose-only per-runner PID test |
@@ -595,3 +595,35 @@ controller. Runner proxy domain policy is separate. Controls are exercised by
 | Kubernetes API TLS | In-cluster API client uses ServiceAccount identity; Kubernetes mode has no Docker socket-proxy hop | `internal/kube/client.go:NewInCluster` |
 
 For the full threat model and claim catalog, see [SECURITY.md](./SECURITY.md).
+
+## 13. Upgrading from a release that used `runsecure.io`
+
+The identifier domain changed from `runsecure.io` to `runsecure.ai`. It is the
+prefix of every label the controller sets and selects on
+(`runsecure.ai/spawn-id`, `/role`, `/scope`, `/repo`, `/pool`) and the
+`apiVersion` of the scope config (`runsecure.ai/v1alpha1`). There is no
+fallback: the new controller does not read the old prefix.
+
+Before upgrading the chart:
+
+1. **Let running jobs finish**, or accept that they are cut off. Runner and
+   proxy Pods created by the old controller carry `runsecure.io/*` labels. The
+   new controller does not recognise them, so it neither tracks nor cleans
+   them up.
+2. **Change the scope config** `apiVersion` to `runsecure.ai/v1alpha1`. A file
+   still on `runsecure.io/v1alpha1` is rejected at startup with
+   `unsupported apiVersion`.
+3. **Update anything of your own that names the old prefix**: admission
+   policies, NetworkPolicies, monitoring queries, log filters, `kubectl`
+   selectors in runbooks.
+
+After the new controller is running, remove what the old one left behind, in
+every namespace it spawned into:
+
+```bash
+kubectl delete pod,networkpolicy,secret -n <namespace> -l runsecure.io/spawn-id
+```
+
+The per-spawn NetworkPolicies of the old release select on the old labels, so
+they do not apply to Pods created by the new one; deleting them changes
+nothing for new spawns.

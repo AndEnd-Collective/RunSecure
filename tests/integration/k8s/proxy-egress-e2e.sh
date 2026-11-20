@@ -153,9 +153,9 @@ metadata:
   name: rs-secret-${SPAWN_ID}
   namespace: ${NS}
   labels:
-    runsecure.io/scope: e2e
-    runsecure.io/spawn-id: ${SPAWN_ID}
-    runsecure.io/role: proxy
+    runsecure.ai/scope: e2e
+    runsecure.ai/spawn-id: ${SPAWN_ID}
+    runsecure.ai/role: proxy
 immutable: false
 stringData:
   jit-config: "fake-jit-config-for-e2e-test"
@@ -188,9 +188,9 @@ metadata:
   name: rs-proxy-${SPAWN_ID}
   namespace: ${NS}
   labels:
-    runsecure.io/scope: e2e
-    runsecure.io/spawn-id: ${SPAWN_ID}
-    runsecure.io/role: proxy
+    runsecure.ai/scope: e2e
+    runsecure.ai/spawn-id: ${SPAWN_ID}
+    runsecure.ai/role: proxy
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false

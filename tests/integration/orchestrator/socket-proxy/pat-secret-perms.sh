@@ -14,7 +14,7 @@ mkdir -p "$WORKDIR/proj/.github"
 echo "runtime: node:24" > "$WORKDIR/proj/.github/runner.yml"
 
 cat > "$WORKDIR/scope.yml" <<EOF
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: test
 global_max_runners: 1
 poll_interval_seconds: 15

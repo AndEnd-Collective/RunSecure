@@ -1,7 +1,7 @@
 # Runner pod — matches RunnerPod() builder output:
 #   name: rs-runner-<spawnID>  →  rs-runner-spawn01
 #   namespace: runsecure-itest
-#   labels: runsecure.io/role=runner, runsecure.io/scope=itest, runsecure.io/spawn-id=spawn01
+#   labels: runsecure.ai/role=runner, runsecure.ai/scope=itest, runsecure.ai/spawn-id=spawn01
 #
 # Uses nicolaka/netshoot for network testing (wget, nc, etc.).
 # PSS Restricted: same constraints as proxy pod.
@@ -12,10 +12,10 @@ metadata:
   name: rs-runner-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: runner
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: runner
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false

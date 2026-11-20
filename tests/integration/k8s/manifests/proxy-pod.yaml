@@ -1,7 +1,7 @@
 # Proxy pod — matches ProxyPod() builder output:
 #   name: rs-proxy-<spawnID>  →  rs-proxy-spawn01
 #   namespace: runsecure-itest
-#   labels: runsecure.io/role=proxy, runsecure.io/scope=itest, runsecure.io/spawn-id=spawn01
+#   labels: runsecure.ai/role=proxy, runsecure.ai/scope=itest, runsecure.ai/spawn-id=spawn01
 #
 # Uses busybox with nc as a minimal HTTP listener on 3128.
 # PSS Restricted: runAsNonRoot, runAsUser=1001, seccompProfile RuntimeDefault,
@@ -13,10 +13,10 @@ metadata:
   name: rs-proxy-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: proxy
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false

@@ -23,7 +23,7 @@ auth:
     installationId: "1"
     privateKeySecretName: runsecure-app-key
 nodeSelector:
-  runsecure.io/pool: management
+  runsecure.ai/pool: management
 kubernetesNetwork:
   # Service addresses match this Terraform's service CIDR. Replace/add exact
   # private API endpoint addresses and the qualified AZ-local DNS peers.
@@ -76,7 +76,7 @@ image:
 #     httpEgress: [github.com, api.github.com, codeload.github.com]
 #     orchestrator: {timeoutSeconds: 3600}
 #   kubernetes:
-#     nodeSelector: {runsecure.io/pool: execution}
+#     nodeSelector: {runsecure.ai/pool: execution}
 #     tolerations:
 #       - {key: dedicated, operator: Equal, value: runsecure-execution, effect: NoSchedule}
 #     ephemeralStorage: 10Gi

@@ -68,7 +68,7 @@ trap cleanup EXIT
 # The wrapper reads auth.type from the scope file to decide which credential
 # to require, so the scope file can no longer be empty.
 cat > "${tmp}/scope.yml" <<'EOF'
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: pat-scope
 auth:
   type: pat
@@ -272,7 +272,7 @@ grep -q 'auth secret source must not be a symlink' "${tmp}/symlink.err"
 # and always ran a PAT init, so a valid app-auth scope could not start through
 # the supported wrapper without also supplying an unrelated PAT.
 cat > "${tmp}/app-scope.yml" <<'EOF'
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: app-scope
 auth:
   type: github_app

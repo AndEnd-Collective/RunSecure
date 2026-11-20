@@ -47,7 +47,7 @@ spec:
       nodeSelector:
 {{ toYaml .Values.gateway.nodeSelector | indent 8 }}
 {{- if .Values.renderOnly }}
-        runsecure.io/telemetry-render-only: never
+        runsecure.ai/telemetry-render-only: never
       initContainers:
         - name: render-only-disabled
           image: {{ include "telemetry.gatewayImage" . }}
@@ -128,7 +128,7 @@ spec:
       nodeSelector:
 {{ toYaml .Values.nodeReader.nodeSelector | indent 8 }}
 {{- if .Values.renderOnly }}
-        runsecure.io/telemetry-render-only: never
+        runsecure.ai/telemetry-render-only: never
       initContainers:
         - name: render-only-disabled
           image: {{ include "telemetry.nodeImage" . }}

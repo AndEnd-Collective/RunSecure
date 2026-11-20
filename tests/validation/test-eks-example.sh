@@ -45,7 +45,7 @@ docs = render(values)
 deployment = next(d for d in docs if d['kind'] == 'Deployment')
 pod = deployment['spec']['template']['spec']
 assert deployment['spec']['replicas'] == 1 and deployment['spec']['strategy']['type'] == 'Recreate'
-assert pod['nodeSelector']['runsecure.io/pool'] == 'management'
+assert pod['nodeSelector']['runsecure.ai/pool'] == 'management'
 assert pod['containers'][0]['image'].endswith('@' + images['orchestrator']['digest'])
 assert not any(d['kind'] in ['Secret', 'ClusterRole', 'ClusterRoleBinding'] for d in docs)
 scope = yaml.safe_load(next(d for d in docs if d['kind'] == 'ConfigMap')['data']['scope.yml'])
@@ -59,14 +59,14 @@ enrolled['scope']['repos'] = [{
                      'resources': {'memory': '2g', 'cpus': 2, 'pids': 256},
                      'httpEgress': ['github.com', 'api.github.com', 'codeload.github.com'],
                      'orchestrator': {'timeoutSeconds': 3600}},
-    'kubernetes': {'nodeSelector': {'runsecure.io/pool': 'execution'},
+    'kubernetes': {'nodeSelector': {'runsecure.ai/pool': 'execution'},
                    'tolerations': [{'key': 'dedicated', 'operator': 'Equal', 'value': 'runsecure-execution', 'effect': 'NoSchedule'}],
                    'ephemeralStorage': '10Gi', 'proxyResources': {'cpu': '250m', 'memory': '256Mi', 'ephemeralStorage': '1Gi'}}}]
 docs = render(enrolled)
 scope = yaml.safe_load(next(d for d in docs if d['kind'] == 'ConfigMap')['data']['scope.yml'])
 project = scope['repos'][0]
 assert project['namespace'] == 'ci-example'
-assert project['kubernetes']['node_selector'] == {'runsecure.io/pool': 'execution'}
+assert project['kubernetes']['node_selector'] == {'runsecure.ai/pool': 'execution'}
 assert project['runner_config']['http_egress'] == ['github.com', 'api.github.com', 'codeload.github.com']
 roles = [d for d in docs if d['kind'] == 'Role']
 assert [r['metadata']['namespace'] for r in roles] == ['ci-example']

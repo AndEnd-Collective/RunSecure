@@ -908,7 +908,7 @@ func TestListSpawns_RejectsMalformedOrAmbiguousResources(t *testing.T) {
 		{
 			name:    "empty secret spawn ID",
 			objects: []runtime.Object{secret("rs-secret-empty", "")},
-			want:    "has empty runsecure.io/spawn-id",
+			want:    "has empty runsecure.ai/spawn-id",
 		},
 		{
 			name: "noncanonical secret name",
@@ -921,7 +921,7 @@ func TestListSpawns_RejectsMalformedOrAmbiguousResources(t *testing.T) {
 		{
 			name:    "empty runner pod spawn ID",
 			objects: []runtime.Object{pod("rs-runner-empty", "")},
-			want:    "has empty runsecure.io/spawn-id",
+			want:    "has empty runsecure.ai/spawn-id",
 		},
 		{
 			name: "noncanonical runner pod name",

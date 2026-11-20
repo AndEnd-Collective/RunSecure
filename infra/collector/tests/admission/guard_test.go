@@ -61,7 +61,7 @@ func chartGuard(t *testing.T) ([]cel.Program, map[string]any, string) {
 	template := daemon["spec"].(map[string]any)["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 	delete(podSpec, "initContainers") // remove render-only commissioning blocker
-	delete(podSpec["nodeSelector"].(map[string]any), "runsecure.io/telemetry-render-only")
+	delete(podSpec["nodeSelector"].(map[string]any), "runsecure.ai/telemetry-render-only")
 	gatewaySpec := gateway["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	gatewayImage := gatewaySpec["containers"].([]any)[0].(map[string]any)["image"]
 	if gatewayImage == podSpec["containers"].([]any)[0].(map[string]any)["image"] {

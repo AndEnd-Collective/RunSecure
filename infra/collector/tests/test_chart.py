@@ -108,7 +108,7 @@ class ChartContract(unittest.TestCase):
             pod = resource['spec']['template']['spec']
             self.assertFalse(pod['automountServiceAccountToken'])
             self.assertFalse(pod['hostNetwork'])
-            self.assertEqual('never', pod['nodeSelector']['runsecure.io/telemetry-render-only'])
+            self.assertEqual('never', pod['nodeSelector']['runsecure.ai/telemetry-render-only'])
             self.assertEqual(['/bin/false'], pod['initContainers'][0]['command'])
             container = pod['containers'][0]
             role = 'gateway' if resource['kind'] == 'StatefulSet' else 'nodeReader'

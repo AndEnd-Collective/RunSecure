@@ -8,10 +8,10 @@ metadata:
   name: rs-proxy-spawn02
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn02
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn02
+    runsecure.ai/role: proxy
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
@@ -60,15 +60,15 @@ metadata:
   name: rs-proxy-svc-spawn02
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn02
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn02
+    runsecure.ai/role: proxy
 spec:
   type: ClusterIP
   selector:
-    runsecure.io/role: proxy
-    runsecure.io/spawn-id: spawn02
+    runsecure.ai/role: proxy
+    runsecure.ai/spawn-id: spawn02
   ports:
     - name: squid
       protocol: TCP
@@ -82,14 +82,14 @@ metadata:
   name: rs-proxy-egress-spawn02
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/spawn-id: spawn02
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/spawn-id: spawn02
+    runsecure.ai/role: proxy
 spec:
   podSelector:
     matchLabels:
-      runsecure.io/role: proxy
-      runsecure.io/spawn-id: spawn02
+      runsecure.ai/role: proxy
+      runsecure.ai/spawn-id: spawn02
   policyTypes:
     - Egress
   egress:
