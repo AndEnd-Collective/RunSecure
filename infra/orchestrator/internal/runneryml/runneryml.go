@@ -148,8 +148,11 @@ func (r *Runner) ValidateEgress() error {
 }
 
 // IsPublicSuffix reports whether d, ignoring a leading dot and letter case,
-// names a whole registry suffix rather than a domain somebody registered:
-// a single label such as "com", or an ICANN suffix such as "co.uk".
+// names a whole ICANN registry suffix rather than a domain somebody
+// registered: a top-level domain such as "com", or a second-level suffix
+// such as "co.uk". A name with an empty label ("co..uk") is reported too: it
+// is not a host anyone can resolve, and it would otherwise slip past as
+// "registrable".
 //
 // Every http_egress entry is rendered as a subdomain match (Squid
 // `dstdomain .<entry>`, dnsmasq `server=/<entry>/`), so an entry of "com"
@@ -157,12 +160,16 @@ func (r *Runner) ValidateEgress() error {
 // allow_wildcards policy governs, and a project must not be able to grant it
 // to itself from runner.yml.
 //
-// Privately operated suffixes on the public suffix list (github.io,
-// blob.core.windows.net) are not rejected here: they are registrable domains
-// in the DNS sense and the built-in allowlist already depends on some.
+// Not rejected, on purpose:
+//   - single labels that are not ICANN top-level domains ("artifactory",
+//     "registry"): intranet and compose service names, reachable only with
+//     an operator's allow_private_cidrs;
+//   - privately operated suffixes on the public suffix list ("github.io",
+//     "blob.core.windows.net"): they are registrable domains in the DNS
+//     sense and the built-in allowlist already depends on some.
 func IsPublicSuffix(d string) bool {
 	name := strings.ToLower(strings.TrimPrefix(d, "."))
-	if !strings.Contains(name, ".") {
+	if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, ".") {
 		return true
 	}
 	suffix, icann := publicsuffix.PublicSuffix(name)

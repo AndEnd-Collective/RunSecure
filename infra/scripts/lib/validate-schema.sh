@@ -87,8 +87,8 @@ while IFS= read -r domain; do
     fi
     # Every entry becomes a Squid subdomain match, so a single label such as
     # 'com' would allow an entire top-level domain.
-    if [[ "${domain#.}" != *.* ]]; then
-        _err "http_egress entry '$domain' is invalid — it names an entire top-level domain; list the registrable domain, like '.npmjs.org'"
+    if [[ "${domain#.}" != *.* || "$domain" == *..* ]]; then
+        _err "http_egress entry '$domain' is invalid — it names an entire top-level domain or has an empty label; list the registrable domain, like '.npmjs.org'"
     fi
     if echo "$domain" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
         _err "http_egress entry '$domain' is invalid — IP addresses are not allowed; use domain names"

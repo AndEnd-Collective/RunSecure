@@ -114,7 +114,7 @@ _generate_squid_conf() {
         # A single label such as 'com' would become a Squid match for an
         # entire top-level domain. validate-schema.sh rejects it up front;
         # this is the same check at the point the directive is written.
-        if [[ "${domain#.}" != *.* ]]; then
+        if [[ "${domain#.}" != *.* || "$domain" == *..* ]]; then
             _log "WARNING: Skipping top-level-domain entry: $domain"
             continue
         fi

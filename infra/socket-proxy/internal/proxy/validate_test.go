@@ -263,6 +263,27 @@ func TestValidateContainerCreate_RefusesDefaultBridgeNetwork(t *testing.T) {
 	})
 }
 
+// A per-spawn NetworkMode must not be usable as cover for a second endpoint
+// on a built-in network.
+func TestValidateContainerCreate_RefusesBuiltinNetworkEndpoint(t *testing.T) {
+	for _, network := range []string{"bridge", "default", "host", "none", ""} {
+		t.Run("endpoint="+network, func(t *testing.T) {
+			b := minimalValidBody()
+			b["NetworkingConfig"] = map[string]any{
+				"EndpointsConfig": map[string]any{"rs-net-test": map[string]any{}, network: map[string]any{}},
+			}
+			require.ErrorIs(t, validate(t, b), ErrNetworkModeDenied)
+		})
+	}
+	t.Run("per-spawn endpoint alone is allowed", func(t *testing.T) {
+		b := minimalValidBody()
+		b["NetworkingConfig"] = map[string]any{
+			"EndpointsConfig": map[string]any{"rs-net-test": map[string]any{}},
+		}
+		require.NoError(t, validate(t, b))
+	})
+}
+
 func TestValidateContainerCreate_RefusesSysctls(t *testing.T) {
 	b := minimalValidBody()
 	b["HostConfig"].(map[string]any)["Sysctls"] = map[string]any{"net.ipv4.ip_forward": "1"}

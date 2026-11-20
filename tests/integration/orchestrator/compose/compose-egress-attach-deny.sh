@@ -208,6 +208,33 @@ for N4_MODE in bridge default ""; do
 done
 
 # ---------------------------------------------------------------------------
+# N5: per-spawn NetworkMode plus an extra endpoint on "bridge" → MUST be denied.
+# EndpointsConfig attaches further networks at create time, so a valid
+# NetworkMode must not work as cover for a second, internet-routed endpoint.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== N5: runner role + extra EndpointsConfig endpoint on 'bridge' → must be denied ==="
+
+N5_BODY=$(printf '{"Image":"%s","User":"1001:0","Labels":{"runsecure.role":"runner"},%s,"NetworkingConfig":{"EndpointsConfig":{"rs-spawn-internal":{},"bridge":{}}}}' \
+  "${ALLOWLISTED_IMAGE}" "${VALID_HC}")
+
+N5_STATUS=$(curl_to_proxy "${N5_BODY}")
+N5_BODY_RESP=$(curl_to_proxy_body "${N5_BODY}")
+
+echo "  Status: ${N5_STATUS}"
+echo "  Body:   ${N5_BODY_RESP}"
+
+if [[ "${N5_STATUS}" == "403" ]] \
+   && echo "${N5_BODY_RESP}" | grep -q '"validation_failed"' \
+   && echo "${N5_BODY_RESP}" | grep -q 'EndpointsConfig'; then
+  echo "OK [N5]: bridge endpoint denied with 403 + validation_failed by the network gate"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [N5]: expected 403 + validation_failed naming EndpointsConfig (status=${N5_STATUS}, body=${N5_BODY_RESP})"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # P1: proxy role + EndpointsConfig attach → must NOT be rejected on egress-gate grounds.
 # The request is forwarded to dockerd, which may return its own error (e.g.
 # 409 or 500 because no such network exists inside the test environment), but

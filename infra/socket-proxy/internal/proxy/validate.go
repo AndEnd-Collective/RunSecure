@@ -26,7 +26,7 @@ var (
 	ErrCapDropMissingALL            = errors.New("HostConfig.CapDrop must include 'ALL'")
 	ErrDevicesDenied                = errors.New("HostConfig.Devices non-empty denied")
 	ErrPidModeDenied                = errors.New("HostConfig.PidMode=host denied")
-	ErrNetworkModeDenied            = errors.New("HostConfig.NetworkMode must name a RunSecure network: host, none, container:*, bridge, default and empty are denied")
+	ErrNetworkModeDenied            = errors.New("HostConfig.NetworkMode and EndpointsConfig must name a RunSecure network: host, none, container:*, bridge, default and empty are denied")
 	ErrIpcModeDenied                = errors.New("HostConfig.IpcMode=host denied")
 	ErrUTSModeDenied                = errors.New("HostConfig.UTSMode=host denied")
 	ErrUsernsModeDenied             = errors.New("HostConfig.UsernsMode=host denied")
@@ -138,12 +138,23 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 	// NAT-routed straight to the internet. A container there bypasses the
 	// egress proxy entirely, so it is denied alongside the host and shared
 	// namespaces. The controller always names the per-spawn internal network.
-	switch hc.NetworkMode {
-	case "", "default", "bridge", "host", "none":
+	if builtinNetwork(hc.NetworkMode) || strings.HasPrefix(hc.NetworkMode, "container:") {
 		return ErrNetworkModeDenied
 	}
-	if strings.HasPrefix(hc.NetworkMode, "container:") {
-		return ErrNetworkModeDenied
+	// NetworkingConfig.EndpointsConfig attaches further networks at create
+	// time, so the same built-in names are refused there: otherwise a body
+	// with a per-spawn NetworkMode could still add an endpoint on "bridge".
+	//
+	// This is a denylist of names. A network referenced by its ID, or a
+	// non-internal network that already exists on the host under another
+	// name, is not recognised here; closing that needs the proxy to inspect
+	// the network and require RunSecure ownership labels.
+	if req.NetworkingConfig != nil {
+		for network := range req.NetworkingConfig.EndpointsConfig {
+			if builtinNetwork(network) {
+				return ErrNetworkModeDenied
+			}
+		}
 	}
 	if hc.IpcMode != "" && hc.IpcMode != "private" {
 		return ErrIpcModeDenied
@@ -210,6 +221,16 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 		}
 	}
 	return nil
+}
+
+// builtinNetwork reports whether name selects one of Docker's predefined
+// networks or network modes. None of them is a per-spawn internal network.
+func builtinNetwork(name string) bool {
+	switch name {
+	case "", "default", "bridge", "host", "none":
+		return true
+	}
+	return false
 }
 
 // ValidateNetworkCreate applies the same parser contract as container creates,
