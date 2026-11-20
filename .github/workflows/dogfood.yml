@@ -40,6 +40,16 @@ permissions:
 
 jobs:
   lints-on-self:
+    # Same-repository pull requests only. This repository is public and
+    # forkable, and a self-hosted runner executes whatever the pull request's
+    # head commit contains. GitHub's fork approval gate only covers first-time
+    # contributors, so without this guard anyone with one merged contribution
+    # could run arbitrary code on the operator's dogfood host from a fork.
+    # Fork pull requests still get the same lints from validate.yml on
+    # GitHub-hosted runners.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # Keep these labels aligned with .github/runner.yml. The dedicated label
     # excludes generic terminal runners that lack self-CI's composed packages.
     runs-on: [self-hosted, Linux, ARM64, container, runsecure-dogfood]
@@ -75,14 +85,25 @@ jobs:
           # Pick the right yq binary for the host arch — the workflow runs
           # on both amd64 (cloud) and arm64 (Apple Silicon dogfood) runners.
           # Running an amd64 binary on arm64 via QEMU produces flaky stdout.
+          # Version- and checksum-pinned per architecture: `releases/latest`
+          # would run whatever binary the yq project last published on the
+          # operator's dogfood host, unverified.
+          YQ_VERSION=v4.54.3
           case "$(uname -m)" in
-            x86_64)         YQ_ARCH=amd64 ;;
-            aarch64|arm64)  YQ_ARCH=arm64 ;;
+            x86_64)
+              YQ_ARCH=amd64
+              YQ_SHA256=129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973
+              ;;
+            aarch64|arm64)
+              YQ_ARCH=arm64
+              YQ_SHA256=89f69310b61b68d1245065a1241d1fc843f7a36cd6103ffd77ad987613bd1b67
+              ;;
             *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
           curl -fsSL --proto '=https' --tlsv1.2 \
             -o "$HOME/.local/bin/yq" \
-            "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${YQ_ARCH}"
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}"
+          echo "${YQ_SHA256}  $HOME/.local/bin/yq" | sha256sum -c -
           chmod 755 "$HOME/.local/bin/yq"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/yq" --version

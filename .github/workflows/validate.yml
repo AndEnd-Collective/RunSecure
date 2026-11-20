@@ -41,10 +41,14 @@ jobs:
       - name: Install yq + PyYAML
         run: |
           set -euo pipefail
-          # yq v4 (the validator's hard requirement)
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          # yq v4 (the validator's hard requirement). Version- and
+          # checksum-pinned like smoke-test.yml: `releases/latest` would run
+          # whatever binary the yq project last published, as root, unverified.
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.54.3/yq_linux_amd64
+          echo "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973  /tmp/yq" \
+            | sha256sum -c -
+          sudo install -m 0755 /tmp/yq /usr/local/bin/yq
           yq --version
           # PyYAML for test-workflow-yaml-valid.sh
           python3 -m pip install --quiet pyyaml
