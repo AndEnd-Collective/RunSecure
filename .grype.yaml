@@ -4,17 +4,21 @@
 # Allowlist for vulnerabilities that we cannot fix directly because the
 # affected component is vendored inside an upstream release we pin.
 #
-# The list is currently EMPTY, and that is the goal state. Each image must
-# pass `grype --fail-on high --only-fixed` without suppressions using
-# infra/scripts/grype-scan-image.sh. Readiness claims require fresh build and
-# scan evidence for the actual image and architecture; this configuration
+# An EMPTY list is the goal state. Each image must pass
+# `grype --fail-on high --only-fixed` using infra/scripts/grype-scan-image.sh
+# with only the entries below applied. Readiness claims require fresh build
+# and scan evidence for the actual image and architecture; this configuration
 # alone does not certify any published artifact.
+#
+# The list currently holds ONE entry (GHSA-x33c-w48q-qrgc), blocked on the
+# next actions/runner release. Its justification is recorded beside it.
 #
 # Ten entries were removed once the pins they were blocked on moved:
 #   - GO-2026-4610 (docker/cli vendored in gh) and GO-2026-4970 /
 #     CVE-2026-39822 (go stdlib "os" symlink escape). gh 2.102.0 originally
-#     cleared these findings. gh 2.103.3 replaces its bundled Go/x/net versions
-#     to address the subsequent HTTP/2 advisories without adding ignores.
+#     cleared these findings. gh 2.103.3 and then gh 2.105.0 (x/net v0.62.0,
+#     GO-2026-6860) replaced the bundled Go/x/net versions to address the
+#     subsequent HTTP/2 advisories without adding ignores.
 #   - eight CPython findings (CVE-2026-7210, -4224, -3644, -6100, -9669,
 #     -15308, -3298, -4786). These were justified on "3.12.13 is the latest
 #     3.12, there is nothing to upgrade to". 3.12.14 and 3.12.15 shipped;
@@ -48,4 +52,29 @@
 #      justifications.
 # ============================================================================
 
-ignore: []
+ignore:
+  # --- ASP.NET Core WebUtilities vendored inside the actions/runner ---------
+  # GHSA-x33c-w48q-qrgc (CVE-2026-114149) — "ASP.NET Core Denial of Service":
+  # multipart form processing can bypass the configured header-count limit and
+  # consume excessive resources (CWE-770, availability impact only).
+  #
+  # Upstream: actions/runner ships Microsoft.AspNetCore.WebUtilities 8.0.25 as
+  # a NuGet dependency of Runner.Worker. The fixed version is 8.0.34.
+  # Pin: RUNNER_VERSION in images/base.Dockerfile. 2.338.2 is the latest
+  # runner release and still bundles 8.0.25. The fix is merged on the runner's
+  # main branch (actions/runner#4849, 2026-11-11) and is not in any release,
+  # so there is no runner version to bump to.
+  # Reachability: the vulnerable code is the server-side multipart request
+  # parser. The runner is an outbound-only client; it opens no listening
+  # socket and parses no inbound multipart request bodies. The only party
+  # able to feed data to runner processes is the workflow job itself, which
+  # already executes arbitrary code in this ephemeral, single-job container
+  # under --pids-limit / --memory / --cpus caps, so a resource-exhaustion bug
+  # grants it nothing it does not already have.
+  # Re-evaluate on every RUNNER_VERSION bump: delete this entry as soon as a
+  # runner release bundles Microsoft.AspNetCore.WebUtilities >= 8.0.34.
+  - vulnerability: GHSA-x33c-w48q-qrgc  # WebUtilities 8.0.25 vendored in actions/runner 2.338.2 — fix (8.0.34) merged upstream in actions/runner#4849, unreleased
+    package:
+      name: Microsoft.AspNetCore.WebUtilities
+      version: 8.0.25
+      type: dotnet
