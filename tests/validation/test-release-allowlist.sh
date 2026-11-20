@@ -176,6 +176,7 @@ fi
 
 python3 - "$PUBLISH_WORKFLOW" "$WEEKLY_WORKFLOW" "$PROMOTE_WORKFLOW" "$ACCEPT_WORKFLOW" <<'PY'
 import pathlib
+import re
 import sys
 import yaml
 
@@ -302,9 +303,50 @@ weekly_text = weekly_path.read_text()
 assert "secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN" not in weekly_text
 assert "token: ${{ secrets.RELEASE_TOKEN }}" in weekly_text
 assert weekly_text.index("Require the release cascade token") < weekly_text.index("Create and push tag")
+# The release PAT must never share a job with code from freshly upgraded
+# third-party modules: `go get -u` + `go build` / `go test` execute it.
+#   bump           holds RELEASE_TOKEN, runs no Go
+#   go-deps-build  runs Go, holds no credential
+#   go-deps-pr     holds the write token, runs no Go
+weekly_jobs = weekly["jobs"]
+assert set(weekly_jobs) == {"bump", "go-deps-build", "go-deps-pr"}, set(weekly_jobs)
+
+def job_text(name):
+    return "\n".join(str(step) for step in weekly_jobs[name]["steps"])
+
+# A `go <subcommand>` in command position: at the start of a line or after a
+# shell operator. Prose that merely mentions a go command (the PR body) is
+# preceded by other text and does not match.
+go_command = re.compile(r"(?m)(^|&&|\|\||;|\()\s*go\s+(get|build|test|vet|mod|install|run|generate|list)\b")
+
+def runs_go(name):
+    return any(
+        "setup-go@" in step.get("uses", "") or go_command.search(step.get("run", ""))
+        for step in weekly_jobs[name]["steps"]
+    )
+
+assert "RELEASE_TOKEN" in job_text("bump")
+assert not runs_go("bump"), "bump holds RELEASE_TOKEN and must not run the Go toolchain"
+assert weekly_jobs["bump"]["permissions"] == {"contents": "write"}
+
+build_job = weekly_jobs["go-deps-build"]
+assert runs_go("go-deps-build")
+assert build_job["permissions"] == {"contents": "read"}, build_job["permissions"]
+assert "secrets." not in job_text("go-deps-build"), "go-deps-build must not reference any secret"
+build_checkouts = [step for step in build_job["steps"] if "actions/checkout@" in step.get("uses", "")]
+assert len(build_checkouts) == 1
+assert build_checkouts[0]["with"]["persist-credentials"] is False
+assert "env" not in build_job
+
+pr_job = weekly_jobs["go-deps-pr"]
+assert not runs_go("go-deps-pr"), "go-deps-pr holds a write token and must not run the Go toolchain"
+assert "RELEASE_TOKEN" not in job_text("go-deps-pr")
+assert pr_job["permissions"] == {"contents": "write", "pull-requests": "write"}
+assert set(pr_job["needs"]) == {"bump", "go-deps-build"}
+
 dependency_pr_steps = [
     step
-    for step in weekly["jobs"]["bump"]["steps"]
+    for step in pr_job["steps"]
     if "gh pr create" in step.get("run", "")
 ]
 assert len(dependency_pr_steps) == 1
@@ -318,6 +360,11 @@ assert "::warning title=Go dependency PR requires operator action::" in dependen
 assert 'pull/new/${BRANCH}' in dependency_pr_command
 assert 'exit "$PR_STATUS"' in dependency_pr_command
 assert "The release tag and image cascade remain valid" in dependency_pr_command
+# The patch comes from the job that executed third-party code: it is checked
+# before it is applied, and it is applied before anything is pushed.
+assert 'git apply --numstat "$GO_DEPS_PATCH"' in dependency_pr_command
+assert dependency_pr_command.index("Go dependency patch rejected") < dependency_pr_command.index('git apply --index "$GO_DEPS_PATCH"')
+assert dependency_pr_command.index('git apply --index "$GO_DEPS_PATCH"') < dependency_pr_command.index("git push origin")
 
 promote_text = promote_path.read_text()
 promote = yaml.safe_load(promote_text)
@@ -553,10 +600,14 @@ import sys
 import yaml
 
 workflow = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
-steps = workflow["jobs"]["bump"]["steps"]
+steps = workflow["jobs"]["go-deps-pr"]["steps"]
 command = next(step["run"] for step in steps if "gh pr create" in step.get("run", ""))
 pathlib.Path(sys.argv[2]).write_text(command)
 PY
+
+# With git stubbed the content is never parsed; the step only needs the patch
+# to exist and be non-empty to reach the PR-creation branch under test.
+printf 'stub patch\n' > "${tmp}/stub-go-deps.patch"
 
 mkdir -p "${tmp}/stub-bin"
 cat > "${tmp}/stub-bin/go" <<'EOF'
@@ -588,6 +639,8 @@ if ! env \
   GITHUB_SERVER_URL=https://github.com \
   GITHUB_STEP_SUMMARY="$summary" \
   NEXT_VERSION=v9.9.9 \
+  GO_MODULES='infra/orchestrator infra/socket-proxy' \
+  GO_DEPS_PATCH="${tmp}/stub-go-deps.patch" \
   bash "${tmp}/refresh-go-dependencies.sh" > "$policy_output" 2>&1; then
   echo "FAIL: the known GitHub Actions PR-policy denial failed the release job" >&2
   exit 1
@@ -608,6 +661,8 @@ env \
   GITHUB_SERVER_URL=https://github.com \
   GITHUB_STEP_SUMMARY="${tmp}/unexpected-summary.md" \
   NEXT_VERSION=v9.9.9 \
+  GO_MODULES='infra/orchestrator infra/socket-proxy' \
+  GO_DEPS_PATCH="${tmp}/stub-go-deps.patch" \
   bash "${tmp}/refresh-go-dependencies.sh" > "$unexpected_output" 2>&1
 unexpected_status=$?
 set -e
@@ -617,4 +672,93 @@ if [[ "$unexpected_status" -ne 23 ]] || \
   exit 1
 fi
 
+# Execute the same step against a real repository (only gh is stubbed) to
+# prove the patch gate: the patch is produced by the job that ran third-party
+# code, so anything other than go.mod / go.sum of a listed module must be
+# refused before a single ref is pushed.
+patch_repo="${tmp}/patch-repo"
+patch_origin="${tmp}/patch-origin.git"
+git init -q --bare "$patch_origin"
+git init -q -b main "$patch_repo"
+(
+  cd "$patch_repo"
+  git config user.name test
+  git config user.email test@example.invalid
+  git remote add origin "$patch_origin"
+  mkdir -p infra/orchestrator .github/workflows
+  printf 'module example.invalid/orchestrator\n\ngo 1.27\n\nrequire example.invalid/dep v1.0.0\n' > infra/orchestrator/go.mod
+  printf 'name: ci\n' > .github/workflows/ci.yml
+  git add -A
+  git commit -q -m base
+  git push -q origin main
+
+  # A legitimate refresh: go.mod changes and go.sum appears.
+  sed -i.bak 's/v1.0.0/v1.1.0/' infra/orchestrator/go.mod && rm infra/orchestrator/go.mod.bak
+  printf 'example.invalid/dep v1.1.0 h1:stub\n' > infra/orchestrator/go.sum
+  git add --intent-to-add infra/orchestrator/go.sum
+  git diff > "${tmp}/good.patch"
+  git reset -q --hard && git clean -qfd
+
+  # The same refresh, plus an edit to a workflow file.
+  sed -i.bak 's/v1.0.0/v1.1.0/' infra/orchestrator/go.mod && rm infra/orchestrator/go.mod.bak
+  printf 'name: ci\non: push\n' > .github/workflows/ci.yml
+  git diff > "${tmp}/extra-path.patch"
+  git reset -q --hard
+
+  # The same refresh, with go.mod made executable.
+  sed -i.bak 's/v1.0.0/v1.1.0/' infra/orchestrator/go.mod && rm infra/orchestrator/go.mod.bak
+  chmod +x infra/orchestrator/go.mod
+  git -c core.fileMode=true diff > "${tmp}/mode.patch"
+  chmod -x infra/orchestrator/go.mod
+  git reset -q --hard
+)
+grep -q '^new file mode 100644$' "${tmp}/good.patch"
+grep -q '^+++ b/.github/workflows/ci.yml$' "${tmp}/extra-path.patch"
+grep -q '^new mode 100755$' "${tmp}/mode.patch"
+
+run_patch_step() {
+  local patch="$1"
+  (
+    cd "$patch_repo"
+    git reset -q --hard origin/main
+    env \
+      PATH="${tmp}/stub-bin-gh:${PATH}" \
+      GITHUB_REPOSITORY=AndEnd-Collective/RunSecure \
+      GITHUB_SERVER_URL=https://github.com \
+      GITHUB_STEP_SUMMARY="${tmp}/patch-summary.md" \
+      NEXT_VERSION=v9.9.9 \
+      GO_MODULES='infra/orchestrator infra/socket-proxy' \
+      GO_DEPS_PATCH="$patch" \
+      bash "${tmp}/refresh-go-dependencies.sh"
+  )
+}
+mkdir -p "${tmp}/stub-bin-gh"
+cp "${tmp}/stub-bin/gh" "${tmp}/stub-bin-gh/gh"
+
+for rejected in extra-path mode; do
+  if run_patch_step "${tmp}/${rejected}.patch" > "${tmp}/${rejected}.out" 2>&1; then
+    echo "FAIL: dependency patch '${rejected}' was accepted" >&2
+    exit 1
+  fi
+  if ! grep -Fq '::error title=Go dependency patch rejected::' "${tmp}/${rejected}.out"; then
+    echo "FAIL: dependency patch '${rejected}' failed for another reason: $(tail -3 "${tmp}/${rejected}.out")" >&2
+    exit 1
+  fi
+  if git --git-dir="$patch_origin" rev-parse -q --verify refs/heads/bot/go-deps-v9.9.9 >/dev/null; then
+    echo "FAIL: a branch was pushed for rejected dependency patch '${rejected}'" >&2
+    exit 1
+  fi
+done
+
+if ! run_patch_step "${tmp}/good.patch" > "${tmp}/good.out" 2>&1; then
+  echo "FAIL: a go.mod/go.sum-only dependency patch was refused: $(tail -3 "${tmp}/good.out")" >&2
+  exit 1
+fi
+pushed_files=$(git --git-dir="$patch_origin" diff --name-only refs/heads/main refs/heads/bot/go-deps-v9.9.9 | sort | tr '\n' ' ')
+if [[ "$pushed_files" != "infra/orchestrator/go.mod infra/orchestrator/go.sum " ]]; then
+  echo "FAIL: dependency branch carries unexpected files: ${pushed_files}" >&2
+  exit 1
+fi
+
 echo "PASS: release allowlist is digest-derived, complete, and built before socket-proxy"
+echo "PASS: weekly bump keeps RELEASE_TOKEN away from the Go toolchain and gates the dependency patch"

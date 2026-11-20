@@ -52,6 +52,27 @@ on:
 
 permissions: {}
 
+env:
+  # Every Go module the weekly refresh covers, not just the two shipped
+  # binaries. tools/corner-lint and the compose mock-github server were
+  # excluded for months and drifted several minor versions behind; then
+  # infra/telemetry and the collector admission tests were added to the repo
+  # and missed the same way (the admission tests sat on a cel-go release with
+  # a published advisory, GO-2026-6094, while this job reported nothing to
+  # refresh).
+  # infra/collector/processor is deliberately absent. Its
+  # go.opentelemetry.io/collector/* versions must match the OCB release pinned
+  # in infra/collector/Dockerfile and build.sh, which builds with
+  # --skip-strict-versioning=false; `go get -u` would move them out of step
+  # and break the collector image. Bump it together with OCB.
+  GO_MODULES: >-
+    infra/orchestrator
+    infra/socket-proxy
+    infra/telemetry
+    infra/collector/tests/admission
+    tools/corner-lint
+    tests/integration/orchestrator/compose/mock-github
+
 jobs:
   bump:
     runs-on: ubuntu-latest
@@ -59,7 +80,8 @@ jobs:
       # Required to push the new tag back to the repo. No write access
       # to any other ref — branch protection on main is unaffected.
       contents: write
-      pull-requests: write
+    outputs:
+      version: ${{ steps.next_version.outputs.version }}
     steps:
       - name: Require the release cascade token
         env:
@@ -156,47 +178,52 @@ jobs:
           echo "DRY RUN — would tag $NEXT_VERSION but did not."
           echo "$NEXT_VERSION" > "$GITHUB_STEP_SUMMARY"
 
-      # ----------------------------------------------------------------------
-      # Refresh Go module dependencies weekly so they never go stale between
-      # releases. Without this, a freshly-published CVE in a transitive dep
-      # (e.g. golang.org/x/net pulled by client-go) only surfaces at the
-      # post-publish Grype gate and blocks the release. This opens a PR that is
-      # gated by CI (including the per-image Grype scans) and merged before the
-      # next bump, keeping the released binaries current.
-      # ----------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # Refresh Go module dependencies weekly so they never go stale between
+  # releases. Without this, a freshly-published CVE in a transitive dep
+  # (e.g. golang.org/x/net pulled by client-go) only surfaces at the
+  # post-publish Grype gate and blocks the release. The refresh lands as a PR
+  # that is gated by CI (including the per-image Grype scans) and merged
+  # before the next bump, keeping the released binaries current.
+  #
+  # It is split across two jobs on purpose. `go get -u` pulls the newest
+  # release of every dependency, and `go build` / `go test` then execute that
+  # code (init functions, test binaries, cgo build steps). That must never
+  # happen in a job that holds a credential:
+  #
+  #   go-deps-build  runs the Go toolchain. Read-only token, checkout does not
+  #                  persist it, no secret is referenced. Its only output is a
+  #                  patch of go.mod / go.sum.
+  #   go-deps-pr     holds the write token. It never runs Go or anything from
+  #                  the refreshed modules: it checks that the patch touches
+  #                  nothing but go.mod / go.sum of the listed modules,
+  #                  applies it and opens the PR.
+  #
+  # RELEASE_TOKEN stays in `bump` alone, which runs only git.
+  # --------------------------------------------------------------------------
+  go-deps-build:
+    needs: bump
+    if: github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.refresh.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Set up Go
-        if: github.event.inputs.dry_run != 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27'
 
-      - name: Refresh Go module dependencies
-        if: github.event.inputs.dry_run != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+      - name: Refresh, build and test Go modules
+        id: refresh
         run: |
           set -euo pipefail
-          # Every Go module in the repo, not just the two shipped binaries.
-          # tools/corner-lint and the compose mock-github server were excluded
-          # for months and drifted several minor versions behind as a result.
-          # infra/telemetry and the collector admission tests were added to the
-          # repo after this list was written and were missed the same way: the
-          # admission tests sat on a cel-go release with a published advisory
-          # (GO-2026-6094) while this job reported nothing to refresh.
-          # infra/collector/processor is deliberately absent. Its
-          # go.opentelemetry.io/collector/* versions must match the OCB release
-          # pinned in infra/collector/Dockerfile and build.sh, which builds with
-          # --skip-strict-versioning=false; `go get -u` would move them out of
-          # step and break the collector image. Bump it together with OCB.
-          MODULES=(
-            infra/orchestrator
-            infra/socket-proxy
-            infra/telemetry
-            infra/collector/tests/admission
-            tools/corner-lint
-            tests/integration/orchestrator/compose/mock-github
-          )
+          read -r -a MODULES <<< "$GO_MODULES"
           # k8s.io/kube-openapi publishes no semver tags, so `go get -u` always
           # walks it to the newest pseudo-version — which is routinely ahead of
           # the k8s.io/{api,apimachinery,client-go} release the module pins.
@@ -248,17 +275,94 @@ jobs:
             GOFILES+=("$mod/go.mod")
             [ -f "$mod/go.sum" ] && GOFILES+=("$mod/go.sum")
           done
+          # intent-to-add so a go.sum that did not exist before shows up in
+          # the diff as a new file.
+          git add --intent-to-add -- "${GOFILES[@]}"
           if git diff --quiet -- "${GOFILES[@]}"; then
             echo "no Go dependency changes; skipping PR"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          git diff -- "${GOFILES[@]}" > "${RUNNER_TEMP}/go-deps.patch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dependency patch
+        if: steps.refresh.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-deps-patch
+          path: ${{ runner.temp }}/go-deps.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  go-deps-pr:
+    needs: [bump, go-deps-build]
+    if: github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Push the bot/go-deps-* branch, delete superseded ones, open the PR.
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download dependency patch
+        if: needs.go-deps-build.outputs.changed == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-deps-patch
+          path: ${{ runner.temp }}/go-deps
+
+      - name: Open the Go dependency refresh PR
+        if: needs.go-deps-build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_VERSION: ${{ needs.bump.outputs.version }}
+          GO_DEPS_PATCH: ${{ runner.temp }}/go-deps/go-deps.patch
+        run: |
+          set -euo pipefail
+          read -r -a MODULES <<< "$GO_MODULES"
+          if [ ! -s "$GO_DEPS_PATCH" ]; then
+            echo "::error title=Go dependency patch missing::go-deps-build reported changes but ${GO_DEPS_PATCH} is empty or absent."
+            exit 1
+          fi
+          # The patch was produced by a job that executed third-party code, so
+          # it is untrusted input here. It may only change go.mod / go.sum of
+          # the listed modules, as regular files: no other path, no rename,
+          # no delete, no mode change, no symlink.
+          ALLOWED=()
+          for mod in "${MODULES[@]}"; do
+            ALLOWED+=("$mod/go.mod" "$mod/go.sum")
+          done
+          while IFS=$'\t' read -r _added _deleted path; do
+            [ -n "$path" ] || continue
+            permitted=false
+            for allowed in "${ALLOWED[@]}"; do
+              if [ "$path" = "$allowed" ]; then
+                permitted=true
+                break
+              fi
+            done
+            if [ "$permitted" != true ]; then
+              echo "::error title=Go dependency patch rejected::patch touches ${path}, which is not a go.mod or go.sum of a refreshed module."
+              exit 1
+            fi
+          done < <(git apply --numstat "$GO_DEPS_PATCH")
+          if grep -E '^(old mode|new mode|deleted file mode|rename from|rename to|copy from|copy to|similarity index|GIT binary patch) ' "$GO_DEPS_PATCH" \
+             || grep -E '^new file mode ' "$GO_DEPS_PATCH" | grep -v -x 'new file mode 100644'; then
+            echo "::error title=Go dependency patch rejected::patch changes a file mode, renames, deletes or adds a non-regular file."
+            exit 1
+          fi
+          git apply --index "$GO_DEPS_PATCH"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           BRANCH="bot/go-deps-${NEXT_VERSION}"
-          git add "${GOFILES[@]}"
           git commit -m "chore(deps): weekly go get -u for $NEXT_VERSION"
           git push origin "HEAD:refs/heads/${BRANCH}"
           if PR_OUTPUT=$(gh pr create \
             --title "chore(deps): weekly Go dependency refresh for $NEXT_VERSION" \
-            --body "Automated 'go get -u -t ./... && go mod tidy' on six Go modules (orchestrator, socket-proxy, telemetry, collector admission tests, corner-lint, compose mock-github) so dependencies never go stale between releases. The bump job already ran build + vet + test on every module, so this PR compiles; CI — including the per-image Grype scans — gates it as well." \
+            --body "Automated 'go get -u -t ./...' followed by 'go mod tidy' on six Go modules (orchestrator, socket-proxy, telemetry, collector admission tests, corner-lint, compose mock-github) so dependencies never go stale between releases. A separate credential-free job ran build + vet + test on every module, so this PR compiles; CI — including the per-image Grype scans — gates it as well." \
             --base main --head "$BRANCH" 2>&1); then
             printf '%s\n' "$PR_OUTPUT"
             exit 0
@@ -288,8 +392,7 @@ jobs:
       # superseded by this one. Without pruning they accumulated for months.
       # Branches with an open PR are left for a reviewer to close.
       - name: Prune superseded dependency branches
-        if: github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEXT_VERSION: ${{ steps.next_version.outputs.version }}
+          NEXT_VERSION: ${{ needs.bump.outputs.version }}
         run: bash infra/scripts/prune-bot-branches.sh bot/go-deps- "bot/go-deps-${NEXT_VERSION}"
