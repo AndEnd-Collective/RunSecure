@@ -70,7 +70,7 @@ func TestValidateContainerCreate_EgressAttach(t *testing.T) {
 	mk := func(role string) []byte {
 		return []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
 			`"Labels":{"runsecure.role":"` + role + `"},` +
-			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+			`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 			`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
 	}
 
@@ -95,7 +95,7 @@ func TestValidateContainerCreate_EgressAttach(t *testing.T) {
 // new denials.
 func TestValidateContainerCreate_EgressGateInertWhenNetEmpty(t *testing.T) {
 	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
-		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
 	// With egressNet="" the gate must not fire even if spawn-egress is attached.
 	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "", ""))
@@ -106,7 +106,7 @@ func TestValidateContainerCreate_EgressGateInertWhenNetEmpty(t *testing.T) {
 func TestValidateContainerCreate_NonEgressNetworkUnaffected(t *testing.T) {
 	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
 		`"Labels":{"runsecure.role":"runner"},` +
-		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"rs-internal":{}}}}`)
 	// runner attaches rs-internal, not spawn-egress → no egress-gate denial.
 	require.NoError(t, ValidateContainerCreate(body, allowAll(t), "spawn-egress", ""))
@@ -117,7 +117,7 @@ func TestValidateContainerCreate_NonEgressNetworkUnaffected(t *testing.T) {
 func TestValidateContainerCreate_EgressAttach_ErrorSentinel(t *testing.T) {
 	body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
 		`"Labels":{"runsecure.role":"runner"},` +
-		`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
+		`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]},` +
 		`"NetworkingConfig":{"EndpointsConfig":{"spawn-egress":{}}}}`)
 	err := ValidateContainerCreate(body, allowAll(t), "spawn-egress", "")
 	require.ErrorIs(t, err, ErrEgressAttachDenied)
@@ -132,7 +132,7 @@ func TestValidateContainerCreate_EgressVolume(t *testing.T) {
 	mk := func(role, bind string) []byte {
 		return []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
 			`"Labels":{"runsecure.role":"` + role + `"},` +
-			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
+			`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
 			`"Binds":["` + bind + `"]}}`)
 	}
 
@@ -181,7 +181,7 @@ func TestValidateContainerCreate_EgressVolume(t *testing.T) {
 	t.Run("unlabeled+egressVol DENIED", func(t *testing.T) {
 		// No Labels key in the body at all — role defaults to "".
 		body := []byte(`{"Image":"ghcr.io/test/runner@sha256:ff","User":"1001:0",` +
-			`"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
+			`"HostConfig":{"NetworkMode":"rs-net-test","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],` +
 			`"Binds":["myscope-egress-configs:/mnt/e:ro"]}}`)
 		err := ValidateContainerCreate(body, allowAll(t), "", "myscope-egress-configs")
 		require.ErrorIs(t, err, ErrEgressVolumeDenied)
@@ -243,6 +243,24 @@ func TestValidateContainerCreate_RefusesNoneNetwork(t *testing.T) {
 	b := minimalValidBody()
 	b["HostConfig"].(map[string]any)["NetworkMode"] = "none"
 	require.ErrorIs(t, validate(t, b), ErrNetworkModeDenied)
+}
+
+// Docker's built-in bridge is NAT-routed to the internet, so a container
+// placed there never passes through the egress proxy. "", "default" and
+// "bridge" all select it.
+func TestValidateContainerCreate_RefusesDefaultBridgeNetwork(t *testing.T) {
+	for _, mode := range []string{"", "default", "bridge"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			b := minimalValidBody()
+			b["HostConfig"].(map[string]any)["NetworkMode"] = mode
+			require.ErrorIs(t, validate(t, b), ErrNetworkModeDenied)
+		})
+	}
+	t.Run("absent", func(t *testing.T) {
+		b := minimalValidBody()
+		delete(b["HostConfig"].(map[string]any), "NetworkMode")
+		require.ErrorIs(t, validate(t, b), ErrNetworkModeDenied)
+	})
 }
 
 func TestValidateContainerCreate_RefusesSysctls(t *testing.T) {

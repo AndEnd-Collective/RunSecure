@@ -235,6 +235,25 @@ http_egress:
 EOF
 )"
 
+# --- http_egress: whole top-level domain rejected ----------------------------
+check "http_egress with bare TLD rejected" 1 \
+    "http_egress entry 'com' is invalid — it names an entire top-level domain" \
+    "$(cat <<'EOF'
+runtime: node:24
+http_egress:
+  - com
+EOF
+)"
+
+check "http_egress with dotted TLD rejected" 1 \
+    "http_egress entry '.io' is invalid — it names an entire top-level domain" \
+    "$(cat <<'EOF'
+runtime: node:24
+http_egress:
+  - .io
+EOF
+)"
+
 # --- H8: tcp_egress IP literal rejected --------------------------------------
 check "tcp_egress with IPv4 literal rejected (H8)" 1 \
     "IP literals are not allowed" \

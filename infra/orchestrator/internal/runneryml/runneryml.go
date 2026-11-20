@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/publicsuffix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -139,6 +140,31 @@ func (r *Runner) ValidateEgress() error {
 		if !reDomain.MatchString(d) {
 			return fmt.Errorf("invalid http_egress domain %q", d)
 		}
+		if IsPublicSuffix(d) {
+			return fmt.Errorf("invalid http_egress domain %q (names an entire registry suffix; list the registrable domain instead)", d)
+		}
 	}
 	return nil
+}
+
+// IsPublicSuffix reports whether d, ignoring a leading dot and letter case,
+// names a whole registry suffix rather than a domain somebody registered:
+// a single label such as "com", or an ICANN suffix such as "co.uk".
+//
+// Every http_egress entry is rendered as a subdomain match (Squid
+// `dstdomain .<entry>`, dnsmasq `server=/<entry>/`), so an entry of "com"
+// allows every .com host. That is broader than any wildcard the scope's
+// allow_wildcards policy governs, and a project must not be able to grant it
+// to itself from runner.yml.
+//
+// Privately operated suffixes on the public suffix list (github.io,
+// blob.core.windows.net) are not rejected here: they are registrable domains
+// in the DNS sense and the built-in allowlist already depends on some.
+func IsPublicSuffix(d string) bool {
+	name := strings.ToLower(strings.TrimPrefix(d, "."))
+	if !strings.Contains(name, ".") {
+		return true
+	}
+	suffix, icann := publicsuffix.PublicSuffix(name)
+	return icann && suffix == name
 }

@@ -6,6 +6,7 @@ require (
 	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-20261102061930-d40ef5c03656
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/net v0.62.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
@@ -40,7 +41,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
-	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect

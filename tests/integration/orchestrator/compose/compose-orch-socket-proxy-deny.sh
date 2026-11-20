@@ -26,3 +26,23 @@ else
   echo "FAIL: expected 403, got: $STATUS"
   exit 1
 fi
+
+# A request that passes every other HostConfig gate but asks for Docker's
+# built-in bridge must also be refused: that network is NAT-routed to the
+# internet, so a container on it never passes through the egress proxy.
+# The response body is checked as well as the status, to prove it is the
+# NetworkMode gate that fired and not an earlier one.
+for MODE in bridge default ""; do
+  BODY=$(docker run --rm --network "$NETNAME" curlimages/curl:8.10.1 \
+    -sk -w '\n%{http_code}' -X POST \
+    -H "Content-Type: application/json" \
+    --data-raw "{\"Image\":\"bad\",\"User\":\"1001:0\",\"HostConfig\":{\"CapDrop\":[\"ALL\"],\"SecurityOpt\":[\"no-new-privileges:true\"],\"NetworkMode\":\"${MODE}\"}}" \
+    http://socket-proxy:2375/v1.44/containers/create 2>&1)
+  STATUS=$(tail -1 <<<"$BODY")
+  if [[ "$STATUS" == "403" ]] && grep -q "NetworkMode" <<<"$BODY"; then
+    echo "OK: socket-proxy refused NetworkMode '${MODE}' (status $STATUS)"
+  else
+    echo "FAIL: expected 403 naming NetworkMode for mode '${MODE}', got: $BODY"
+    exit 1
+  fi
+done

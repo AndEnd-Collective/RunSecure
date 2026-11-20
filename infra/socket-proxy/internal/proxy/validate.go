@@ -26,7 +26,7 @@ var (
 	ErrCapDropMissingALL            = errors.New("HostConfig.CapDrop must include 'ALL'")
 	ErrDevicesDenied                = errors.New("HostConfig.Devices non-empty denied")
 	ErrPidModeDenied                = errors.New("HostConfig.PidMode=host denied")
-	ErrNetworkModeDenied            = errors.New("HostConfig.NetworkMode 'host' or 'none' denied")
+	ErrNetworkModeDenied            = errors.New("HostConfig.NetworkMode must name a RunSecure network: host, none, container:*, bridge, default and empty are denied")
 	ErrIpcModeDenied                = errors.New("HostConfig.IpcMode=host denied")
 	ErrUTSModeDenied                = errors.New("HostConfig.UTSMode=host denied")
 	ErrUsernsModeDenied             = errors.New("HostConfig.UsernsMode=host denied")
@@ -134,7 +134,15 @@ func ValidateContainerCreate(body []byte, images *imageallow.Allowlist, egressNe
 	if hc.PidMode != "" {
 		return ErrPidModeDenied
 	}
-	if hc.NetworkMode == "host" || hc.NetworkMode == "none" || strings.HasPrefix(hc.NetworkMode, "container:") {
+	// "", "default" and "bridge" all select Docker's built-in bridge, which is
+	// NAT-routed straight to the internet. A container there bypasses the
+	// egress proxy entirely, so it is denied alongside the host and shared
+	// namespaces. The controller always names the per-spawn internal network.
+	switch hc.NetworkMode {
+	case "", "default", "bridge", "host", "none":
+		return ErrNetworkModeDenied
+	}
+	if strings.HasPrefix(hc.NetworkMode, "container:") {
 		return ErrNetworkModeDenied
 	}
 	if hc.IpcMode != "" && hc.IpcMode != "private" {
