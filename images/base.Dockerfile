@@ -78,15 +78,16 @@ ARG UNDICI_VERSION=6.29.1
 ARG UNDICI_SHA256=29c4b8e0b2d86cb8795571c1959012ce057a14ecfd34858335f47c31e770a04f
 ARG BRACE_EXPANSION_VERSION=5.0.12
 ARG BRACE_EXPANSION_SHA256=ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4
-# GH_CLI_VERSION 2.103.3 — latest stable. Its bundled Go and x/net fixes
-#   replace the vulnerable go1.27.1 / x/net v0.58.0 in gh 2.102.0.
+# GH_CLI_VERSION 2.105.0 — latest stable. It bundles golang.org/x/net
+#   v0.62.0, the fixed version for GO-2026-6860; gh 2.103.3 shipped v0.60.0
+#   and gh 2.104.0 shipped v0.61.0, both still affected.
 #   The unchanged Grype gate checks bundled modules without suppressions.
 #   These are the checksums of the .deb packages (what the install step below
 #   downloads), NOT the .tar.gz archives — the release publishes both and they
 #   differ.
-ARG GH_CLI_VERSION=2.103.3
-ARG GH_CLI_SHA256_AMD64=e3bafef96328d1a67de3a968bdfe1cc2ffd58cf6aba8b5e201356897ed06bb3d
-ARG GH_CLI_SHA256_ARM64=cac3ff84b60b68e64cca69f31f303210c26320361cc3286b773655d4226b7b06
+ARG GH_CLI_VERSION=2.105.0
+ARG GH_CLI_SHA256_AMD64=1dac939af3e84fb3861927c984b357531341be9403b889e4aa86e8822145a09d
+ARG GH_CLI_SHA256_ARM64=d17e9b089ce0356679c9fa1898f3a7d38dccf943d529acaa94c24e8a4584e0ae
 
 ARG TARGETARCH
 
