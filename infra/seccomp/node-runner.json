@@ -14,7 +14,7 @@
         "brk", "capget", "capset",
         "chdir", "chmod", "chown", "chown32",
         "clock_getres", "clock_gettime", "clock_nanosleep",
-        "clone", "clone3", "close", "close_range",
+        "close", "close_range",
         "connect", "copy_file_range",
         "creat",
         "dup", "dup2", "dup3",
@@ -58,7 +58,6 @@
         "getuid", "getuid32",
         "inotify_add_watch", "inotify_init", "inotify_init1", "inotify_rm_watch",
         "io_cancel", "io_destroy", "io_getevents", "io_setup", "io_submit",
-        "io_uring_enter", "io_uring_register", "io_uring_setup",
         "ioctl",
         "kill",
         "lchown", "lchown32",
@@ -156,6 +155,26 @@
         "write", "writev"
       ],
       "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "clone is allowed only without namespace flags. Mask 0x7E020000 = CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET, the same filter as Docker's default profile. A new user namespace hands the caller a full capability set inside it, which reopens kernel attack surface (netfilter, mounts) that cap_drop ALL is meant to close.",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 2114060288, "op": "SCMP_CMP_MASKED_EQ" }
+      ]
+    },
+    {
+      "comment": "clone3 passes its flags in a struct that seccomp cannot inspect, so the namespace filter above cannot be applied to it. ENOSYS (38) makes glibc and musl fall back to clone, as under Docker's default profile.",
+      "names": ["clone3"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "comment": "Explicitly BLOCKED: io_uring — a recurring source of kernel privilege-escalation bugs, blocked by Docker's default profile. Node.js, Python and Rust runtimes fall back to epoll and the thread pool.",
+      "names": ["io_uring_enter", "io_uring_register", "io_uring_setup"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
     },
     {
       "comment": "Allow arch_prctl for x86_64 (needed by .NET runtime and Node.js)",
