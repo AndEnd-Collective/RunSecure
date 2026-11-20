@@ -34,7 +34,10 @@ permissions:
 jobs:
   lints-and-units:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The lints and unit tests together take 225-300s on GitHub-hosted
+    # runners. At 5 minutes the job was cancelled whenever a run landed at the
+    # slow end, which reads as a failed check on an unrelated change.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
