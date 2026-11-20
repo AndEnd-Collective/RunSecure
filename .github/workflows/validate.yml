@@ -34,17 +34,24 @@ permissions:
 jobs:
   lints-and-units:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The lints and unit tests together take 225-300s on GitHub-hosted
+    # runners. At 5 minutes the job was cancelled whenever a run landed at the
+    # slow end, which reads as a failed check on an unrelated change.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install yq + PyYAML
         run: |
           set -euo pipefail
-          # yq v4 (the validator's hard requirement)
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          # yq v4 (the validator's hard requirement). Version- and
+          # checksum-pinned like smoke-test.yml: `releases/latest` would run
+          # whatever binary the yq project last published, as root, unverified.
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.54.3/yq_linux_amd64
+          echo "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973  /tmp/yq" \
+            | sha256sum -c -
+          sudo install -m 0755 /tmp/yq /usr/local/bin/yq
           yq --version
           # PyYAML for test-workflow-yaml-valid.sh
           python3 -m pip install --quiet pyyaml

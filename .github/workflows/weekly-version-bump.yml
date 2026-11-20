@@ -180,9 +180,20 @@ jobs:
           # Every Go module in the repo, not just the two shipped binaries.
           # tools/corner-lint and the compose mock-github server were excluded
           # for months and drifted several minor versions behind as a result.
+          # infra/telemetry and the collector admission tests were added to the
+          # repo after this list was written and were missed the same way: the
+          # admission tests sat on a cel-go release with a published advisory
+          # (GO-2026-6094) while this job reported nothing to refresh.
+          # infra/collector/processor is deliberately absent. Its
+          # go.opentelemetry.io/collector/* versions must match the OCB release
+          # pinned in infra/collector/Dockerfile and build.sh, which builds with
+          # --skip-strict-versioning=false; `go get -u` would move them out of
+          # step and break the collector image. Bump it together with OCB.
           MODULES=(
             infra/orchestrator
             infra/socket-proxy
+            infra/telemetry
+            infra/collector/tests/admission
             tools/corner-lint
             tests/integration/orchestrator/compose/mock-github
           )
@@ -247,7 +258,7 @@ jobs:
           git push origin "HEAD:refs/heads/${BRANCH}"
           if PR_OUTPUT=$(gh pr create \
             --title "chore(deps): weekly Go dependency refresh for $NEXT_VERSION" \
-            --body "Automated 'go get -u -t ./... && go mod tidy' on all four Go modules (orchestrator, socket-proxy, corner-lint, compose mock-github) so dependencies never go stale between releases. The bump job already ran build + vet + test on every module, so this PR compiles; CI — including the per-image Grype scans — gates it as well." \
+            --body "Automated 'go get -u -t ./... && go mod tidy' on six Go modules (orchestrator, socket-proxy, telemetry, collector admission tests, corner-lint, compose mock-github) so dependencies never go stale between releases. The bump job already ran build + vet + test on every module, so this PR compiles; CI — including the per-image Grype scans — gates it as well." \
             --base main --head "$BRANCH" 2>&1); then
             printf '%s\n' "$PR_OUTPUT"
             exit 0
