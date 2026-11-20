@@ -40,11 +40,18 @@ permissions:
 
 jobs:
   lints-on-self:
-    # Same-repository pull requests only. This repository is public and
-    # forkable, and a self-hosted runner executes whatever the pull request's
-    # head commit contains. GitHub's fork approval gate only covers first-time
-    # contributors, so without this guard anyone with one merged contribution
-    # could run arbitrary code on the operator's dogfood host from a fork.
+    # Skip pull requests from forks. A self-hosted runner executes whatever
+    # the pull request's head commit contains, and this repository is public
+    # and forkable.
+    #
+    # This guard is NOT a security boundary on its own. For `pull_request`
+    # GitHub reads the workflow file from the pull request, and this file is
+    # in the `paths:` trigger above, so a fork can delete the condition and
+    # still be scheduled. What actually keeps fork code off the dogfood host
+    # is the repository's fork approval policy (Settings > Actions > General
+    # > "Require approval for all external contributors") or a runner group
+    # that excludes public-fork workflows. The guard only stops unmodified
+    # fork pull requests from queueing a job that should never run for them.
     # Fork pull requests still get the same lints from validate.yml on
     # GitHub-hosted runners.
     if: >-
