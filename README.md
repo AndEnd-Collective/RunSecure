@@ -122,7 +122,8 @@ apt install docker.io gh
 > | Tag | Meaning | When to use |
 > |---|---|---|
 > | `1.2.3` (or `latest`) | Promoted to stable after acceptance suite passed against the same digest | **Production** — every consumer should pin one of these |
-> | `1.2.3-canary` (or `nightly`) | Built and Grype-scanned, but acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+> | `nightly` | Built, and every Grype scan passed; acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+> | `1.2.3-canary` | Built and pushed so the scans can run against it. The tag exists even if a scan then fails; the result is on the Publish Images run for `v1.2.3` | Verifying a specific release candidate — check its publish run first |
 >
 > The `:1.2.3-canary` digest is byte-identical to `:1.2.3` after promotion
 > — same artifact, just a server-side retag. If acceptance fails, the
