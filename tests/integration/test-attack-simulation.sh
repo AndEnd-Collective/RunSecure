@@ -270,6 +270,68 @@ else
     fail "No ptrace restrictions detected"
 fi
 
+# Create a user namespace with a raw clone() (the usual first step of a
+# kernel exploit from a container: a new user namespace hands the caller a
+# full capability set inside it, reopening netfilter and mount attack surface
+# that cap_drop ALL closes). unshare(2) and setns(2) are denied outright; the
+# seccomp profile must also filter the namespace flags on clone() and refuse
+# clone3(), whose flags it cannot inspect.
+NS_PROBE=$(python3 - <<'PYPROBE' 2>&1
+import ctypes, errno, os, platform
+libc = ctypes.CDLL(None, use_errno=True)
+nr = {"aarch64": (220, 435, 425), "x86_64": (56, 435, 425)}.get(platform.machine())
+if nr is None:
+    print("SKIP unsupported-arch")
+    raise SystemExit
+clone_nr, clone3_nr, uring_nr = nr
+def clone(flags):
+    ctypes.set_errno(0)
+    pid = libc.syscall(clone_nr, ctypes.c_ulong(flags | 17), 0, 0, 0, 0)
+    if pid == 0:
+        os._exit(0)
+    if pid > 0:
+        os.waitpid(pid, 0)
+        return "ALLOWED"
+    return errno.errorcode.get(ctypes.get_errno(), "ERR")
+print("userns", clone(0x10000000))
+print("netns", clone(0x10000000 | 0x40000000))
+print("plain", clone(0))
+ctypes.set_errno(0); libc.syscall(clone3_nr, 0, 0)
+print("clone3", errno.errorcode.get(ctypes.get_errno(), "ERR"))
+ctypes.set_errno(0); libc.syscall(uring_nr, 4, 0)
+print("io_uring", errno.errorcode.get(ctypes.get_errno(), "ERR"))
+PYPROBE
+)
+if ! command -v python3 &>/dev/null || grep -q '^SKIP' <<<"$NS_PROBE"; then
+    echo -e "  ${YELLOW}INFO${NC} namespace/io_uring probe needs python3 on amd64 or arm64 — not run on this image"
+else
+    if grep -qx 'userns EPERM' <<<"$NS_PROBE"; then
+        pass "clone(CLONE_NEWUSER) denied by seccomp"
+    else
+        fail "clone(CLONE_NEWUSER) not denied — user namespaces reachable ($(grep '^userns' <<<"$NS_PROBE"))"
+    fi
+    if grep -qx 'netns EPERM' <<<"$NS_PROBE"; then
+        pass "clone(CLONE_NEWUSER|CLONE_NEWNET) denied by seccomp"
+    else
+        fail "clone(CLONE_NEWUSER|CLONE_NEWNET) not denied ($(grep '^netns' <<<"$NS_PROBE"))"
+    fi
+    if grep -qx 'plain ALLOWED' <<<"$NS_PROBE"; then
+        pass "clone() without namespace flags still works (fork/threads unaffected)"
+    else
+        fail "plain clone() broken by the seccomp profile ($(grep '^plain' <<<"$NS_PROBE"))"
+    fi
+    if grep -qx 'clone3 ENOSYS' <<<"$NS_PROBE"; then
+        pass "clone3() returns ENOSYS (libc falls back to filtered clone)"
+    else
+        fail "clone3() not refused with ENOSYS ($(grep '^clone3' <<<"$NS_PROBE"))"
+    fi
+    if grep -qx 'io_uring EPERM' <<<"$NS_PROBE"; then
+        pass "io_uring_setup() denied by seccomp"
+    else
+        fail "io_uring_setup() not denied ($(grep '^io_uring' <<<"$NS_PROBE"))"
+    fi
+fi
+
 # Try to load a kernel module (should be blocked)
 if command -v insmod &>/dev/null; then
     fail "insmod available (kernel module loading possible)"

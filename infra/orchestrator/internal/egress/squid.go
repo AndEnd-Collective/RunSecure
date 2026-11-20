@@ -65,6 +65,14 @@ var BuiltInEgressDomains = []string{
 	".rust-lang.org",
 }
 
+// IPLiteralDenyRules is the Squid fragment that refuses IP-literal hosts.
+// IPv4 literals are dotted (or bare) decimal; a DNS name always ends in an
+// alphabetic label, so the first pattern cannot match one. IPv6 literals are
+// the only hosts that contain a colon. infra/squid/base.conf carries the same
+// two lines for the one-shot run.sh path.
+const IPLiteralDenyRules = "acl rs_ip_literal dstdom_regex -n ^[0-9]+(\\.[0-9]+)*$ ^\\[?[0-9a-fA-F.]*:[0-9a-fA-F:.]*\\]?$\n" +
+	"http_access deny rs_ip_literal\n"
+
 // sanitizeDomain returns the domain if it passes the domain regex, otherwise
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
@@ -126,6 +134,17 @@ func RenderSquid(r *runneryml.Runner, p security.Policy) []byte {
 	}
 
 	b.WriteString("http_access deny rs_private_dst\n")
+
+	// Deny every request whose host is an IP literal, before any domain allow.
+	// For an IP-based URL Squid's dstdomain falls back to a reverse (PTR)
+	// lookup and matches the returned name against the allowlist. PTR records
+	// are set by whoever controls the address, so a job could CONNECT to its
+	// own server whose PTR claims "x.github.com" and be let through. No
+	// allowlisted service is addressed by IP, so the whole class is refused;
+	// -n makes this ACL compare the literal text with no lookup of its own.
+	// Operator-approved private CIDRs are allowed above and stay reachable by
+	// address.
+	b.WriteString(IPLiteralDenyRules)
 
 	// GitHub Actions control-plane baseline (unconditional — every runner
 	// needs these domains to register, receive the VSTOKEN, stream logs, and

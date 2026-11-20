@@ -141,19 +141,17 @@ assert_allowed "https://github.com/robots.txt" "HTTPS CONNECT tunnel to allowed 
 # Try non-standard port on allowed domain (should be blocked by port ACL)
 assert_blocked "https://github.com:8443" "github.com on port 8443 (non-standard)"
 
-# Try IP address directly instead of domain.
-# NOTE: Domain-based proxy filtering cannot block raw IP HTTP requests reliably.
-# For CONNECT (HTTPS), Squid sees the IP and can deny it. For HTTP, the IP goes
-# through as a direct request. This is a known limitation of domain-based filtering.
-# The internal network + proxy architecture prevents direct IP access in production.
-IP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://140.82.121.4" 2>/dev/null)
-if [[ "$IP_CODE" =~ ^(000|403|407|503)$ ]]; then
-    pass "BLOCK Direct IP access blocked by network isolation"
-else
-    # Informational — the internal network blocks this in production
-    echo -e "  ${YELLOW}INFO${NC} Direct IP HTTP returned $IP_CODE (blocked by internal network in production)"
-    PASS=$((PASS + 1))
-fi
+# IP-literal hosts must be refused outright, including addresses whose
+# reverse DNS falls under an allowlisted domain. For an IP-based URL Squid's
+# dstdomain falls back to a PTR lookup, and PTR records are set by whoever
+# controls the address — so without an explicit IP-literal deny, a job could
+# tunnel to its own server by giving it a PTR of "x.github.com".
+# 140.82.121.4 is a github.com address whose PTR is *.github.com: the exact
+# shape that was let through before the deny existed.
+assert_blocked "https://140.82.121.4/" "CONNECT to IP literal with allowlisted reverse DNS"
+assert_blocked "http://140.82.121.4/" "HTTP GET to IP literal with allowlisted reverse DNS"
+assert_blocked "https://1.1.1.1/" "CONNECT to arbitrary IPv4 literal"
+assert_blocked "https://[2606:4700:4700::1111]/" "CONNECT to IPv6 literal"
 
 # ============================================================================
 # Section 4: Exfiltration Techniques

@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -563,6 +564,70 @@ func TestRenderSquid_RegistrySuffixNeverEmitted(t *testing.T) {
 	for _, kept := range []string{"dstdomain .api.example.com\n", "dstdomain .amazonaws.com\n"} {
 		if !strings.Contains(out, kept) {
 			t.Fatalf("registrable domain must still be rendered (%q):\n%s", kept, out)
+		}
+	}
+}
+
+// TestRenderSquid_IPLiteralDenyPrecedesDomainAllows guards the reverse-DNS
+// bypass: for an IP-based URL Squid's dstdomain falls back to a PTR lookup,
+// so an IP-literal deny must sit before every domain allow, and after the
+// operator's private-CIDR allow so approved ranges stay reachable by address.
+func TestRenderSquid_IPLiteralDenyPrecedesDomainAllows(t *testing.T) {
+	_, approved, err := net.ParseCIDR("10.20.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := security.Defaults("standard")
+	policy.AllowedPrivateCIDRs = []*net.IPNet{approved}
+	policy.WildcardEntries = []string{"*.amazonaws.com"}
+	out := string(RenderSquid(&runneryml.Runner{HTTPEgress: []string{"example.com"}}, policy))
+
+	deny := strings.Index(out, "http_access deny rs_ip_literal\n")
+	if deny < 0 {
+		t.Fatalf("IP-literal deny missing:\n%s", out)
+	}
+	if !strings.Contains(out, "acl rs_ip_literal dstdom_regex -n ") {
+		t.Fatalf("rs_ip_literal must be a dstdom_regex with -n (no lookup):\n%s", out)
+	}
+	for _, allow := range []string{"http_access allow rs_github_core\n", "http_access allow rs_builtin_egress\n", "http_access allow allowed_domains\n"} {
+		at := strings.Index(out, allow)
+		if at < 0 {
+			t.Fatalf("expected %q in output:\n%s", allow, out)
+		}
+		if at < deny {
+			t.Fatalf("%q is evaluated before the IP-literal deny:\n%s", allow, out)
+		}
+	}
+	if private := strings.Index(out, "http_access allow rs_allowed_private\n"); private < 0 || private > deny {
+		t.Fatalf("operator private-CIDR allow must precede the IP-literal deny:\n%s", out)
+	}
+}
+
+// TestIPLiteralDenyRules_MatchOnlyAddressLiterals runs the two patterns
+// against hosts as Squid presents them: they must catch every address form
+// and never a DNS name.
+func TestIPLiteralDenyRules_MatchOnlyAddressLiterals(t *testing.T) {
+	fields := strings.Fields(strings.SplitN(IPLiteralDenyRules, "\n", 2)[0])
+	patterns := fields[4:]
+	if len(patterns) != 2 {
+		t.Fatalf("expected two patterns, got %v", patterns)
+	}
+	matches := func(host string) bool {
+		for _, p := range patterns {
+			if regexp.MustCompile(p).MatchString(host) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, host := range []string{"140.82.121.4", "1.1.1.1", "2130706433", "[2606:4700:4700::1111]", "2606:4700:4700::1111", "[::1]", "[::ffff:10.0.0.1]"} {
+		if !matches(host) {
+			t.Errorf("address literal %q must be denied", host)
+		}
+	}
+	for _, host := range []string{"github.com", "api.github.com", "cafe.de", "dead.beef.io", "1e100.net", "4chan.org", "123.example.com", "a1.b2.c3"} {
+		if matches(host) {
+			t.Errorf("DNS name %q must not be treated as an address literal", host)
 		}
 	}
 }

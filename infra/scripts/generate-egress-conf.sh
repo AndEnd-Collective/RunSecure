@@ -299,11 +299,21 @@ _generate_dnsmasq_conf() {
                 fi
                 ;;
             "# SERVER_ENTRIES_PLACEHOLDER")
-                while IFS= read -r srv; do
-                    [[ "$srv" == "null" || -z "$srv" ]] && continue
-                    echo "server=${srv}"
-                    _log "  DNS server: $srv"
-                done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
+                # With dns.whitelist_file set there must be NO catch-all
+                # forwarder: a bare `server=<ip>` line forwards every name, so
+                # the whitelist would restrict nothing. The upstreams are then
+                # attached per whitelisted domain (WHITELIST_PLACEHOLDER) and
+                # dnsmasq, having no upstream for any other name, refuses it.
+                whitelist_file=$(_yq '.dns.whitelist_file // ""' "$RUNNER_YML")
+                if [[ -n "$whitelist_file" && "$whitelist_file" != "null" ]]; then
+                    echo "# Whitelist configured — upstreams are attached per whitelisted domain below"
+                else
+                    while IFS= read -r srv; do
+                        [[ "$srv" == "null" || -z "$srv" ]] && continue
+                        echo "server=${srv}"
+                        _log "  DNS server: $srv"
+                    done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
+                fi
                 ;;
             "# HOSTS_FILE_PLACEHOLDER")
                 hosts_file=$(_yq '.dns.hosts_file // ""' "$RUNNER_YML")
@@ -325,11 +335,42 @@ _generate_dnsmasq_conf() {
                     fetched_whitelist=$(mktemp /tmp/runsecure-whitelist-XXXXXX)
                     if bash "${SCRIPT_DIR}/lib/fetch-runtime-file.sh" "$whitelist_file" "$fetched_whitelist"; then
                         _log "  Whitelist file: $whitelist_file -> $fetched_whitelist"
-                        while IFS= read -r domain; do
-                            domain=$(echo "$domain" | tr -d '[:space:]' | sed 's/#.*//')
+                        # `server=/domain/<upstream>` forwards that domain (and
+                        # its subdomains) to the upstream. The form without an
+                        # upstream, `server=/domain/`, means the opposite:
+                        # never forward it. One line per upstream per domain.
+                        whitelist_servers=()
+                        while IFS= read -r srv; do
+                            [[ "$srv" == "null" || -z "$srv" ]] && continue
+                            whitelist_servers+=("$srv")
+                        done < <(_yq '.dns.servers // [] | .[]' "$RUNNER_YML")
+                        # dns.hosts_file without dns.servers is a valid config
+                        # (validate-schema.sh accepts it): names resolve from
+                        # the hosts file only and nothing is forwarded. The
+                        # whitelist then has no upstream to attach, and every
+                        # name outside the hosts file is refused already.
+                        if [[ ${#whitelist_servers[@]} -eq 0 ]]; then
+                            _log "  No dns.servers: nothing is forwarded, whitelist entries are validated but have no upstream"
+                            echo "# No dns.servers — nothing is forwarded; names outside dns.hosts_file are refused"
+                        fi
+                        whitelist_count=0
+                        while IFS= read -r domain || [[ -n "$domain" ]]; do
+                            domain=$(echo "$domain" | sed 's/#.*//' | tr -d '[:space:]')
                             [[ -z "$domain" ]] && continue
-                            echo "server=/${domain}/"
+                            # The file is fetched content: accept domain names
+                            # only, so a line cannot smuggle a second directive
+                            # or a whole top-level domain into dnsmasq.conf.
+                            if [[ ! "$domain" =~ ^\.?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ || "${domain#.}" != *.* || "$domain" == *..* ]]; then
+                                _err "dns.whitelist_file entry '$domain' is not a valid domain name"
+                            fi
+                            for srv in ${whitelist_servers[@]+"${whitelist_servers[@]}"}; do
+                                echo "server=/${domain#.}/${srv}"
+                            done
+                            whitelist_count=$((whitelist_count + 1))
                         done < "$fetched_whitelist"
+                        if [[ $whitelist_count -eq 0 ]]; then
+                            _err "dns.whitelist_file '$whitelist_file' contains no domains; refusing to start with every name denied"
+                        fi
                     else
                         _err "Failed to fetch dns.whitelist_file: $whitelist_file"
                     fi
@@ -340,7 +381,7 @@ _generate_dnsmasq_conf() {
             "# DENY_OTHER_PLACEHOLDER")
                 whitelist_file=$(_yq '.dns.whitelist_file // ""' "$RUNNER_YML")
                 if [[ -n "$whitelist_file" && "$whitelist_file" != "null" ]]; then
-                    echo "# Domains not in whitelist are refused (dnsmasq returns NXDOMAIN)"
+                    echo "# Domains not in the whitelist have no upstream and are refused (REFUSED)"
                 else
                     echo "# No whitelist — all queries forwarded to configured servers"
                 fi
