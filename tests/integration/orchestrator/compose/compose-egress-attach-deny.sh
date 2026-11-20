@@ -83,7 +83,11 @@ curl_to_proxy_body() {
 #   - User is non-root
 #   - HostConfig satisfies all hardening rules
 # We then append NetworkingConfig to trigger the gate.
-VALID_HC='"HostConfig":{"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]}'
+#   - NetworkMode names a per-spawn network. The socket-proxy refuses Docker's
+#     built-in bridge ("", "default", "bridge") before it reaches the egress
+#     gate, so a body without it would be denied for the wrong reason and the
+#     N1/N3 cases below would stop exercising the gate they are named for.
+VALID_HC='"HostConfig":{"NetworkMode":"rs-spawn-internal","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]}'
 
 # ---------------------------------------------------------------------------
 # N1: runner role + EndpointsConfig attach → MUST be denied (403, validation_failed)
@@ -102,11 +106,12 @@ echo "  Body:   ${N1_BODY_RESP}"
 
 if [[ "${N1_STATUS}" == "403" ]]; then
   # Verify the code field is validation_failed (not route_not_allowed or similar).
-  if echo "${N1_BODY_RESP}" | grep -q '"validation_failed"'; then
-    echo "OK [N1]: runner→egress denied with 403 + validation_failed"
+  if echo "${N1_BODY_RESP}" | grep -q '"validation_failed"' \
+     && echo "${N1_BODY_RESP}" | grep -q 'egress network'; then
+    echo "OK [N1]: runner→egress denied with 403 + validation_failed by the egress gate"
     PASS=$((PASS + 1))
   else
-    echo "FAIL [N1]: got 403 but code is not validation_failed (body: ${N1_BODY_RESP})"
+    echo "FAIL [N1]: got 403 but not validation_failed from the egress gate (body: ${N1_BODY_RESP})"
     FAIL=$((FAIL + 1))
   fi
 else
@@ -158,15 +163,74 @@ echo "  Status: ${N3_STATUS}"
 echo "  Body:   ${N3_BODY_RESP}"
 
 if [[ "${N3_STATUS}" == "403" ]]; then
-  if echo "${N3_BODY_RESP}" | grep -q '"validation_failed"'; then
-    echo "OK [N3]: unlabeled→egress denied with 403 + validation_failed"
+  if echo "${N3_BODY_RESP}" | grep -q '"validation_failed"' \
+     && echo "${N3_BODY_RESP}" | grep -q 'egress network'; then
+    echo "OK [N3]: unlabeled→egress denied with 403 + validation_failed by the egress gate"
     PASS=$((PASS + 1))
   else
-    echo "FAIL [N3]: got 403 but code is not validation_failed (body: ${N3_BODY_RESP})"
+    echo "FAIL [N3]: got 403 but not validation_failed from the egress gate (body: ${N3_BODY_RESP})"
     FAIL=$((FAIL + 1))
   fi
 else
   echo "FAIL [N3]: expected 403, got ${N3_STATUS}"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# N4: Docker's built-in bridge → MUST be denied (403, validation_failed).
+# "", "default" and "bridge" all select the default bridge, which is
+# NAT-routed to the internet: a container there never passes through the
+# egress proxy. The body is otherwise fully valid, and the detail is checked
+# so the case cannot pass on some other gate.
+# ---------------------------------------------------------------------------
+for N4_MODE in bridge default ""; do
+  echo ""
+  echo "=== N4: runner role + NetworkMode='${N4_MODE}' (default bridge) → must be denied ==="
+
+  N4_BODY=$(printf '{"Image":"%s","User":"1001:0","Labels":{"runsecure.role":"runner"},"HostConfig":{"NetworkMode":"%s","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"]}}' \
+    "${ALLOWLISTED_IMAGE}" "${N4_MODE}")
+
+  N4_STATUS=$(curl_to_proxy "${N4_BODY}")
+  N4_BODY_RESP=$(curl_to_proxy_body "${N4_BODY}")
+
+  echo "  Status: ${N4_STATUS}"
+  echo "  Body:   ${N4_BODY_RESP}"
+
+  if [[ "${N4_STATUS}" == "403" ]] \
+     && echo "${N4_BODY_RESP}" | grep -q '"validation_failed"' \
+     && echo "${N4_BODY_RESP}" | grep -q 'NetworkMode'; then
+    echo "OK [N4]: NetworkMode='${N4_MODE}' denied with 403 + validation_failed by the NetworkMode gate"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [N4]: NetworkMode='${N4_MODE}' expected 403 + validation_failed naming NetworkMode (status=${N4_STATUS}, body=${N4_BODY_RESP})"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# N5: per-spawn NetworkMode plus an extra endpoint on "bridge" → MUST be denied.
+# EndpointsConfig attaches further networks at create time, so a valid
+# NetworkMode must not work as cover for a second, internet-routed endpoint.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== N5: runner role + extra EndpointsConfig endpoint on 'bridge' → must be denied ==="
+
+N5_BODY=$(printf '{"Image":"%s","User":"1001:0","Labels":{"runsecure.role":"runner"},%s,"NetworkingConfig":{"EndpointsConfig":{"rs-spawn-internal":{},"bridge":{}}}}' \
+  "${ALLOWLISTED_IMAGE}" "${VALID_HC}")
+
+N5_STATUS=$(curl_to_proxy "${N5_BODY}")
+N5_BODY_RESP=$(curl_to_proxy_body "${N5_BODY}")
+
+echo "  Status: ${N5_STATUS}"
+echo "  Body:   ${N5_BODY_RESP}"
+
+if [[ "${N5_STATUS}" == "403" ]] \
+   && echo "${N5_BODY_RESP}" | grep -q '"validation_failed"' \
+   && echo "${N5_BODY_RESP}" | grep -q 'EndpointsConfig'; then
+  echo "OK [N5]: bridge endpoint denied with 403 + validation_failed by the network gate"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [N5]: expected 403 + validation_failed naming EndpointsConfig (status=${N5_STATUS}, body=${N5_BODY_RESP})"
   FAIL=$((FAIL + 1))
 fi
 

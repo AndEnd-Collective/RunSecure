@@ -69,7 +69,11 @@ var BuiltInEgressDomains = []string{
 // returns an empty string. This prevents config injection via domains with
 // newlines or other metacharacters.
 func sanitizeDomain(d string) string {
-	if reDomain.MatchString(d) {
+	// The public-suffix check repeats runneryml.ValidateEgress on purpose: this
+	// is the last point before a name becomes a Squid or dnsmasq directive, and
+	// wildcard suffixes from the scope policy reach it without passing through
+	// ValidateEgress.
+	if reDomain.MatchString(d) && !runneryml.IsPublicSuffix(d) {
 		return d
 	}
 	return ""

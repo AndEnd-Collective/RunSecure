@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/publicsuffix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -139,6 +140,38 @@ func (r *Runner) ValidateEgress() error {
 		if !reDomain.MatchString(d) {
 			return fmt.Errorf("invalid http_egress domain %q", d)
 		}
+		if IsPublicSuffix(d) {
+			return fmt.Errorf("invalid http_egress domain %q (names an entire registry suffix; list the registrable domain instead)", d)
+		}
 	}
 	return nil
+}
+
+// IsPublicSuffix reports whether d, ignoring a leading dot and letter case,
+// names a whole ICANN registry suffix rather than a domain somebody
+// registered: a top-level domain such as "com", or a second-level suffix
+// such as "co.uk". A name with an empty label ("co..uk") is reported too: it
+// is not a host anyone can resolve, and it would otherwise slip past as
+// "registrable".
+//
+// Every http_egress entry is rendered as a subdomain match (Squid
+// `dstdomain .<entry>`, dnsmasq `server=/<entry>/`), so an entry of "com"
+// allows every .com host. That is broader than any wildcard the scope's
+// allow_wildcards policy governs, and a project must not be able to grant it
+// to itself from runner.yml.
+//
+// Not rejected, on purpose:
+//   - single labels that are not ICANN top-level domains ("artifactory",
+//     "registry"): intranet and compose service names, reachable only with
+//     an operator's allow_private_cidrs;
+//   - privately operated suffixes on the public suffix list ("github.io",
+//     "blob.core.windows.net"): they are registrable domains in the DNS
+//     sense and the built-in allowlist already depends on some.
+func IsPublicSuffix(d string) bool {
+	name := strings.ToLower(strings.TrimPrefix(d, "."))
+	if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, ".") {
+		return true
+	}
+	suffix, icann := publicsuffix.PublicSuffix(name)
+	return icann && suffix == name
 }

@@ -211,3 +211,20 @@ func TestValidateEgressProxyListenerPorts(t *testing.T) {
 		require.NoError(t, r.ValidateEgress())
 	}
 }
+
+func TestValidateEgress_RejectsRegistrySuffixes(t *testing.T) {
+	for _, d := range []string{"com", ".com", "io", "CoM", "co.uk", ".co.uk", "com.au", "gov.uk", "k12.ca.us", "co..uk", "example..com"} {
+		t.Run("rejects "+d, func(t *testing.T) {
+			r := &Runner{HTTPEgress: []string{d}}
+			err := r.ValidateEgress()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "registry suffix")
+		})
+	}
+	for _, d := range []string{"example.com", ".example.com", "api.example.co.uk", ".neon.tech", "registry.internal.corp", ".github.io", "svc.cluster.local", "artifactory", "registry", "corp", "local"} {
+		t.Run("accepts "+d, func(t *testing.T) {
+			r := &Runner{HTTPEgress: []string{d}}
+			require.NoError(t, r.ValidateEgress())
+		})
+	}
+}

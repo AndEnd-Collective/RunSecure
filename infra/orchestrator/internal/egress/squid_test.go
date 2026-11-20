@@ -544,3 +544,25 @@ func TestRenderSquid_AllowedPrivateCIDR_MalformedSkipped(t *testing.T) {
 		t.Fatalf("http_access deny rs_private_dst must still be present after malformed CIDR skip:\n%s", out)
 	}
 }
+
+// TestRenderSquid_RegistrySuffixNeverEmitted proves the renderer drops an
+// entry that names a whole registry suffix, whether it arrives as an
+// http_egress domain or as a scope wildcard, even when the caller skipped
+// runneryml.ValidateEgress.
+func TestRenderSquid_RegistrySuffixNeverEmitted(t *testing.T) {
+	r := &runneryml.Runner{HTTPEgress: []string{"com", ".io", "co.uk", "api.example.com"}}
+	policy := security.Defaults("standard")
+	policy.WildcardEntries = []string{"*.net", "*.amazonaws.com"}
+
+	out := string(RenderSquid(r, policy))
+	for _, banned := range []string{"dstdomain .com\n", "dstdomain ..io\n", "dstdomain .io\n", "dstdomain .co.uk\n", "dstdomain .net\n"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("registry suffix must not be rendered (%q):\n%s", banned, out)
+		}
+	}
+	for _, kept := range []string{"dstdomain .api.example.com\n", "dstdomain .amazonaws.com\n"} {
+		if !strings.Contains(out, kept) {
+			t.Fatalf("registrable domain must still be rendered (%q):\n%s", kept, out)
+		}
+	}
+}

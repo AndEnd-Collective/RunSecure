@@ -111,6 +111,13 @@ _generate_squid_conf() {
             _log "WARNING: Skipping invalid domain: $domain"
             continue
         fi
+        # A single label such as 'com' would become a Squid match for an
+        # entire top-level domain. validate-schema.sh rejects it up front;
+        # this is the same check at the point the directive is written.
+        if [[ "${domain#.}" != *.* || "$domain" == *..* ]]; then
+            _log "WARNING: Skipping top-level-domain entry: $domain"
+            continue
+        fi
         _log "  + $domain"
         PROJECT_ACL="${PROJECT_ACL}acl project_egress dstdomain ${domain}\n"
     done <<< "$EGRESS_DOMAINS"
