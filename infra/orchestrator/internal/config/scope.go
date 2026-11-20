@@ -12,7 +12,7 @@ import (
 
 // SupportedAPIVersion is the only accepted apiVersion field value.
 // Bumping requires a migration guide for users.
-const SupportedAPIVersion = "runsecure.io/v1alpha1"
+const SupportedAPIVersion = "runsecure.ai/v1alpha1"
 
 // Scope is one orchestrator deployment unit. One Scope = one compose stack.
 type Scope struct {

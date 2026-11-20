@@ -44,7 +44,7 @@ for field in ['validations', 'matchConditions']:
 daemon = next(d for d in documents if d['kind']=='DaemonSet')
 spec = daemon['spec']['template']['spec']
 spec.pop('initContainers', None)
-spec['nodeSelector'].pop('runsecure.io/telemetry-render-only', None)
+spec['nodeSelector'].pop('runsecure.ai/telemetry-render-only', None)
 pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'runsecure-telemetry-admission-preflight', 'namespace': 'runsecure-observability-node'}, 'spec': spec}
 
 

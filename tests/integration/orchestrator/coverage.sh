@@ -170,7 +170,7 @@ EOF
 
 SCOPE_FILE="${WORK_DIR}/scope.yml"
 cat > "$SCOPE_FILE" <<EOF
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: cov-test
 global_max_runners: 1
 poll_interval_seconds: 60

@@ -70,27 +70,27 @@ func TestLabels_AllFourKeys(t *testing.T) {
 	for _, role := range []string{"runner", "proxy"} {
 		lbls := kube.Labels(in, role)
 		required := []string{
-			"runsecure.io/scope",
-			"runsecure.io/repo",
-			"runsecure.io/spawn-id",
-			"runsecure.io/role",
+			"runsecure.ai/scope",
+			"runsecure.ai/repo",
+			"runsecure.ai/spawn-id",
+			"runsecure.ai/role",
 		}
 		for _, k := range required {
 			if _, ok := lbls[k]; !ok {
 				t.Errorf("Labels(%q): missing key %q", role, k)
 			}
 		}
-		if lbls["runsecure.io/scope"] != in.Scope {
-			t.Errorf("Labels(%q): scope = %q, want %q", role, lbls["runsecure.io/scope"], in.Scope)
+		if lbls["runsecure.ai/scope"] != in.Scope {
+			t.Errorf("Labels(%q): scope = %q, want %q", role, lbls["runsecure.ai/scope"], in.Scope)
 		}
-		if lbls["runsecure.io/repo"] != strings.ReplaceAll(in.Repo, "/", "_") {
+		if lbls["runsecure.ai/repo"] != strings.ReplaceAll(in.Repo, "/", "_") {
 			t.Errorf("Labels(%q): repo value mismatch", role)
 		}
-		if lbls["runsecure.io/spawn-id"] != in.SpawnID {
-			t.Errorf("Labels(%q): spawn-id = %q, want %q", role, lbls["runsecure.io/spawn-id"], in.SpawnID)
+		if lbls["runsecure.ai/spawn-id"] != in.SpawnID {
+			t.Errorf("Labels(%q): spawn-id = %q, want %q", role, lbls["runsecure.ai/spawn-id"], in.SpawnID)
 		}
-		if lbls["runsecure.io/role"] != role {
-			t.Errorf("Labels(%q): role = %q, want %q", role, lbls["runsecure.io/role"], role)
+		if lbls["runsecure.ai/role"] != role {
+			t.Errorf("Labels(%q): role = %q, want %q", role, lbls["runsecure.ai/role"], role)
 		}
 	}
 }
@@ -117,7 +117,7 @@ func TestProxySecret_JITKeyDefaultMode(t *testing.T) {
 		}
 	}
 	// Annotations must record the spawn-id.
-	if s.Labels["runsecure.io/spawn-id"] != in.SpawnID {
+	if s.Labels["runsecure.ai/spawn-id"] != in.SpawnID {
 		t.Errorf("SpawnSecret missing spawn-id label")
 	}
 }
@@ -125,8 +125,8 @@ func TestProxySecret_JITKeyDefaultMode(t *testing.T) {
 func TestProxySecret_HasRunSecureLabels(t *testing.T) {
 	in := testInput()
 	s := kube.SpawnSecret(in, nil, nil, nil)
-	if s.Labels["runsecure.io/role"] != "proxy" {
-		t.Errorf("SpawnSecret role label = %q, want proxy", s.Labels["runsecure.io/role"])
+	if s.Labels["runsecure.ai/role"] != "proxy" {
+		t.Errorf("SpawnSecret role label = %q, want proxy", s.Labels["runsecure.ai/role"])
 	}
 }
 
@@ -209,8 +209,8 @@ func TestProxyPod_NoHostNamespaces(t *testing.T) {
 func TestProxyPod_Labels(t *testing.T) {
 	in := testInput()
 	pod := kube.ProxyPod(in, "rs-secret-"+in.SpawnID)
-	if pod.Labels["runsecure.io/role"] != "proxy" {
-		t.Errorf("ProxyPod: role label = %q, want proxy", pod.Labels["runsecure.io/role"])
+	if pod.Labels["runsecure.ai/role"] != "proxy" {
+		t.Errorf("ProxyPod: role label = %q, want proxy", pod.Labels["runsecure.ai/role"])
 	}
 }
 
@@ -324,8 +324,8 @@ func TestRunnerPod_SingleContainer(t *testing.T) {
 func TestRunnerPod_Labels(t *testing.T) {
 	in := testInput()
 	pod := kube.RunnerPod(in, "rs-secret-"+in.SpawnID, "proxy.svc")
-	if pod.Labels["runsecure.io/role"] != "runner" {
-		t.Errorf("RunnerPod: role label = %q, want runner", pod.Labels["runsecure.io/role"])
+	if pod.Labels["runsecure.ai/role"] != "runner" {
+		t.Errorf("RunnerPod: role label = %q, want runner", pod.Labels["runsecure.ai/role"])
 	}
 }
 
@@ -624,11 +624,11 @@ func TestProxyService_NoDNSPortWhenDisabled(t *testing.T) {
 func TestProxyService_SelectorMatchesProxyRole(t *testing.T) {
 	in := testInput()
 	svc := kube.ProxyService(in)
-	if svc.Spec.Selector["runsecure.io/role"] != "proxy" {
-		t.Errorf("ProxyService selector role = %q, want proxy", svc.Spec.Selector["runsecure.io/role"])
+	if svc.Spec.Selector["runsecure.ai/role"] != "proxy" {
+		t.Errorf("ProxyService selector role = %q, want proxy", svc.Spec.Selector["runsecure.ai/role"])
 	}
-	if svc.Spec.Selector["runsecure.io/spawn-id"] != in.SpawnID {
-		t.Errorf("ProxyService selector spawn-id = %q, want %q", svc.Spec.Selector["runsecure.io/spawn-id"], in.SpawnID)
+	if svc.Spec.Selector["runsecure.ai/spawn-id"] != in.SpawnID {
+		t.Errorf("ProxyService selector spawn-id = %q, want %q", svc.Spec.Selector["runsecure.ai/spawn-id"], in.SpawnID)
 	}
 }
 
@@ -797,8 +797,8 @@ func TestRunnerEgressNetworkPolicy_ToProxyAndClusterDNSOnly(t *testing.T) {
 	}
 	proxyPeer := pol.Spec.Egress[0].To[0]
 	if proxyPeer.PodSelector == nil ||
-		proxyPeer.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" ||
-		proxyPeer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+		proxyPeer.PodSelector.MatchLabels["runsecure.ai/role"] != "proxy" ||
+		proxyPeer.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != in.SpawnID {
 		t.Errorf("RunnerEgress: proxy peer is not pinned to this spawn: %+v", proxyPeer)
 	}
 	dnsPeers := pol.Spec.Egress[1].To
@@ -864,8 +864,8 @@ func TestRunnerEgressNetworkPolicy_NoDNSPortWhenDisabled(t *testing.T) {
 func TestRunnerEgressNetworkPolicy_PodSelectorIsRunner(t *testing.T) {
 	in := testInput()
 	pol := kube.RunnerEgressNetworkPolicy(in)
-	if pol.Spec.PodSelector.MatchLabels["runsecure.io/role"] != "runner" {
-		t.Errorf("RunnerEgress: podSelector role = %q, want runner", pol.Spec.PodSelector.MatchLabels["runsecure.io/role"])
+	if pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"] != "runner" {
+		t.Errorf("RunnerEgress: podSelector role = %q, want runner", pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"])
 	}
 }
 
@@ -884,8 +884,8 @@ func TestRunnerEgressNetworkPolicy_Namespace(t *testing.T) {
 func TestProxyEgressNetworkPolicy_PodSelectorIsProxy(t *testing.T) {
 	in := testInput()
 	pol := kube.ProxyEgressNetworkPolicy(in)
-	if pol.Spec.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" {
-		t.Errorf("ProxyEgress: podSelector role = %q, want proxy", pol.Spec.PodSelector.MatchLabels["runsecure.io/role"])
+	if pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"] != "proxy" {
+		t.Errorf("ProxyEgress: podSelector role = %q, want proxy", pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"])
 	}
 }
 
@@ -983,13 +983,13 @@ func TestProxyIngressNetworkPolicy_PodSelectorIsProxyThisSpawn(t *testing.T) {
 	in := testInput()
 	pol := kube.ProxyIngressNetworkPolicy(in)
 
-	if pol.Spec.PodSelector.MatchLabels["runsecure.io/role"] != "proxy" {
+	if pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"] != "proxy" {
 		t.Errorf("ProxyIngress: podSelector role = %q, want proxy",
-			pol.Spec.PodSelector.MatchLabels["runsecure.io/role"])
+			pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"])
 	}
-	if pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+	if pol.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != in.SpawnID {
 		t.Errorf("ProxyIngress: podSelector spawn-id = %q, want %q",
-			pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"], in.SpawnID)
+			pol.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"], in.SpawnID)
 	}
 }
 
@@ -1009,15 +1009,15 @@ func TestProxyIngressNetworkPolicy_FromSelectorIsRunnerSameSpawn(t *testing.T) {
 			t.Errorf("ProxyIngress: From peer must have podSelector, got %+v", peer)
 			continue
 		}
-		if peer.PodSelector.MatchLabels["runsecure.io/role"] != "runner" {
+		if peer.PodSelector.MatchLabels["runsecure.ai/role"] != "runner" {
 			t.Errorf("ProxyIngress: From peer role = %q, want runner",
-				peer.PodSelector.MatchLabels["runsecure.io/role"])
+				peer.PodSelector.MatchLabels["runsecure.ai/role"])
 		}
 		// Cross-spawn isolation: the From selector must pin the same spawn-id
 		// so runners from other spawns cannot reach this proxy.
-		if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != in.SpawnID {
+		if peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != in.SpawnID {
 			t.Errorf("ProxyIngress: From peer spawn-id = %q, want %q (cross-spawn isolation violated)",
-				peer.PodSelector.MatchLabels["runsecure.io/spawn-id"], in.SpawnID)
+				peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"], in.SpawnID)
 		}
 	}
 }
@@ -1080,32 +1080,32 @@ func TestProxyIngressNetworkPolicy_CrossSpawnIsolation(t *testing.T) {
 	polB := kube.ProxyIngressNetworkPolicy(inB)
 
 	// polA must target spawnA's proxy and allow only spawnA's runner.
-	if polA.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-aaa" {
+	if polA.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != "spawn-aaa" {
 		t.Errorf("polA podSelector spawn-id = %q, want spawn-aaa",
-			polA.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+			polA.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"])
 	}
 	for _, rule := range polA.Spec.Ingress {
 		for _, peer := range rule.From {
 			if peer.PodSelector != nil {
-				if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-aaa" {
+				if peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != "spawn-aaa" {
 					t.Errorf("polA From spawn-id = %q, want spawn-aaa (cross-spawn isolation broken)",
-						peer.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+						peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"])
 				}
 			}
 		}
 	}
 
 	// polB must target spawnB's proxy and allow only spawnB's runner.
-	if polB.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-bbb" {
+	if polB.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != "spawn-bbb" {
 		t.Errorf("polB podSelector spawn-id = %q, want spawn-bbb",
-			polB.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+			polB.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"])
 	}
 	for _, rule := range polB.Spec.Ingress {
 		for _, peer := range rule.From {
 			if peer.PodSelector != nil {
-				if peer.PodSelector.MatchLabels["runsecure.io/spawn-id"] != "spawn-bbb" {
+				if peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"] != "spawn-bbb" {
 					t.Errorf("polB From spawn-id = %q, want spawn-bbb (cross-spawn isolation broken)",
-						peer.PodSelector.MatchLabels["runsecure.io/spawn-id"])
+						peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"])
 				}
 			}
 		}
@@ -1123,12 +1123,12 @@ func TestProxyIngressNetworkPolicy_NoEgressRules(t *testing.T) {
 func TestProxyIngressNetworkPolicy_ObjectMetaLabels(t *testing.T) {
 	in := testInput()
 	pol := kube.ProxyIngressNetworkPolicy(in)
-	if pol.Labels["runsecure.io/role"] != "proxy" {
-		t.Errorf("ProxyIngress: role label = %q, want proxy", pol.Labels["runsecure.io/role"])
+	if pol.Labels["runsecure.ai/role"] != "proxy" {
+		t.Errorf("ProxyIngress: role label = %q, want proxy", pol.Labels["runsecure.ai/role"])
 	}
-	if pol.Labels["runsecure.io/spawn-id"] != in.SpawnID {
+	if pol.Labels["runsecure.ai/spawn-id"] != in.SpawnID {
 		t.Errorf("ProxyIngress: spawn-id label = %q, want %q",
-			pol.Labels["runsecure.io/spawn-id"], in.SpawnID)
+			pol.Labels["runsecure.ai/spawn-id"], in.SpawnID)
 	}
 }
 

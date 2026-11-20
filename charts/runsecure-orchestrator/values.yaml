@@ -71,7 +71,7 @@ kubernetesNetwork:
 # ---------------------------------------------------------------------------
 scope:
   # A short, lowercase name used for the namespace (runsecure-<name>)
-  # and all runsecure.io/* labels. Required.
+  # and all runsecure.ai/* labels. Required.
   name: "default"
   description: "Default scope"
 

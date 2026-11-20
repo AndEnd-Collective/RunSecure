@@ -351,7 +351,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      runsecure.io/runtime-reconcile-check: "true"
+      runsecure.ai/runtime-reconcile-check: "true"
   policyTypes:
     - Ingress
     - Egress

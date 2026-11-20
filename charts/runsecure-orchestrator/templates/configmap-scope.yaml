@@ -12,7 +12,7 @@ metadata:
     {{- include "runsecure-orchestrator.labels" . | nindent 4 }}
 data:
   scope.yml: |
-    apiVersion: runsecure.io/v1alpha1
+    apiVersion: runsecure.ai/v1alpha1
     name: {{ .Values.scope.name | quote }}
     description: {{ .Values.scope.description | quote }}
     global_max_runners: {{ .Values.scope.globalMaxRunners }}

@@ -1,7 +1,7 @@
 # Proxy Service — matches ProxyService() builder output:
 #   name: rs-proxy-svc-<spawnID>  →  rs-proxy-svc-spawn01
 #   namespace: runsecure-itest
-#   selector: runsecure.io/role=proxy, runsecure.io/spawn-id=spawn01
+#   selector: runsecure.ai/role=proxy, runsecure.ai/spawn-id=spawn01
 #   port: 3128/TCP (ClusterIP)
 apiVersion: v1
 kind: Service
@@ -9,15 +9,15 @@ metadata:
   name: rs-proxy-svc-spawn01
   namespace: runsecure-itest
   labels:
-    runsecure.io/scope: itest
-    runsecure.io/repo: test_repo
-    runsecure.io/spawn-id: spawn01
-    runsecure.io/role: proxy
+    runsecure.ai/scope: itest
+    runsecure.ai/repo: test_repo
+    runsecure.ai/spawn-id: spawn01
+    runsecure.ai/role: proxy
 spec:
   type: ClusterIP
   selector:
-    runsecure.io/role: proxy
-    runsecure.io/spawn-id: spawn01
+    runsecure.ai/role: proxy
+    runsecure.ai/spawn-id: spawn01
   ports:
     - name: squid
       protocol: TCP

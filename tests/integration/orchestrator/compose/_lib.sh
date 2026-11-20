@@ -119,7 +119,7 @@ EOF
   fi
   if [[ ! -f "${TESTDATA_DIR}/scope.yml" ]]; then
     cat > "${TESTDATA_DIR}/scope.yml" <<'EOF'
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: test
 global_max_runners: 3
 poll_interval_seconds: 5

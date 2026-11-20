@@ -26,7 +26,7 @@ gateway:
   image: {repository: "", digest: ""}
   storageClassName: ""
   storageSize: 10Gi
-  nodeSelector: {runsecure.io/pool: management}
+  nodeSelector: {runsecure.ai/pool: management}
 nodeReader:
   image: {repository: "", digest: ""}
   # Phase 1 installs a Restricted namespace/admission guard; phase 2 activates

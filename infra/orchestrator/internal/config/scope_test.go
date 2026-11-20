@@ -24,7 +24,7 @@ func TestLoad_ValidScope(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(projDir, ".github", "runner.yml"), []byte("runtime: node:24\n"), 0o644))
 
 	yml := `
-apiVersion: runsecure.io/v1alpha1
+apiVersion: runsecure.ai/v1alpha1
 name: datacentric
 description: test
 global_max_runners: 8
@@ -70,9 +70,21 @@ func TestLoad_MissingApiVersion(t *testing.T) {
 func TestLoad_UnsupportedApiVersion(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "scope.yml")
-	require.NoError(t, os.WriteFile(path, []byte("apiVersion: runsecure.io/v2\nname: x\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: runsecure.ai/v2\nname: x\n"), 0o644))
 	_, err := Load(path)
 	require.ErrorContains(t, err, "unsupported apiVersion")
+}
+
+// The identifier domain moved from runsecure.io to runsecure.ai with no
+// fallback. A scope file still on the old apiVersion must be refused with an
+// error that names the value to change it to.
+func TestLoad_RejectsRetiredIdentifierDomain(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scope.yml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: runsecure.io/v1alpha1\nname: x\n"), 0o644))
+	_, err := Load(path)
+	require.ErrorContains(t, err, `unsupported apiVersion "runsecure.io/v1alpha1"`)
+	require.ErrorContains(t, err, "expected runsecure.ai/v1alpha1")
 }
 
 func TestLoad_FileNotFound(t *testing.T) {

@@ -197,9 +197,9 @@ func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 
 	// Must target the proxy pod of this spawn.
 	require.NotNil(t, pol.Spec.PodSelector.MatchLabels)
-	assert.Equal(t, "proxy", pol.Spec.PodSelector.MatchLabels["runsecure.io/role"],
+	assert.Equal(t, "proxy", pol.Spec.PodSelector.MatchLabels["runsecure.ai/role"],
 		"proxy-ingress podSelector must select role=proxy")
-	assert.Equal(t, in.SpawnID, pol.Spec.PodSelector.MatchLabels["runsecure.io/spawn-id"],
+	assert.Equal(t, in.SpawnID, pol.Spec.PodSelector.MatchLabels["runsecure.ai/spawn-id"],
 		"proxy-ingress podSelector must pin this spawn-id")
 
 	// Must have Ingress type only.
@@ -213,9 +213,9 @@ func TestSpawn_CreatesProxyIngressPolicy(t *testing.T) {
 	require.NotEmpty(t, rule.From, "proxy-ingress rule must have From peers")
 	peer := rule.From[0]
 	require.NotNil(t, peer.PodSelector, "proxy-ingress From peer must have podSelector")
-	assert.Equal(t, "runner", peer.PodSelector.MatchLabels["runsecure.io/role"],
+	assert.Equal(t, "runner", peer.PodSelector.MatchLabels["runsecure.ai/role"],
 		"proxy-ingress From must select role=runner")
-	assert.Equal(t, in.SpawnID, peer.PodSelector.MatchLabels["runsecure.io/spawn-id"],
+	assert.Equal(t, in.SpawnID, peer.PodSelector.MatchLabels["runsecure.ai/spawn-id"],
 		"proxy-ingress From must pin the same spawn-id (cross-spawn isolation)")
 }
 
@@ -382,8 +382,8 @@ func TestTeardown_ReportsAllIndependentCleanupFailures(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: "rs-secret-spawn-cleanup-errors", Namespace: "runsecure-cleanup-errors",
 		Labels: map[string]string{
-			"runsecure.io/scope": "cleanup-errors", "runsecure.io/repo": "owner_repo",
-			"runsecure.io/spawn-id": "spawn-cleanup-errors", "runsecure.io/role": "proxy",
+			"runsecure.ai/scope": "cleanup-errors", "runsecure.ai/repo": "owner_repo",
+			"runsecure.ai/spawn-id": "spawn-cleanup-errors", "runsecure.ai/role": "proxy",
 		},
 	}}
 	cs := fake.NewSimpleClientset(secret)
