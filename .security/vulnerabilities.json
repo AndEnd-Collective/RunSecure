@@ -1,0 +1,24 @@
+[
+ {
+  "assessment": {
+   "reason": "HTTP/2 Rapid Reset was fixed in golang.org/x/net v0.17.0 (October 2023). Every module here requires a release far newer than that. dep-scan's record for this CVE carries a malformed version range that matches every version, so it flags any x/net.",
+   "reference": "https://pkg.go.dev/vuln/GO-2023-2102",
+   "verdict": "false_positive"
+  },
+  "depth": 1,
+  "id": "CVE-2023-44487",
+  "insights": "Direct dependency",
+  "module": "infra/orchestrator",
+  "package": "golang.org/x/net@v0.63.0",
+  "path": [
+   "github.com/andend-collective/runsecure/infra/orchestrator",
+   "golang.org/x/net@v0.63.0"
+  ],
+  "prioritized": false,
+  "purl": "pkg:golang/golang.org/x/net@v0.63.0",
+  "recommendation": "Update to version 02ffe176916ae3df148a8741b2de64c4d1dbfa17.",
+  "severity": "high",
+  "tracker": "https://github.com/golang/go/issues",
+  "upstream": "The Go project (golang.org/x sub-repositories)"
+ }
+]

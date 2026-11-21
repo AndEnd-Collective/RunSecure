@@ -1,0 +1,33 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [
+  {
+   "bom-ref": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "name": "github.com/AndEnd-Collective/runsecure/infra/telemetry",
+   "purl": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "scope": "required",
+   "type": "library"
+  }
+ ],
+ "dependencies": [
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry"
+   ],
+   "ref": "pkg:golang/github.com/andend-collective/runsecure/infra/socket-proxy"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry"
+  }
+ ],
+ "metadata": {
+  "component": {
+   "bom-ref": "pkg:golang/github.com/andend-collective/runsecure/infra/socket-proxy",
+   "name": "github.com/AndEnd-Collective/runsecure/infra/socket-proxy",
+   "purl": "pkg:golang/github.com/andend-collective/runsecure/infra/socket-proxy",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}

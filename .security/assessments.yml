@@ -1,0 +1,37 @@
+# ============================================================================
+# RunSecure — reviewed advisory assessments
+# ============================================================================
+# OWASP dep-scan matches advisories against dependency names and versions. A
+# match is where triage starts, not a conclusion: some matches are wrong
+# (bad range data in the database), and some are right about the package but
+# not about us (the vulnerable code is never built, or cannot be reached).
+#
+# When a maintainer has worked one out, the conclusion is recorded here so
+# .security/STATUS.md can show it next to the match, with the reason and a
+# reference anyone can check. An entry never hides a match: the advisory stays
+# listed, under "Assessed".
+#
+# Fields
+#   id         advisory ID exactly as dep-scan reports it
+#   package    module path the assessment applies to (prefix match)
+#   verdict    false_positive   the version we use is not in the affected range
+#              not_applicable   the vulnerable code is not built into anything we ship
+#              not_exploitable  present, but unreachable in RunSecure's threat model
+#              accepted         real and reachable; accepted until `review_by`
+#   reason     one or two sentences a reader can verify
+#   reference  where to verify it
+#
+# Remove an entry when the match disappears: STATUS.md lists assessments that
+# no longer match anything, and the test suite fails on them.
+# ============================================================================
+
+assessments:
+  - id: CVE-2023-44487
+    package: golang.org/x/net
+    verdict: false_positive
+    reason: >-
+      HTTP/2 Rapid Reset was fixed in golang.org/x/net v0.17.0 (October 2023).
+      Every module here requires a release far newer than that. dep-scan's
+      record for this CVE carries a malformed version range that matches every
+      version, so it flags any x/net.
+    reference: https://pkg.go.dev/vuln/GO-2023-2102

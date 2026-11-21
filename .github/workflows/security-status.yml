@@ -1,0 +1,207 @@
+# ============================================================================
+# RunSecure — Security Status
+# ============================================================================
+# Regenerates .security/ every night: a CycloneDX SBOM per Go module (cdxgen),
+# an OWASP dep-scan match of each against known advisories, and the summary
+# files a reader starts from (.security/STATUS.md, dependencies.md).
+#
+# The generated files are deterministic, so a pull request is opened only
+# when something actually changed: a dependency moved, an advisory appeared
+# or was resolved, a pin was bumped. That pull request is merged without a
+# human once CI is green, the same way the other bot pull requests are.
+#
+# Three jobs, split by what each is allowed to hold:
+#
+#   scan    runs cdxgen and dep-scan (third-party tools, and the Go toolchain
+#           over our dependencies). Read-only token, no secret. Its only
+#           output is the regenerated .security/ directory, as an artifact.
+#   pr      holds RELEASE_TOKEN. Runs no third-party tool: it takes the
+#           artifact, refuses anything outside the generated files, and opens
+#           the pull request. RELEASE_TOKEN rather than GITHUB_TOKEN so the
+#           pull request's checks start without manual approval.
+#   merge   holds RELEASE_TOKEN. Waits for the checks and merges.
+#
+# The generated set is exactly: STATUS.md, dependencies.md,
+# vulnerabilities.json and sbom/*.cdx.json. upstreams.yml, assessments.yml and
+# README.md in the same directory are written by maintainers and are never
+# touched here.
+# ============================================================================
+
+name: security-status
+
+on:
+  schedule:
+    # After the nightly dependency refresh (00:30) has had time to merge.
+    - cron: '30 5 * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: security-status
+  cancel-in-progress: false
+
+env:
+  CDXGEN_VERSION: 13.8.0
+  DEPSCAN_VERSION: 6.3.2
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+
+      - name: Install cdxgen and OWASP dep-scan
+        run: |
+          set -euo pipefail
+          npm install --global --no-fund --no-audit "@cdxgen/cdxgen@${CDXGEN_VERSION}"
+          python3 -m venv "$RUNNER_TEMP/depscan"
+          "$RUNNER_TEMP/depscan/bin/pip" install --quiet "owasp-depscan==${DEPSCAN_VERSION}" pyyaml
+          echo "$RUNNER_TEMP/depscan/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate .security
+        run: |
+          set -euo pipefail
+          cdxgen --version | tail -1
+          depscan --version
+          bash infra/scripts/generate-security-status.sh
+
+      - name: Detect whether anything changed
+        id: diff
+        run: |
+          set -euo pipefail
+          git add --intent-to-add -- .security
+          if git diff --quiet -- .security; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No change to .security; nothing to publish."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- .security
+          fi
+
+      - name: Hand the regenerated files to the pull request job
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-status
+          path: |
+            .security/STATUS.md
+            .security/dependencies.md
+            .security/vulnerabilities.json
+            .security/sbom/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+  pr:
+    needs: scan
+    if: needs.scan.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pr_url: ${{ steps.open-pr.outputs.pr_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Download the regenerated files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: security-status
+          path: ${{ runner.temp }}/security-status
+
+      - name: Open the status pull request
+        id: open-pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GENERATED: ${{ runner.temp }}/security-status
+        run: |
+          set -euo pipefail
+          # The artifact comes from the job that ran third-party tools, so it
+          # is untrusted here. Only the generated set may be replaced, and
+          # only with regular files.
+          while IFS= read -r -d '' path; do
+            relative="${path#"$GENERATED"/}"
+            case "$relative" in
+              STATUS.md | dependencies.md | vulnerabilities.json) ;;
+              sbom/*.cdx.json)
+                if [[ "$relative" == */*/* || "$relative" == *..* ]]; then
+                  echo "::error title=Status artifact rejected::unexpected path ${relative}"
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "::error title=Status artifact rejected::${relative} is not a generated status file"
+                exit 1
+                ;;
+            esac
+            if [[ -L "$path" || ! -f "$path" ]]; then
+              echo "::error title=Status artifact rejected::${relative} is not a regular file"
+              exit 1
+            fi
+          done < <(find "$GENERATED" -mindepth 1 \( -type f -o -type l \) -print0)
+
+          for required in STATUS.md dependencies.md vulnerabilities.json; do
+            if [[ ! -s "$GENERATED/$required" ]]; then
+              echo "::error title=Status artifact rejected::${required} is missing or empty"
+              exit 1
+            fi
+          done
+
+          rm -f .security/sbom/*.cdx.json
+          mkdir -p .security/sbom
+          cp "$GENERATED/STATUS.md" "$GENERATED/dependencies.md" "$GENERATED/vulnerabilities.json" .security/
+          if compgen -G "$GENERATED/sbom/*.cdx.json" > /dev/null; then
+            cp "$GENERATED"/sbom/*.cdx.json .security/sbom/
+          fi
+
+          git add -- .security/STATUS.md .security/dependencies.md .security/vulnerabilities.json .security/sbom
+          if git diff --cached --quiet; then
+            echo "Nothing to commit after applying the artifact."
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          BRANCH="bot/security-status-${GITHUB_RUN_ID}"
+          git commit -m "chore(security): refresh dependency and vulnerability status"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          PR_OUTPUT=$(gh pr create \
+            --title "chore(security): refresh dependency and vulnerability status" \
+            --body "Regenerated \`.security/\` from the nightly OWASP dep-scan run. Only generated files change: \`STATUS.md\`, \`dependencies.md\`, \`vulnerabilities.json\` and \`sbom/\`. Merged automatically once CI is green." \
+            --base main --head "$BRANCH")
+          printf '%s\n' "$PR_OUTPUT"
+          echo "pr_url=$(tail -n 1 <<<"$PR_OUTPUT")" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: pr
+    if: needs.pr.outputs.pr_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Merge the status refresh once its checks pass
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PR_URL: ${{ needs.pr.outputs.pr_url }}
+        # validate.yml always runs and reports four jobs.
+        run: bash infra/scripts/merge-pr-when-green.sh "$PR_URL" 4

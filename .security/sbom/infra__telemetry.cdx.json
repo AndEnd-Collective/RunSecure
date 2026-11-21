@@ -1,0 +1,14 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [],
+ "dependencies": [],
+ "metadata": {
+  "component": {
+   "bom-ref": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "name": "github.com/AndEnd-Collective/runsecure/infra/telemetry",
+   "purl": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}
