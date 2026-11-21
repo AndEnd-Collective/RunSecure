@@ -29,7 +29,7 @@ REFERENCE = re.compile(
     r"python(?:-build)?|rust(?:-build)?|socket-proxy)"
     r"@sha256:[0-9a-f]{64}$"
 )
-RELEASE = re.compile(r"^(?:[0-9]+\.[0-9]+\.[0-9]+|manual-build)$")
+RELEASE = re.compile(r"^(?:[0-9]+\.[0-9]+\.[0-9]+|manual-build|nightly)$")
 BUILD_SHA = re.compile(r"^[0-9a-f]{40,64}$")
 
 
