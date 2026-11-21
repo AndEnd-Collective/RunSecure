@@ -215,6 +215,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      pr_url: ${{ steps.open-pr.outputs.pr_url }}
     steps:
       - name: Fail on a certify infrastructure error
         if: needs.certify.result != 'success'
@@ -264,6 +266,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open the pin-bump PR
+        id: open-pr
         if: steps.verdict.outputs.certified == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -306,10 +309,14 @@ jobs:
             printf '%s\n' "The pin is only ever moved by this workflow, and only after every published architecture certifies, so rust can never get ahead of what the release gate can prove."
           } > /tmp/rust-pr-body.md
 
-          if gh pr create \
+          if PR_OUTPUT=$(gh pr create \
             --base main --head "$BRANCH" \
             --title "chore(rust): certify and pin toolchain ${CANDIDATE}" \
-            --body-file /tmp/rust-pr-body.md; then
+            --body-file /tmp/rust-pr-body.md); then
+            printf '%s\n' "$PR_OUTPUT"
+            # gh prints the new pull request's URL as its last line; the merge
+            # job below lands it once its checks pass.
+            echo "pr_url=$(tail -n 1 <<<"$PR_OUTPUT")" >> "$GITHUB_OUTPUT"
             {
               echo "### Rust ${CANDIDATE} certified on amd64 + arm64"
               echo
@@ -318,3 +325,26 @@ jobs:
           else
             echo "::warning::pin bump pushed to ${BRANCH} but PR creation failed"
           fi
+
+  # Land the pin bump without a human: wait for every check on the PR and
+  # merge it when they are all green. The PR is opened with RELEASE_TOKEN, so
+  # its workflow runs start without manual approval; CI is the gate.
+  merge:
+    needs: bump
+    if: always() && needs.bump.outputs.pr_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Merge the pin bump once its checks pass
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PR_URL: ${{ needs.bump.outputs.pr_url }}
+        # validate.yml always runs and reports four jobs; the image workflows
+        # triggered by images/rust.Dockerfile add more.
+        run: bash infra/scripts/merge-pr-when-green.sh "$PR_URL" 4

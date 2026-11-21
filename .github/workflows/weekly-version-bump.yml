@@ -194,12 +194,19 @@ jobs:
   #   go-deps-build  runs the Go toolchain. Read-only token, checkout does not
   #                  persist it, no secret is referenced. Its only output is a
   #                  patch of go.mod / go.sum.
-  #   go-deps-pr     holds the write token. It never runs Go or anything from
+  #   go-deps-pr     holds RELEASE_TOKEN. It never runs Go or anything from
   #                  the refreshed modules: it checks that the patch touches
   #                  nothing but go.mod / go.sum of the listed modules,
   #                  applies it and opens the PR.
+  #   go-deps-merge  holds RELEASE_TOKEN. Runs one repo script that waits for
+  #                  the PR's checks and merges it when all of them passed.
   #
-  # RELEASE_TOKEN stays in `bump` alone, which runs only git.
+  # The PR is pushed and opened with RELEASE_TOKEN, not GITHUB_TOKEN, on
+  # purpose: a pull request opened by GITHUB_TOKEN has its workflow runs held
+  # for manual approval, which left every weekly refresh waiting on a person.
+  # With the PAT the checks start on their own, and go-deps-merge lands the
+  # refresh once they are green. No step of the release train waits for a
+  # human; CI is the gate.
   # --------------------------------------------------------------------------
   go-deps-build:
     needs: bump
@@ -300,11 +307,16 @@ jobs:
     if: github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     permissions:
-      # Push the bot/go-deps-* branch, delete superseded ones, open the PR.
-      contents: write
-      pull-requests: write
+      # Branch pushes and the PR itself go through RELEASE_TOKEN. The job
+      # token only reads: the checkout, and the open-PR lookup when pruning.
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_url: ${{ steps.open-pr.outputs.pr_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Download dependency patch
         if: needs.go-deps-build.outputs.changed == 'true'
@@ -314,9 +326,10 @@ jobs:
           path: ${{ runner.temp }}/go-deps
 
       - name: Open the Go dependency refresh PR
+        id: open-pr
         if: needs.go-deps-build.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NEXT_VERSION: ${{ needs.bump.outputs.version }}
           GO_DEPS_PATCH: ${{ runner.temp }}/go-deps/go-deps.patch
         run: |
@@ -365,6 +378,8 @@ jobs:
             --body "Automated 'go get -u -t ./...' followed by 'go mod tidy' on six Go modules (orchestrator, socket-proxy, telemetry, collector admission tests, corner-lint, compose mock-github) so dependencies never go stale between releases. A separate credential-free job ran build + vet + test on every module, so this PR compiles; CI — including the per-image Grype scans — gates it as well." \
             --base main --head "$BRANCH" 2>&1); then
             printf '%s\n' "$PR_OUTPUT"
+            # gh prints the new pull request's URL as its last line.
+            echo "pr_url=$(tail -n 1 <<<"$PR_OUTPUT")" >> "$GITHUB_OUTPUT"
             exit 0
           else
             PR_STATUS=$?
@@ -396,3 +411,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXT_VERSION: ${{ needs.bump.outputs.version }}
         run: bash infra/scripts/prune-bot-branches.sh bot/go-deps- "bot/go-deps-${NEXT_VERSION}"
+
+  # Land the refresh without a human: wait for every check on the PR and merge
+  # it when they are all green. A failed or missing check leaves it open.
+  go-deps-merge:
+    needs: go-deps-pr
+    if: needs.go-deps-pr.outputs.pr_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Merge the refresh once its checks pass
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PR_URL: ${{ needs.go-deps-pr.outputs.pr_url }}
+        # validate.yml always runs and reports four jobs; path-filtered
+        # workflows add more. Four is the floor below which "no failures"
+        # cannot be told apart from "nothing ran".
+        run: bash infra/scripts/merge-pr-when-green.sh "$PR_URL" 4

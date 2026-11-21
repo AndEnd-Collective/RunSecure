@@ -16,9 +16,8 @@
 # `nightly` job only after every scan job has passed.
 #
 # Production tags (`<version>` and `latest`) are NOT created here.
-# They are added manually by promote-to-stable.yml after automatic
-# post-publish acceptance and live multi-runner acceptance. Same digest,
-# server-side retag — no rebuild.
+# promote-to-stable.yml adds them, unattended, once post-publish acceptance
+# has passed for this run. Same digest, server-side retag — no rebuild.
 # ============================================================================
 
 name: Publish Images
@@ -67,12 +66,10 @@ jobs:
   # What still protects the registry, with no human in the loop:
   #   - this workflow only publishes MUTABLE staging tags
   #     (`<version>-canary`, and `nightly` once every scan has passed). The
-  #     stable `<version>` and `latest`
-  #     tags are created only by promote-to-stable.yml, which is
-  #     workflow_dispatch-only and requires an operator to supply the
-  #     post-publish and live-acceptance run IDs by hand. An unattended
-  #     publish therefore can never move `latest`; the human decision was
-  #     always at promotion, and this gate only duplicated it.
+  #     stable `<version>` and `latest` tags are created only by
+  #     promote-to-stable.yml, and only after post-publish-acceptance has
+  #     passed against the exact manifest this run produced. A publish whose
+  #     scans or acceptance fail therefore never moves `latest`.
   #   - the "Prove the release tag is already merged to main" step below
   #     rejects any tag whose commit is not an ancestor of main, so a pushed
   #     tag cannot publish unreviewed code.
