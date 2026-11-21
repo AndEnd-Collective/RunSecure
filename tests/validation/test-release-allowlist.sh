@@ -307,9 +307,12 @@ assert weekly_text.index("Require the release cascade token") < weekly_text.inde
 # third-party modules: `go get -u` + `go build` / `go test` execute it.
 #   bump           holds RELEASE_TOKEN, runs no Go
 #   go-deps-build  runs Go, holds no credential
-#   go-deps-pr     holds the write token, runs no Go
+#   go-deps-pr     holds RELEASE_TOKEN, runs no Go
+#   go-deps-merge  holds RELEASE_TOKEN, runs no Go
+# The PR is opened and merged with RELEASE_TOKEN so that no step waits for a
+# human: a GITHUB_TOKEN pull request has its workflow runs held for approval.
 weekly_jobs = weekly["jobs"]
-assert set(weekly_jobs) == {"bump", "go-deps-build", "go-deps-pr"}, set(weekly_jobs)
+assert set(weekly_jobs) == {"bump", "go-deps-build", "go-deps-pr", "go-deps-merge"}, set(weekly_jobs)
 
 def job_text(name):
     return "\n".join(str(step) for step in weekly_jobs[name]["steps"])
@@ -339,10 +342,24 @@ assert build_checkouts[0]["with"]["persist-credentials"] is False
 assert "env" not in build_job
 
 pr_job = weekly_jobs["go-deps-pr"]
-assert not runs_go("go-deps-pr"), "go-deps-pr holds a write token and must not run the Go toolchain"
-assert "RELEASE_TOKEN" not in job_text("go-deps-pr")
-assert pr_job["permissions"] == {"contents": "write", "pull-requests": "write"}
+assert not runs_go("go-deps-pr"), "go-deps-pr holds RELEASE_TOKEN and must not run the Go toolchain"
+assert pr_job["permissions"] == {"contents": "read", "pull-requests": "read"}
 assert set(pr_job["needs"]) == {"bump", "go-deps-build"}
+pr_step = next(step for step in pr_job["steps"] if step.get("id") == "open-pr")
+assert pr_step["env"]["GH_TOKEN"] == "${{ secrets.RELEASE_TOKEN }}", "a GITHUB_TOKEN pull request needs manual workflow approval"
+assert pr_job["outputs"]["pr_url"] == "${{ steps.open-pr.outputs.pr_url }}"
+
+merge_job = weekly_jobs["go-deps-merge"]
+assert not runs_go("go-deps-merge"), "go-deps-merge holds RELEASE_TOKEN and must not run the Go toolchain"
+assert merge_job["needs"] == "go-deps-pr"
+assert merge_job["if"] == "needs.go-deps-pr.outputs.pr_url != ''"
+assert merge_job["permissions"] == {"contents": "read"}
+merge_steps = [step for step in merge_job["steps"] if "run" in step]
+assert len(merge_steps) == 1
+assert merge_steps[0]["run"] == 'bash infra/scripts/merge-pr-when-green.sh "$PR_URL" 4'
+assert merge_steps[0]["env"]["GH_TOKEN"] == "${{ secrets.RELEASE_TOKEN }}"
+for name, job in weekly_jobs.items():
+    assert "environment" not in job, f"{name}: an environment gate would reintroduce a manual approval"
 
 dependency_pr_steps = [
     step
@@ -368,7 +385,10 @@ assert dependency_pr_command.index('git apply --index "$GO_DEPS_PATCH"') < depen
 
 promote_text = promote_path.read_text()
 promote = yaml.safe_load(promote_text)
-assert "workflow_run:" not in promote_text
+# Promotion is unattended: it follows post-publish acceptance. Manual dispatch
+# stays for re-runs. tests/validation/test-promote-coverage.sh executes the
+# trigger resolution.
+assert promote[True]["workflow_run"] == {"workflows": ["post-publish-acceptance"], "types": ["completed"]}
 assert "workflow_dispatch:" in promote_text
 assert promote["concurrency"] == {
     "group": "promote-stable",
@@ -379,10 +399,10 @@ assert "publish_run_id:" in promote_text
 assert "acceptance_run_id:" in promote_text
 assert "live_acceptance_run_id:" in promote_text
 assert "expected_scope:" in promote_text
-assert "run-id: ${{ inputs.publish_run_id }}" in promote_text
-assert "run-id: ${{ inputs.acceptance_run_id }}" in promote_text
-assert "run-id: ${{ inputs.live_acceptance_run_id }}" in promote_text
-assert "verified-publish-manifest-${{ inputs.publish_run_id }}" in promote_text
+assert "run-id: ${{ needs.resolve-inputs.outputs.publish_run_id }}" in promote_text
+assert "run-id: ${{ needs.resolve-inputs.outputs.acceptance_run_id }}" in promote_text
+assert "run-id: ${{ needs.resolve-inputs.outputs.live_acceptance_run_id }}" in promote_text
+assert "verified-publish-manifest-${{ needs.resolve-inputs.outputs.publish_run_id }}" in promote_text
 assert "live-release-acceptance-${LIVE_ACCEPTANCE_RUN_ID}-${RUN_ATTEMPT}" in promote_text
 assert "verify-release-manifest.py" in promote_text
 assert "cmp -s .publish-manifest/release-images.json" in promote_text
@@ -641,6 +661,7 @@ if ! env \
   NEXT_VERSION=v9.9.9 \
   GO_MODULES='infra/orchestrator infra/socket-proxy' \
   GO_DEPS_PATCH="${tmp}/stub-go-deps.patch" \
+  GITHUB_OUTPUT="${tmp}/stub-github-output" \
   bash "${tmp}/refresh-go-dependencies.sh" > "$policy_output" 2>&1; then
   echo "FAIL: the known GitHub Actions PR-policy denial failed the release job" >&2
   exit 1
@@ -663,6 +684,7 @@ env \
   NEXT_VERSION=v9.9.9 \
   GO_MODULES='infra/orchestrator infra/socket-proxy' \
   GO_DEPS_PATCH="${tmp}/stub-go-deps.patch" \
+  GITHUB_OUTPUT="${tmp}/stub-github-output" \
   bash "${tmp}/refresh-go-dependencies.sh" > "$unexpected_output" 2>&1
 unexpected_status=$?
 set -e
@@ -729,6 +751,7 @@ run_patch_step() {
       NEXT_VERSION=v9.9.9 \
       GO_MODULES='infra/orchestrator infra/socket-proxy' \
       GO_DEPS_PATCH="$patch" \
+      GITHUB_OUTPUT="${tmp}/patch-github-output" \
       bash "${tmp}/refresh-go-dependencies.sh"
   )
 }
@@ -752,6 +775,10 @@ done
 
 if ! run_patch_step "${tmp}/good.patch" > "${tmp}/good.out" 2>&1; then
   echo "FAIL: a go.mod/go.sum-only dependency patch was refused: $(tail -3 "${tmp}/good.out")" >&2
+  exit 1
+fi
+if ! grep -qxF 'pr_url=https://github.example/pull/1' "${tmp}/patch-github-output"; then
+  echo "FAIL: the opened pull request's URL was not handed to the merge job: $(cat "${tmp}/patch-github-output")" >&2
   exit 1
 fi
 pushed_files=$(git --git-dir="$patch_origin" diff --name-only refs/heads/main refs/heads/bot/go-deps-v9.9.9 | sort | tr '\n' ' ')

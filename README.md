@@ -388,12 +388,18 @@ Each check is tagged with a claim ID (`H01`, `R02`, `N03`, …) that maps
 to a numbered claim in [SECURITY.md](./SECURITY.md). A failure GATES THE
 PROMOTION: the `-canary` tag exists and consumers can opt into it, but
 the stable `<version>` and `latest` tags are not created until the
-acceptance suite is fully green. Promotion is manual so an operator can also
-require the live multi-runner backlog acceptance before releasing stable tags.
+acceptance suite is fully green.
 
-Before promotion, make sure no older matching jobs are queued, start the
-persistent orchestrator from the exact canary release at the intended
-capacity, then dispatch the dependency-free live gate at the release tag:
+Promotion is unattended. When `post-publish-acceptance` succeeds for a pushed
+release tag, `promote-to-stable.yml` starts on its own and creates the stable
+tags and the GitHub Release. Nothing waits for a person; a failed scan or a
+failed acceptance check is what stops a release.
+
+The live multi-runner backlog acceptance below is an optional extra check for
+operators who want it. It does not gate the automatic promotion. To run it,
+make sure no older matching jobs are queued, start the persistent orchestrator
+from the exact canary release at the intended capacity, then dispatch the
+dependency-free live gate at the release tag:
 
 ```bash
 gh workflow run live-release-acceptance.yml --ref v<release-version> \
@@ -413,17 +419,20 @@ failed direct-egress probes, and a successful GitHub job-log API response for
 every job. The local runner queue drain marker is not accepted as proof that
 GitHub persisted a log. The hosted verifier uploads a receipt bound to the
 scope, release version, commit, run attempt, actual runner/proxy image
-references, jobs, runners, observed parallelism, and log evidence. Promotion
-compares those references with the immutable release manifest.
+references, jobs, runners, observed parallelism, and log evidence. A manual
+promotion that is given this run compares those references with the immutable
+release manifest.
 
 The promotion (`promote-to-stable.yml`) runs server-side via
 `docker buildx imagetools create` — no rebuild, no pull, the stable tag points
-at the exact same digest the acceptance suite validated. The dispatch requires
-the tag-push `Publish Images` run ID, its successful automatic
-`post-publish-acceptance` run ID, and the successful live-acceptance run ID.
-Promotion also requires the intended scope name, downloads the manifest and
-live receipt artifacts, and requires their scope, version, build, and image
-provenance to match exactly.
+at the exact same digest the acceptance suite validated. It binds the tag-push
+`Publish Images` run and its successful automatic `post-publish-acceptance`
+run, downloads the manifest from both, and requires their version, build, and
+image provenance to match exactly.
+
+To re-run a promotion by hand, dispatch it with those two run IDs. Add the
+live-acceptance run ID and scope name to also bind a live receipt; the two go
+together, and when given they are verified as strictly as the rest.
 
 Before changing a tag, the promotion command resolves all 12 immutable source
 digests, matching canary tags, version-tag conflicts, and current aliases. It
@@ -437,9 +446,10 @@ that rare residual is reported explicitly and requires operator repair.
 gh workflow run promote-to-stable.yml --ref main \
   -f image_version=<release-version> \
   -f publish_run_id=<publish-run-id> \
-  -f acceptance_run_id=<automatic-acceptance-run-id> \
-  -f live_acceptance_run_id=<live-acceptance-run-id> \
-  -f expected_scope=<orchestrator-scope>
+  -f acceptance_run_id=<automatic-acceptance-run-id>
+# optional, both or neither:
+#   -f live_acceptance_run_id=<live-acceptance-run-id> \
+#   -f expected_scope=<orchestrator-scope>
 ```
 
 Each successful publish also uploads a 90-day

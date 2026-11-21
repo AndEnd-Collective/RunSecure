@@ -1,15 +1,32 @@
 # ============================================================================
 # RunSecure — Promote Verified Immutable Manifests to Stable
 # ============================================================================
-# Manual-only after automatic post-publish acceptance and operator-performed
-# live multi-runner acceptance. The exact Publish Images workflow run is an
-# explicit input. Its validated release manifest, not a mutable canary tag, is
-# the source for every server-side retag.
+# Unattended. Runs when post-publish-acceptance completes: if that run
+# succeeded for a tag-push Publish Images run, the release is promoted with no
+# human step. What gates a promotion:
+#
+#   - Publish Images succeeded for the pushed v<version> tag, which means
+#     every Grype scan job passed on the pushed digests, and the tag's commit
+#     was proven to be an ancestor of main;
+#   - post-publish-acceptance succeeded against the exact manifest that
+#     Publish Images run produced (immutable image@sha256 references);
+#   - the release manifest verifies against the run, version and build SHA.
+#
+# The exact Publish Images run and its validated release manifest, not a
+# mutable canary tag, are the source for every server-side retag.
+#
+# Manual dispatch remains for re-running a promotion. It can additionally
+# bind a live multi-runner acceptance receipt (live_acceptance_run_id +
+# expected_scope); when supplied the receipt is verified as strictly as
+# before, when omitted the gates above stand alone.
 # ============================================================================
 
 name: promote-to-stable
 
 on:
+  workflow_run:
+    workflows: ["post-publish-acceptance"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       image_version:
@@ -17,7 +34,7 @@ on:
         required: true
         type: string
       publish_run_id:
-        description: 'Successful Publish Images workflow run ID accepted by CI and live verification'
+        description: 'Successful tag-push Publish Images workflow run ID'
         required: true
         type: string
       acceptance_run_id:
@@ -25,12 +42,14 @@ on:
         required: true
         type: string
       live_acceptance_run_id:
-        description: 'Successful live-release-acceptance run dispatched at the exact v<version> tag'
-        required: true
+        description: 'Optional: successful live-release-acceptance run dispatched at the exact v<version> tag'
+        required: false
+        default: ''
         type: string
       expected_scope:
-        description: 'Exact RunSecure scope proven by the live-acceptance receipt'
-        required: true
+        description: 'Optional: exact RunSecure scope proven by the live-acceptance receipt (required with live_acceptance_run_id)'
+        required: false
+        default: ''
         type: string
 
 permissions: {}
@@ -41,7 +60,99 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Normalise the two triggers into one set of values. For workflow_run the
+  # acceptance run is the trigger itself; the Publish Images run it accepted
+  # is named by its verified-publish-manifest-<run id> artifact, and the
+  # version comes from that run's tag. Nothing here is trusted yet: every
+  # value is re-verified against the GitHub API by resolve-manifest.
+  resolve-inputs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      proceed: ${{ steps.resolve.outputs.proceed }}
+      image_version: ${{ steps.resolve.outputs.image_version }}
+      publish_run_id: ${{ steps.resolve.outputs.publish_run_id }}
+      acceptance_run_id: ${{ steps.resolve.outputs.acceptance_run_id }}
+      live_acceptance_run_id: ${{ steps.resolve.outputs.live_acceptance_run_id }}
+      expected_scope: ${{ steps.resolve.outputs.expected_scope }}
+    steps:
+      - name: Resolve what to promote
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          INPUT_IMAGE_VERSION: ${{ inputs.image_version }}
+          INPUT_PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          INPUT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          INPUT_LIVE_ACCEPTANCE_RUN_ID: ${{ inputs.live_acceptance_run_id }}
+          INPUT_EXPECTED_SCOPE: ${{ inputs.expected_scope }}
+        run: |
+          set -euo pipefail
+          skip() {
+            echo "Not promoting: $1"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            {
+              echo "proceed=true"
+              echo "image_version=${INPUT_IMAGE_VERSION}"
+              echo "publish_run_id=${INPUT_PUBLISH_RUN_ID}"
+              echo "acceptance_run_id=${INPUT_ACCEPTANCE_RUN_ID}"
+              echo "live_acceptance_run_id=${INPUT_LIVE_ACCEPTANCE_RUN_ID}"
+              echo "expected_scope=${INPUT_EXPECTED_SCOPE}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A skipped acceptance run (Publish Images failed) or a failed one
+          # is the gate doing its job, not an error of this workflow.
+          if [ "$TRIGGER_CONCLUSION" != "success" ]; then
+            skip "post-publish-acceptance run ${TRIGGER_RUN_ID} concluded '${TRIGGER_CONCLUSION}'"
+          fi
+          if [[ ! "$TRIGGER_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::workflow_run event carries no acceptance run ID"
+            exit 1
+          fi
+
+          PUBLISH_RUN_IDS=$(gh api --paginate \
+            "/repos/${REPOSITORY}/actions/runs/${TRIGGER_RUN_ID}/artifacts" \
+            --jq '.artifacts[].name' \
+            | sed -n -E 's/^verified-publish-manifest-([1-9][0-9]*)$/\1/p')
+          if [ "$(grep -c . <<<"$PUBLISH_RUN_IDS")" != "1" ]; then
+            echo "::error::acceptance run ${TRIGGER_RUN_ID} must carry exactly one verified-publish-manifest artifact"
+            exit 1
+          fi
+          PUBLISH_RUN_ID="$PUBLISH_RUN_IDS"
+
+          PUBLISH_RUN=$(gh api "/repos/${REPOSITORY}/actions/runs/${PUBLISH_RUN_ID}" \
+            --jq '[.event, .head_branch] | @tsv')
+          PUBLISH_EVENT=$(cut -f1 <<<"$PUBLISH_RUN")
+          PUBLISH_REF=$(cut -f2 <<<"$PUBLISH_RUN")
+          # Only a pushed release tag is promoted. A manual build
+          # (workflow_dispatch, `manual-build` canary set) is accepted by the
+          # acceptance suite too, and must stop here.
+          if [ "$PUBLISH_EVENT" != "push" ] || [[ ! "$PUBLISH_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            skip "Publish Images run ${PUBLISH_RUN_ID} is '${PUBLISH_EVENT}' on '${PUBLISH_REF}', not a pushed release tag"
+          fi
+
+          {
+            echo "proceed=true"
+            echo "image_version=${PUBLISH_REF#v}"
+            echo "publish_run_id=${PUBLISH_RUN_ID}"
+            echo "acceptance_run_id=${TRIGGER_RUN_ID}"
+            echo "live_acceptance_run_id="
+            echo "expected_scope="
+          } >> "$GITHUB_OUTPUT"
+
   resolve-manifest:
+    needs: resolve-inputs
+    if: needs.resolve-inputs.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -56,26 +167,27 @@ jobs:
       - name: Download manifest from the exact Publish Images run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-image-manifest-${{ inputs.image_version }}
+          name: release-image-manifest-${{ needs.resolve-inputs.outputs.image_version }}
           path: .publish-manifest
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.publish_run_id }}
+          run-id: ${{ needs.resolve-inputs.outputs.publish_run_id }}
 
       - name: Download manifest proven by the exact acceptance run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-publish-manifest-${{ inputs.publish_run_id }}
+          name: verified-publish-manifest-${{ needs.resolve-inputs.outputs.publish_run_id }}
           path: .accepted-manifest
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.acceptance_run_id }}
+          run-id: ${{ needs.resolve-inputs.outputs.acceptance_run_id }}
 
       - name: Resolve the exact live-acceptance receipt artifact
         id: live-run
+        if: needs.resolve-inputs.outputs.live_acceptance_run_id != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LIVE_ACCEPTANCE_RUN_ID: ${{ inputs.live_acceptance_run_id }}
+          LIVE_ACCEPTANCE_RUN_ID: ${{ needs.resolve-inputs.outputs.live_acceptance_run_id }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -102,23 +214,24 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
       - name: Download receipt from the exact live-acceptance run and attempt
+        if: needs.resolve-inputs.outputs.live_acceptance_run_id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ steps.live-run.outputs.artifact_name }}
           path: .live-acceptance/receipt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.live_acceptance_run_id }}
+          run-id: ${{ needs.resolve-inputs.outputs.live_acceptance_run_id }}
 
       - name: Verify workflow-run and immutable manifest provenance
         id: verify
         env:
-          EXPECTED_VERSION: ${{ inputs.image_version }}
-          EXPECTED_SCOPE: ${{ inputs.expected_scope }}
-          ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          EXPECTED_VERSION: ${{ needs.resolve-inputs.outputs.image_version }}
+          EXPECTED_SCOPE: ${{ needs.resolve-inputs.outputs.expected_scope }}
+          ACCEPTANCE_RUN_ID: ${{ needs.resolve-inputs.outputs.acceptance_run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LIVE_ACCEPTANCE_RUN_ID: ${{ inputs.live_acceptance_run_id }}
-          PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          LIVE_ACCEPTANCE_RUN_ID: ${{ needs.resolve-inputs.outputs.live_acceptance_run_id }}
+          PUBLISH_RUN_ID: ${{ needs.resolve-inputs.outputs.publish_run_id }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -134,9 +247,18 @@ jobs:
             echo "::error::acceptance_run_id must be a positive integer"
             exit 1
           fi
-          if [[ ! "$LIVE_ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::live_acceptance_run_id must be a positive integer"
-            exit 1
+          # The live receipt is optional, but it is all or nothing: a run ID
+          # without the scope it must prove (or the reverse) is a mistake, not
+          # a request to skip the check.
+          if [ -n "$LIVE_ACCEPTANCE_RUN_ID" ] || [ -n "$EXPECTED_SCOPE" ]; then
+            if [[ ! "$LIVE_ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::live_acceptance_run_id must be a positive integer when expected_scope is given"
+              exit 1
+            fi
+            if [ -z "$EXPECTED_SCOPE" ]; then
+              echo "::error::expected_scope is required with live_acceptance_run_id"
+              exit 1
+            fi
           fi
 
           gh api "/repos/${REPOSITORY}/actions/runs/${PUBLISH_RUN_ID}" \
@@ -199,6 +321,7 @@ jobs:
             exit 1
           fi
 
+          if [ -n "$LIVE_ACCEPTANCE_RUN_ID" ]; then
           # Re-fetch after the artifact download. If the operator reran the
           # live workflow between resolution and verification, its attempt
           # number will no longer match the downloaded receipt and promotion
@@ -314,6 +437,10 @@ jobs:
               ):
                   raise SystemExit("live acceptance receipt has invalid log evidence")
           PY
+            echo "Live acceptance receipt verified for scope ${EXPECTED_SCOPE}."
+          else
+            echo "No live acceptance receipt supplied; promoting on the Publish Images and post-publish-acceptance gates."
+          fi
 
           {
             echo "version=$EXPECTED_VERSION"
@@ -324,7 +451,7 @@ jobs:
       - name: Preserve the verified manifest for promotion and release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: verified-release-image-manifest-${{ inputs.image_version }}
+          name: verified-release-image-manifest-${{ needs.resolve-inputs.outputs.image_version }}
           path: .publish-manifest/release-images.json
           if-no-files-found: error
           retention-days: 90
