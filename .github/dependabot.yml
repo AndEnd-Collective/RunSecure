@@ -1,0 +1,97 @@
+# ============================================================================
+# RunSecure — Dependabot
+# ============================================================================
+# Two jobs for Dependabot here:
+#
+#   1. Security updates. When a published advisory affects a dependency and a
+#      fixed version exists, Dependabot opens a pull request. Nothing waits
+#      for a person: .github/workflows/security-response.yml merges it once
+#      CI is green and dispatches a nightly build straight away.
+#      Security updates are a repository setting, not something this file
+#      turns on; the entries below tell Dependabot where the manifests are.
+#
+#   2. Version updates for what nothing else keeps current: GitHub Actions
+#      (pinned by commit SHA) and base image digests in Dockerfiles.
+#
+# Go modules, npm, pip and cargo are listed with a pull request limit of 0.
+# That switches routine version updates OFF for them and leaves security
+# updates ON. Go modules are refreshed every night by
+# weekly-version-bump.yml, which also re-pins k8s.io/kube-openapi to the
+# revision apimachinery needs; a second stream of per-module pull requests
+# would only race it. The npm, pip and cargo manifests are test fixtures.
+#
+# infra/collector/processor is included for security updates only: its
+# OpenTelemetry versions are tied to the pinned OCB release and are bumped
+# together with it.
+# ============================================================================
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    labels:
+      - dependencies
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - /images
+      - /infra/collector
+      - /infra/orchestrator
+      - /infra/socket-proxy
+      - /infra/squid
+      - /tests/fixtures/mock-dns
+      - /tests/integration/orchestrator/compose/mock-github
+    schedule:
+      interval: daily
+    labels:
+      - dependencies
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directories:
+      - /infra/orchestrator
+      - /infra/socket-proxy
+      - /infra/telemetry
+      - /infra/collector/processor
+      - /infra/collector/tests/admission
+      - /tools/corner-lint
+      - /tests/integration/orchestrator/compose/mock-github
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+      - go
+
+  - package-ecosystem: npm
+    directory: /tests/node-project
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+
+  - package-ecosystem: pip
+    directory: /tests/python-project
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+
+  - package-ecosystem: cargo
+    directory: /tests/rust-project
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
