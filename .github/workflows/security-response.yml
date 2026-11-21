@@ -150,6 +150,9 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ matrix.pr }}
+          # Queues for a self-hosted runner that is only online when an operator
+          # starts one; it repeats lints validate.yml already ran.
+          OPTIONAL_PENDING_CHECKS: lints-on-self
         # validate.yml always runs and reports four jobs; path-filtered
         # workflows add more.
         run: bash infra/scripts/merge-pr-when-green.sh "$PR" 4

@@ -25,9 +25,17 @@
 #   MIN_CHECKS  how many checks must have reported before a merge
 #
 # Environment (all optional):
-#   POLL_SECONDS     seconds between polls           (default 30)
-#   TIMEOUT_SECONDS  give up after this long         (default 5400)
-#   SETTLE_SECONDS   pause before the confirming look (default 60)
+#   POLL_SECONDS             seconds between polls           (default 30)
+#   TIMEOUT_SECONDS          give up after this long         (default 5400)
+#   SETTLE_SECONDS           pause before the confirming look (default 60)
+#   OPTIONAL_PENDING_CHECKS  comma-separated check names that do not have to
+#                            finish. A check named here is left out while it
+#                            is pending; once it reports, it counts like any
+#                            other, so a failure still blocks the merge.
+#                            Meant for `lints-on-self`, which queues for a
+#                            self-hosted runner that is only online when an
+#                            operator starts one, and repeats lints that
+#                            validate.yml already runs on a hosted runner.
 # ============================================================================
 
 set -euo pipefail
@@ -37,6 +45,7 @@ MIN_CHECKS="${2:?Usage: merge-pr-when-green.sh PR MIN_CHECKS}"
 POLL_SECONDS="${POLL_SECONDS:-30}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-5400}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-60}"
+OPTIONAL_PENDING_CHECKS="${OPTIONAL_PENDING_CHECKS:-}"
 
 if [[ ! "$MIN_CHECKS" =~ ^[1-9][0-9]*$ ]]; then
     echo "::error::MIN_CHECKS must be a positive integer, got '${MIN_CHECKS}'" >&2
@@ -52,11 +61,14 @@ tally() {
     if [[ -z "$json" ]]; then
         json='[]'
     fi
-    jq -r '[
-        length,
-        (map(select(.bucket == "pending")) | length),
-        (map(select(.bucket == "fail" or .bucket == "cancel")) | length)
-      ] | @tsv' <<<"$json"
+    jq -r --arg optional "$OPTIONAL_PENDING_CHECKS" '
+        ($optional | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $names
+        | map(select((.bucket == "pending" and (.name as $n | $names | index($n))) | not))
+        | [
+            length,
+            (map(select(.bucket == "pending")) | length),
+            (map(select(.bucket == "fail" or .bucket == "cancel")) | length)
+          ] | @tsv' <<<"$json"
 }
 
 failed_names() {

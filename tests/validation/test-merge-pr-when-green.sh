@@ -68,6 +68,10 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
+# The stub names checks check-1, check-2, ... in order. OPTIONAL names the
+# ones that may stay pending.
+OPTIONAL=""
+
 # run_case NAME MIN_CHECKS EXPECT(merged|refused) STATE_LINE...
 run_case() {
     local name="$1" min_checks="$2" expect="$3"
@@ -79,7 +83,7 @@ run_case() {
     echo 1 > "${dir}/index"
     local status=0
     env PATH="${tmp}/bin:${PATH}" STUB_DIR="$dir" \
-        POLL_SECONDS=0 SETTLE_SECONDS=0 TIMEOUT_SECONDS=1 \
+        POLL_SECONDS=0 SETTLE_SECONDS=0 TIMEOUT_SECONDS=1 OPTIONAL_PENDING_CHECKS="$OPTIONAL" \
         bash "$MERGER" "https://github.example/pull/7" "$min_checks" > "${dir}/out" 2>&1 || status=$?
     local merged=false
     [[ -f "${dir}/merged" ]] && merged=true
@@ -117,6 +121,23 @@ run_case "refuses when a late-registered check fails on the confirming look" 4 r
     "pass pass pass pass" "pass pass pass pass fail"
 run_case "keeps waiting when a late-registered check is still pending" 4 merged \
     "pass pass pass pass" "pass pass pass pass pending" "pass pass pass pass pass" "pass pass pass pass pass"
+
+# A check that may stay pending (a self-hosted job with no runner online) must
+# not hold the merge, must not count towards the minimum, and must still
+# block if it does run and fails.
+OPTIONAL="check-5, check-9"
+run_case "an optional check left pending does not block" 4 merged \
+    "pass pass pass pass pending"
+run_case "an optional pending check does not count towards the minimum" 4 refused \
+    "pass pass pass pending pending"
+run_case "an optional check that ran and failed still blocks" 4 refused \
+    "pass pass pass pass fail"
+run_case "an optional check that ran and passed counts normally" 5 merged \
+    "pass pass pass pass pass"
+OPTIONAL="check-1"
+run_case "only the named check is optional" 3 refused \
+    "pending pass pass pass pending"
+OPTIONAL=""
 
 if env PATH="${tmp}/bin:${PATH}" bash "$MERGER" 7 0 >/dev/null 2>&1 \
     || env PATH="${tmp}/bin:${PATH}" bash "$MERGER" 7 many >/dev/null 2>&1; then
