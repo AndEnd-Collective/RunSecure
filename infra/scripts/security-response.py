@@ -260,7 +260,7 @@ def clean(text: Any, limit: int) -> str:
     """Model output is untrusted text headed for a public issue."""
     value = str(text if text is not None else "").replace("\r", "")
     # Neutralise mentions and HTML comments (the latter could forge a marker).
-    value = value.replace("@", "@​").replace("<!--", "<​!--")
+    value = value.replace("@", "@\u200b").replace("<!--", "<\u200b!--")
     if len(value) > limit:
         value = value[: limit - 1].rstrip() + "…"
     return value.strip()
