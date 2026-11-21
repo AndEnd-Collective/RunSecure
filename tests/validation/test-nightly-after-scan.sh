@@ -10,8 +10,9 @@
 # Asserts:
 #   - no build step tags `nightly`
 #   - one job retags `nightly`, it needs every scan job and the release
-#     manifest, and it only runs for tag pushes (a manual build from a branch
-#     must not move it)
+#     manifest, and it only runs for release tag pushes and the nightly channel
+#   - the nightly channel is built every night and only ever from main (a
+#     manual build from a branch must not move `nightly`)
 #   - tag-nightly-images.py maps manifest entries to the documented tags,
 #     retags by digest, and rejects anything that is not a RunSecure digest
 #     reference
@@ -27,7 +28,7 @@ TAGGER="${RUNSECURE_ROOT}/infra/scripts/tag-nightly-images.py"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/runsecure-nightly-test-XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
-python3 - "$WORKFLOW" <<'PY'
+python3 - "$WORKFLOW" "${tmp}/resolve-version.sh" <<'PY'
 import pathlib
 import sys
 import yaml
@@ -60,12 +61,51 @@ nightly = jobs["nightly"]
 needs = set(nightly["needs"])
 assert scan_jobs <= needs, f"nightly does not wait for: {sorted(scan_jobs - needs)}"
 assert "release-manifest" in needs
-assert nightly["if"] == "github.event_name == 'push'", nightly.get("if")
-assert nightly["permissions"] == {"actions": "read", "contents": "read", "packages": "write"}
+# Release tag pushes and the nightly channel only. The gate job refuses the
+# nightly channel from any ref but main, so a manual build from a branch
+# cannot reach this job.
+assert nightly["if"] == "github.event_name == 'push' || needs.gate.outputs.version == 'nightly'", nightly.get("if")
+assert nightly["permissions"] == {
+    "actions": "read",
+    "attestations": "read",
+    "contents": "read",
+    "packages": "write",
+}
+
+triggers = workflow[True]
+assert triggers["schedule"] == [{"cron": "0 4 * * *"}], "nightly must be built every night"
+assert triggers["workflow_dispatch"]["inputs"]["channel"]["options"] == ["manual-build", "nightly"]
+assert triggers["workflow_dispatch"]["inputs"]["channel"]["default"] == "manual-build"
+version_step = next(step for step in jobs["gate"]["steps"] if step.get("id") == "version")
+pathlib.Path(sys.argv[2]).write_text(version_step["run"])
 for step in nightly["steps"]:
     assert "continue-on-error" not in step
     assert "always()" not in str(step.get("if", ""))
 PY
+
+# Execute the gate's version resolution: which trigger publishes as what.
+# resolve NAME EXPECTED(version|refused) EVENT REF REF_NAME CHANNEL
+resolve() {
+  local name="$1" expected="$2" output="${tmp}/version-output" status=0
+  : > "$output"
+  env GITHUB_OUTPUT="$output" EVENT_NAME="$3" REF="$4" REF_NAME="$5" CHANNEL="$6" \
+    bash "${tmp}/resolve-version.sh" >/dev/null 2>&1 || status=$?
+  if [[ "$expected" == refused ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      echo "FAIL: ${name}: accepted as $(cat "$output")" >&2
+      exit 1
+    fi
+  elif [[ "$status" -ne 0 ]] || ! grep -qxF "version=${expected}" "$output"; then
+    echo "FAIL: ${name}: expected version=${expected}, got exit ${status} $(cat "$output")" >&2
+    exit 1
+  fi
+}
+resolve "release tag push" 3.1.0 push refs/tags/v3.1.0 v3.1.0 ""
+resolve "nightly schedule on main" nightly schedule refs/heads/main main ""
+resolve "nightly dispatch on main" nightly workflow_dispatch refs/heads/main main nightly
+resolve "nightly dispatch from a branch" refused workflow_dispatch refs/heads/feature feature nightly
+resolve "manual build from a branch" manual-build workflow_dispatch refs/heads/feature feature manual-build
+resolve "manual build with no channel" manual-build workflow_dispatch refs/heads/main main ""
 
 digest_a="sha256:$(printf 'a%.0s' {1..64})"
 digest_b="sha256:$(printf 'b%.0s' {1..64})"
@@ -125,4 +165,4 @@ expect_rejected "a key that does not belong to its package" "{\"node-24\": \"${p
 expect_rejected "a variant that would inject a second tag" "{\"node-24,latest\": \"${prefix}/node@${digest_a}\"}"
 expect_rejected "an empty manifest" "{}"
 
-echo "PASS: nightly is retagged by digest only after every scan job, and only for tag pushes"
+echo "PASS: nightly is built every night from main and retagged by digest only after every scan job"

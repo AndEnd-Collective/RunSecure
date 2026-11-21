@@ -314,6 +314,12 @@ assert weekly_text.index("Require the release cascade token") < weekly_text.inde
 weekly_jobs = weekly["jobs"]
 assert set(weekly_jobs) == {"bump", "go-deps-build", "go-deps-pr", "go-deps-merge"}, set(weekly_jobs)
 
+# Cadence: a release tag on Mondays, a dependency refresh every night. The
+# nightly schedule must never cut a tag.
+assert weekly[True]["schedule"] == [{"cron": "30 2 * * 1"}, {"cron": "30 0 * * *"}], weekly[True]["schedule"]
+tag_step = next(step for step in weekly_jobs["bump"]["steps"] if step.get("name") == "Create and push tag")
+assert tag_step["if"] == "github.event.inputs.dry_run != 'true' && github.event.schedule != '30 0 * * *'", tag_step["if"]
+
 def job_text(name):
     return "\n".join(str(step) for step in weekly_jobs[name]["steps"])
 

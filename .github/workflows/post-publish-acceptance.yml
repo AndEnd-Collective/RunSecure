@@ -81,7 +81,7 @@ jobs:
               raise SystemExit("not a Publish Images workflow run")
           if run.get("path") != ".github/workflows/publish-images.yml":
               raise SystemExit("workflow path does not match publish-images.yml")
-          if run.get("event") not in {"push", "workflow_dispatch"}:
+          if run.get("event") not in {"push", "schedule", "workflow_dispatch"}:
               raise SystemExit("unsupported Publish Images event")
           if run.get("conclusion") != "success":
               raise SystemExit("Publish Images run did not succeed")
