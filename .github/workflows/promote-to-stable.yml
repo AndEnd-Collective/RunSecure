@@ -10,7 +10,9 @@
 #     was proven to be an ancestor of main;
 #   - post-publish-acceptance succeeded against the exact manifest that
 #     Publish Images run produced (immutable image@sha256 references);
-#   - the release manifest verifies against the run, version and build SHA.
+#   - the release manifest verifies against the run, version and build SHA;
+#   - every image in it carries build provenance signed by publish-images.yml
+#     for that tag and commit.
 #
 # The exact Publish Images run and its validated release manifest, not a
 # mutable canary tag, are the source for every server-side retag.
@@ -462,6 +464,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       actions: read
+      attestations: read
       contents: read
       packages: write
     steps:
@@ -487,10 +490,18 @@ jobs:
         env:
           BUILD_SHA: ${{ needs.resolve-manifest.outputs.build_sha }}
           VERSION: ${{ needs.resolve-manifest.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           infra/scripts/verify-remote-release-tag.sh \
             origin "v${VERSION}" "$BUILD_SHA"
+          # No stable tag moves unless every image in the manifest carries
+          # build provenance signed by publish-images.yml for this exact tag
+          # and commit.
+          infra/scripts/verify-image-provenance.sh \
+            .verified-manifest/release-images.json \
+            "$REPOSITORY" "refs/tags/v${VERSION}" "$BUILD_SHA"
           python3 infra/scripts/promote-release-images.py \
             .verified-manifest/release-images.json \
             --release "$VERSION"

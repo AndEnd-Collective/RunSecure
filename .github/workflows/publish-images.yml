@@ -23,16 +23,28 @@
 name: Publish Images
 
 on:
-  # Triggered by the weekly version-bump workflow creating a new
-  # tag (Mondays 02:30 UTC). Manual tag pushes also trigger this.
-  # The schedule trigger that previously ran a no-push rebuild for
-  # scanning was removed: the weekly bump now produces a real
-  # release every Monday, which fires this workflow in publish mode
-  # and gives us rebuild + scan + publish in one path.
+  # Stable: the weekly version-bump workflow creates a new tag every Monday
+  # (02:30 UTC), which fires this workflow in release mode; the result is
+  # promoted to stable unattended. Manual tag pushes also trigger this.
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-  workflow_dispatch: {}
+  # Nightly: rebuild every image from main with no cache, so each night's
+  # build carries the day's Debian security updates and whatever dependency
+  # refreshes merged. It publishes the `nightly` channel only and is never
+  # promoted to a stable version.
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'manual-build publishes a throwaway canary set; nightly rebuilds and moves the nightly tags (main only)'
+        required: false
+        default: manual-build
+        type: choice
+        options:
+          - manual-build
+          - nightly
 
 env:
   REGISTRY: ghcr.io
@@ -83,17 +95,29 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       build_date: ${{ steps.meta.outputs.build_date }}
     steps:
-      - name: Resolve version (tag → semver; manual dispatch → manual-build)
+      - name: Resolve version (tag → semver; schedule → nightly; manual dispatch → manual-build)
         id: version
         env:
+          REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
+          set -euo pipefail
           # On a tag push, ref_name is "v1.2.3" — strip the v.
-          # On a manual workflow_dispatch (no tag), tag the build
-          # "manual-build" so it doesn't collide with semver tags.
+          # The nightly channel (the schedule, or a dispatch that asks for it)
+          # builds main and may move the `nightly` tags, so it is refused from
+          # any other ref: a branch must not be able to publish as nightly.
+          # Any other manual dispatch is tagged "manual-build" so it doesn't
+          # collide with semver tags or with nightly.
           if [[ "$EVENT_NAME" == "push" && "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "schedule" || "$CHANNEL" == "nightly" ]]; then
+            if [[ "$REF" != "refs/heads/main" ]]; then
+              echo "::error::the nightly channel can only be built from main, not ${REF}"
+              exit 1
+            fi
+            echo "version=nightly" >> "$GITHUB_OUTPUT"
           else
             echo "version=manual-build" >> "$GITHUB_OUTPUT"
           fi
@@ -142,6 +166,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless build provenance: an OIDC token for the Sigstore signature and
+      # the right to store the attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -175,6 +203,13 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Attest build provenance for base
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/base
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
       - name: Record immutable base manifest digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -202,6 +237,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless build provenance: an OIDC token for the Sigstore signature and
+      # the right to store the attestation.
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -273,6 +312,13 @@ jobs:
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Attest build provenance for the runtime image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
       - name: Record immutable runtime manifest digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -285,6 +331,13 @@ jobs:
           fi
           printf '%s@%s\n' "$IMAGE" "$DIGEST" \
             > "release-digest-${{ matrix.name }}-${{ matrix.lang_version }}.txt"
+
+      - name: Attest build provenance for the composition-stage image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}-build
+          subject-digest: ${{ steps.build-stage.outputs.digest }}
+          push-to-registry: true
 
       - name: Record immutable composition-stage manifest digest
         env:
@@ -322,6 +375,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless build provenance: an OIDC token for the Sigstore signature and
+      # the right to store the attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -348,6 +405,13 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest build provenance for proxy
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/proxy
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Record immutable proxy manifest digest
         env:
@@ -379,6 +443,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless build provenance: an OIDC token for the Sigstore signature and
+      # the right to store the attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -405,6 +473,13 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest build provenance for orchestrator
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/orchestrator
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Record immutable orchestrator manifest digest
         env:
@@ -488,6 +563,10 @@ jobs:
       actions: read
       contents: read
       packages: write
+      # Keyless build provenance: an OIDC token for the Sigstore signature and
+      # the right to store the attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install same-release image allowlist into build context
@@ -516,6 +595,13 @@ jobs:
             org.opencontainers.image.version=${{ needs.gate.outputs.version }}
             org.opencontainers.image.created=${{ needs.gate.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest build provenance for socket-proxy
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/socket-proxy
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Record immutable socket-proxy manifest digest
         env:
@@ -577,10 +663,11 @@ jobs:
   # pinning, so it is not set at build time: this job needs every scan job and
   # retags, by digest and server side, the images in this run's release
   # manifest. A failed scan leaves `nightly` on the last release that passed.
-  # Tag pushes only: a manual build dispatched from a branch publishes its
-  # `manual-build-canary` set but must not move `nightly`.
+  # Runs for release tag pushes and for the nightly channel (which the gate
+  # only allows from main). A manual build dispatched from a branch publishes
+  # its `manual-build-canary` set but must not move `nightly`.
   nightly:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || needs.gate.outputs.version == 'nightly'
     runs-on: ubuntu-latest
     needs:
       - gate
@@ -593,6 +680,7 @@ jobs:
       - grype-scan-socket-proxy
     permissions:
       actions: read
+      attestations: read
       contents: read
       packages: write
     steps:
@@ -611,6 +699,17 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify build provenance for every image before retagging
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          infra/scripts/verify-image-provenance.sh \
+            .release-manifest/release-images.json \
+            "$REPOSITORY" "$SOURCE_REF" "$BUILD_SHA"
 
       - name: Retag scanned digests as nightly
         run: python3 infra/scripts/tag-nightly-images.py .release-manifest/release-images.json
