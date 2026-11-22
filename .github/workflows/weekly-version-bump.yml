@@ -443,6 +443,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PR_URL: ${{ needs.go-deps-pr.outputs.pr_url }}
+          # Queues for a self-hosted runner that is only online when an operator
+          # starts one; it repeats lints validate.yml already ran.
+          OPTIONAL_PENDING_CHECKS: lints-on-self
         # validate.yml always runs and reports four jobs; path-filtered
         # workflows add more. Four is the floor below which "no failures"
         # cannot be told apart from "nothing ran".
