@@ -6,8 +6,8 @@ description: >
   with namespace-scoped RBAC, default-deny NetworkPolicies, and Pod Security
   Standards "Restricted" on every namespace.
 type: application
-version: 0.2.0
-appVersion: "2.2.0"
+version: 0.3.0
+appVersion: "3.0.0"
 kubeVersion: ">=1.26.0"
 keywords:
   - github-actions
