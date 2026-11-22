@@ -1,0 +1,14 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [],
+ "dependencies": [],
+ "metadata": {
+  "component": {
+   "bom-ref": "pkg:golang/runsecure/collector/admissiontests",
+   "name": "runsecure/collector/admissiontests",
+   "purl": "pkg:golang/runsecure/collector/admissiontests",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}

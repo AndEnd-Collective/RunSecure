@@ -1,0 +1,13 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [],
+ "dependencies": [],
+ "metadata": {
+  "component": {
+   "bom-ref": "library:mock-github:",
+   "name": "mock-github",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}

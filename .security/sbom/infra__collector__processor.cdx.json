@@ -1,0 +1,373 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [
+  {
+   "bom-ref": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "name": "github.com/AndEnd-Collective/runsecure/infra/telemetry",
+   "purl": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+   "scope": "required",
+   "type": "library"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "github.com/cespare/xxhash/v2",
+   "purl": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v2.3.0"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+   "licenses": [
+    "MPL-2.0"
+   ],
+   "name": "github.com/hashicorp/go-version",
+   "purl": "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.9.0"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/json-iterator/go@v1.1.12",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "github.com/json-iterator/go",
+   "purl": "pkg:golang/github.com/json-iterator/go@v1.1.12",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.1.12"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "github.com/modern-go/concurrent",
+   "purl": "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.0.0-20180306012644-bacd9c7ef1dd"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "github.com/modern-go/reflect2",
+   "purl": "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.0.3-0.20250322232337-35a7c28c31ee"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/component",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/consumer@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/consumer",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/consumer@v1.70.0",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/featuregate",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/internal/componentalias@v0.164.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/internal/componentalias",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/internal/componentalias@v0.164.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.164.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/pdata",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/pipeline@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/pipeline",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/pipeline@v1.70.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/collector/processor@v1.70.0",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "go.opentelemetry.io/collector/processor",
+   "purl": "pkg:golang/go.opentelemetry.io/collector/processor@v1.70.0",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.70.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+   "licenses": [
+    "Apache-2.0",
+    "BSD-3-Clause"
+   ],
+   "name": "go.opentelemetry.io/otel/metric",
+   "purl": "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.47.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+   "licenses": [
+    "Apache-2.0",
+    "BSD-3-Clause"
+   ],
+   "name": "go.opentelemetry.io/otel/trace",
+   "purl": "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.47.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.opentelemetry.io/otel@v1.47.0",
+   "licenses": [
+    "Apache-2.0",
+    "BSD-3-Clause"
+   ],
+   "name": "go.opentelemetry.io/otel",
+   "purl": "pkg:golang/go.opentelemetry.io/otel@v1.47.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.47.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.uber.org/multierr@v1.11.0",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "go.uber.org/multierr",
+   "purl": "pkg:golang/go.uber.org/multierr@v1.11.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.11.0"
+  },
+  {
+   "bom-ref": "pkg:golang/go.uber.org/zap@v1.28.0",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "go.uber.org/zap",
+   "purl": "pkg:golang/go.uber.org/zap@v1.28.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.28.0"
+  }
+ ],
+ "dependencies": [
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/hashicorp/go-version@v1.9.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee"
+   ],
+   "ref": "pkg:golang/github.com/json-iterator/go@v1.1.12"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/github.com/json-iterator/go@v1.1.12",
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+    "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel@v1.47.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0",
+    "pkg:golang/go.uber.org/zap@v1.28.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/github.com/json-iterator/go@v1.1.12",
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+    "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/consumer@v1.70.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/github.com/json-iterator/go@v1.1.12",
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+    "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel@v1.47.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0",
+    "pkg:golang/go.uber.org/zap@v1.28.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/internal/componentalias@v0.164.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/github.com/json-iterator/go@v1.1.12",
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+    "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/pipeline@v1.70.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/github.com/hashicorp/go-version@v1.9.0",
+    "pkg:golang/github.com/json-iterator/go@v1.1.12",
+    "pkg:golang/github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd",
+    "pkg:golang/github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee",
+    "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/consumer@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/featuregate@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/internal/componentalias@v0.164.0",
+    "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/pipeline@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel@v1.47.0",
+    "pkg:golang/go.uber.org/multierr@v1.11.0",
+    "pkg:golang/go.uber.org/zap@v1.28.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/collector/processor@v1.70.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel@v1.47.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/go.opentelemetry.io/otel@v1.47.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/cespare/xxhash/v2@v2.3.0",
+    "pkg:golang/go.opentelemetry.io/otel/metric@v1.47.0",
+    "pkg:golang/go.opentelemetry.io/otel/trace@v1.47.0"
+   ],
+   "ref": "pkg:golang/go.opentelemetry.io/otel@v1.47.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/go.uber.org/multierr@v1.11.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/go.uber.org/multierr@v1.11.0"
+   ],
+   "ref": "pkg:golang/go.uber.org/zap@v1.28.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/andend-collective/runsecure/infra/telemetry",
+    "pkg:golang/go.opentelemetry.io/collector/component@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/consumer@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/pdata@v1.70.0",
+    "pkg:golang/go.opentelemetry.io/collector/processor@v1.70.0"
+   ],
+   "ref": "pkg:golang/runsecure/collector/processor"
+  }
+ ],
+ "metadata": {
+  "component": {
+   "bom-ref": "pkg:golang/runsecure/collector/processor",
+   "name": "runsecure/collector/processor",
+   "purl": "pkg:golang/runsecure/collector/processor",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}

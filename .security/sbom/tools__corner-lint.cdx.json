@@ -1,0 +1,192 @@
+{
+ "bomFormat": "CycloneDX",
+ "components": [
+  {
+   "bom-ref": "pkg:golang/github.com/fatih/color@v1.19.0",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "github.com/fatih/color",
+   "purl": "pkg:golang/github.com/fatih/color@v1.19.0",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.19.0"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/fsnotify/fsnotify@v1.10.1",
+   "licenses": [
+    "BSD-3-Clause"
+   ],
+   "name": "github.com/fsnotify/fsnotify",
+   "purl": "pkg:golang/github.com/fsnotify/fsnotify@v1.10.1",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.10.1"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/mattn/go-colorable@v0.1.16",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "github.com/mattn/go-colorable",
+   "purl": "pkg:golang/github.com/mattn/go-colorable@v0.1.16",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.1.16"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/mattn/go-isatty@v0.0.24",
+   "licenses": [
+    "MIT"
+   ],
+   "name": "github.com/mattn/go-isatty",
+   "purl": "pkg:golang/github.com/mattn/go-isatty@v0.0.24",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.0.24"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/santhosh-tekuri/jsonschema/v6@v6.0.3",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "github.com/santhosh-tekuri/jsonschema/v6",
+   "purl": "pkg:golang/github.com/santhosh-tekuri/jsonschema/v6@v6.0.3",
+   "scope": "required",
+   "type": "library",
+   "version": "v6.0.3"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/spf13/cobra@v1.10.2",
+   "licenses": [
+    "Apache-2.0"
+   ],
+   "name": "github.com/spf13/cobra",
+   "purl": "pkg:golang/github.com/spf13/cobra@v1.10.2",
+   "scope": "required",
+   "type": "library",
+   "version": "v1.10.2"
+  },
+  {
+   "bom-ref": "pkg:golang/github.com/spf13/pflag@v1.1.0",
+   "licenses": [
+    "BSD-3-Clause"
+   ],
+   "name": "github.com/spf13/pflag",
+   "purl": "pkg:golang/github.com/spf13/pflag@v1.1.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v1.1.0"
+  },
+  {
+   "bom-ref": "pkg:golang/golang.org/x/sys@v0.50.0",
+   "licenses": [
+    "BSD-3-Clause"
+   ],
+   "name": "golang.org/x/sys",
+   "purl": "pkg:golang/golang.org/x/sys@v0.50.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.50.0"
+  },
+  {
+   "bom-ref": "pkg:golang/golang.org/x/text@v0.44.0",
+   "licenses": [
+    "BSD-3-Clause"
+   ],
+   "name": "golang.org/x/text",
+   "purl": "pkg:golang/golang.org/x/text@v0.44.0",
+   "scope": "optional",
+   "type": "library",
+   "version": "v0.44.0"
+  },
+  {
+   "bom-ref": "pkg:golang/gopkg.in/yaml.v3@v3.0.1",
+   "licenses": [
+    "Apache-2.0",
+    "MIT"
+   ],
+   "name": "gopkg.in/yaml.v3",
+   "purl": "pkg:golang/gopkg.in/yaml.v3@v3.0.1",
+   "scope": "required",
+   "type": "library",
+   "version": "v3.0.1"
+  }
+ ],
+ "dependencies": [
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/fatih/color@v1.19.0",
+    "pkg:golang/github.com/fsnotify/fsnotify@v1.10.1",
+    "pkg:golang/github.com/santhosh-tekuri/jsonschema/v6@v6.0.3",
+    "pkg:golang/github.com/spf13/cobra@v1.10.2",
+    "pkg:golang/gopkg.in/yaml.v3@v3.0.1"
+   ],
+   "ref": "pkg:golang/github.com/cerebras/cornerstone/corner-lint"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/mattn/go-colorable@v0.1.16",
+    "pkg:golang/github.com/mattn/go-isatty@v0.0.24",
+    "pkg:golang/golang.org/x/sys@v0.50.0"
+   ],
+   "ref": "pkg:golang/github.com/fatih/color@v1.19.0"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/golang.org/x/sys@v0.50.0"
+   ],
+   "ref": "pkg:golang/github.com/fsnotify/fsnotify@v1.10.1"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/mattn/go-isatty@v0.0.24",
+    "pkg:golang/golang.org/x/sys@v0.50.0"
+   ],
+   "ref": "pkg:golang/github.com/mattn/go-colorable@v0.1.16"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/golang.org/x/sys@v0.50.0"
+   ],
+   "ref": "pkg:golang/github.com/mattn/go-isatty@v0.0.24"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/golang.org/x/text@v0.44.0"
+   ],
+   "ref": "pkg:golang/github.com/santhosh-tekuri/jsonschema/v6@v6.0.3"
+  },
+  {
+   "dependsOn": [
+    "pkg:golang/github.com/spf13/pflag@v1.1.0"
+   ],
+   "ref": "pkg:golang/github.com/spf13/cobra@v1.10.2"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/github.com/spf13/pflag@v1.1.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/golang.org/x/sys@v0.50.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/golang.org/x/text@v0.44.0"
+  },
+  {
+   "dependsOn": [],
+   "ref": "pkg:golang/gopkg.in/yaml.v3@v3.0.1"
+  }
+ ],
+ "metadata": {
+  "component": {
+   "bom-ref": "pkg:golang/github.com/cerebras/cornerstone/corner-lint",
+   "name": "github.com/Cerebras/Cornerstone/corner-lint",
+   "purl": "pkg:golang/github.com/cerebras/cornerstone/corner-lint",
+   "type": "application"
+  }
+ },
+ "specVersion": "1.7"
+}
