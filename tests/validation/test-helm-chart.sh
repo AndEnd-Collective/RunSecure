@@ -475,10 +475,27 @@ fi
 # management ServiceAccount independently in each project namespace.
 SHARED_PROJECTS='[{"repo":"acme/alpha","namespace":"project-alpha","maxConcurrent":2,"runnerConfig":{"runtime":"node:24","labels":["container"],"resources":{"memory":"2g","cpus":2,"pids":256}}},{"repo":"acme/beta","namespace":"project-beta","maxConcurrent":1,"runnerConfig":{"runtime":"python:3.12","labels":["container"],"resources":{"memory":"1g","cpus":1,"pids":256}}}]'
 SHARED_CONTROLLER_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-if render_chart --set-json "scope.repos=${SHARED_PROJECTS}" &>/dev/null; then
-    fail "Shared projects: bundled legacy controller image was accepted"
+# The retired 2.1.10 controller cannot run shared mode (and, since the
+# identifier domain moved to runsecure.ai, cannot read the scope config this
+# chart renders at all). Pinning it must fail; the chart's own default
+# controller must work without any override.
+RETIRED_CONTROLLER_DIGEST="sha256:dca28cce796ea6b05da390b39d7822ad0fe6bbb91bc3485de10324cbf75dca97"
+if render_chart --set "image.orchestrator.digest=${RETIRED_CONTROLLER_DIGEST}" \
+    --set-json "scope.repos=${SHARED_PROJECTS}" &>/dev/null; then
+    fail "Shared projects: retired 2.1.10 controller image was accepted"
 else
-    pass "Shared projects: bundled legacy controller image rejected"
+    pass "Shared projects: retired 2.1.10 controller image rejected"
+fi
+if render_chart --set-json "scope.repos=${SHARED_PROJECTS}" &>/dev/null; then
+    pass "Shared projects: the chart's default controller image is accepted"
+else
+    fail "Shared projects: the chart's default controller image was rejected"
+fi
+DEFAULT_CONTROLLER_DIGEST=$(yq '.image.orchestrator.digest' "${CHART_DIR}/values.yaml" 2>/dev/null || true)
+if [[ "$DEFAULT_CONTROLLER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$DEFAULT_CONTROLLER_DIGEST" != "$RETIRED_CONTROLLER_DIGEST" ]]; then
+    pass "Chart defaults: controller is digest-pinned and is not the retired 2.1.10 image"
+else
+    fail "Chart defaults: controller digest is '${DEFAULT_CONTROLLER_DIGEST}'"
 fi
 render_shared_chart() {
     render_chart --set "image.orchestrator.digest=${SHARED_CONTROLLER_DIGEST}" "$@"

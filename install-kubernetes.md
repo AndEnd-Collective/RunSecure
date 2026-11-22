@@ -199,11 +199,11 @@ image:
 
 ### Shared controller with separate project namespaces
 
-Shared mode requires an explicitly pinned RunSecure 2.2+ controller. The chart
-retains 2.1.10 image defaults for legacy installs and rejects that bundled
-controller digest when project namespaces are configured. Load the exact
-controller, proxy and terminal runner digests from the approved 2.2+ release
-manifest into the existing `image.*` values before installing; setting a newer
+The chart's default images are the v3.0.0 release, pinned by digest, and work
+for both legacy and shared mode. The retired 2.1.10 controller digest is still
+rejected when project namespaces are configured. To run a different release,
+load the exact controller, proxy and terminal runner digests from that
+release's manifest into the existing `image.*` values; setting a newer
 `tag` alone does not replace a digest. No release digests are invented here.
 
 Replace `scope.repos` in the example with explicit enrollment:
@@ -406,11 +406,12 @@ the orchestrator pins the runner Pod's `command` to that path). See the
 
 ## 6. Pin image digests
 
-The chart retains digest-pinned legacy 2.1.10 images. Shared mode requires
-explicit 2.2+ release-manifest values; override controller, proxy and terminal
-runner digests together before installing. The zero digests earlier in this
-guide are placeholders and cannot run. Resolve the intended approved release
-manifest instead of assuming the chart's `appVersion` replaces its image pins:
+The chart's defaults are the digest-pinned v3.0.0 images, so it installs
+without overrides. Releases before 3.0.0 use the `runsecure.io` identifiers and
+cannot read the scope config this chart renders; do not pin one. To run a newer
+release, override controller, proxy and terminal runner digests together. The
+zero digests earlier in this guide are placeholders and cannot run. Resolve the
+intended release manifest instead of assuming a `tag` replaces an image pin:
 
 ```sh
 # Fetch digests for each image

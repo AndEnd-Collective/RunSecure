@@ -28,8 +28,9 @@ To view logs:
   kubectl -n {{ include "runsecure-orchestrator.namespace" . }} logs \
     -l app.kubernetes.io/name={{ include "runsecure-orchestrator.name" . }}
 
-Use exact image digests from the approved release manifest. Shared mode requires
-a 2.2+ controller; the bundled legacy 2.1.10 controller digest is rejected:
+The chart's default images are the v3.0.0 release, pinned by digest. To run a
+different release, take every digest from that release's manifest and override
+them together; a newer tag alone does not replace a digest:
   helm upgrade {{ .Release.Name }} charts/runsecure-orchestrator \
     --set image.orchestrator.digest=sha256:<real-digest> \
     --set image.proxy.digest=sha256:<real-digest> \
