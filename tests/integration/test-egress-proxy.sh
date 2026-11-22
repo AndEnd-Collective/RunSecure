@@ -48,14 +48,23 @@ fail() {
 assert_allowed() {
     local url="$1"
     local desc="$2"
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    local codes http_code connect_code
+    codes=$(curl -s -o /dev/null -w "%{http_code} %{http_connect}" \
         -A "runsecure-egress-test/1.0 (+https://github.com/AndEnd-Collective/RunSecure)" \
         --connect-timeout 10 --max-time 15 "$url" 2>/dev/null)
+    http_code="${codes%% *}"
+    connect_code="${codes##* }"
     if [[ "$http_code" =~ ^(200|301|302|303|304|307|308|404)$ ]]; then
         pass "ALLOW $desc → HTTP $http_code"
+    elif [[ "$url" == https://* && "$connect_code" == "200" && "$http_code" =~ ^(403|429)$ ]]; then
+        # The proxy established the tunnel (CONNECT 200), so it allowed the
+        # request; the 403/429 was sent by the origin through that tunnel.
+        # api.github.com rate-limits unauthenticated calls per source IP, and
+        # hosted runners share addresses. A proxy denial looks different: the
+        # CONNECT itself is refused and no origin response arrives.
+        pass "ALLOW $desc → tunnel established, origin answered HTTP $http_code"
     else
-        fail "ALLOW $desc → HTTP $http_code (expected 2xx/3xx/404)"
+        fail "ALLOW $desc → HTTP $http_code, CONNECT $connect_code (expected 2xx/3xx/404, or an origin 403/429 through an established tunnel)"
     fi
 }
 

@@ -197,9 +197,7 @@ if ! ${SQUID_READY}; then
   echo "WARN: squid PID file not detected; proceeding anyway"
 fi
 
-if docker exec "${SPAWNED_RUNNER}" \
-    sh -c 'curl -sf --max-time 20 -x http://proxy:3128 https://api.github.com/zen' \
-    >/dev/null 2>&1; then
+if reached_through_proxy "${SPAWNED_RUNNER}" https://api.github.com/zen 20; then
   ok "runner reached api.github.com via spawned proxy (HTTP egress allowed)"
 else
   fail "runner could not reach api.github.com via spawned proxy (expected allow)"

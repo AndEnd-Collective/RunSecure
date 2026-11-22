@@ -23,9 +23,7 @@ setup_real_proxy_stack
 sleep 3
 
 echo "=== HTTP positive: api.github.com must be reachable via proxy ==="
-if docker exec "${EGRESS_RUNNER}" \
-    sh -c 'curl -sf --max-time 15 -x http://proxy:3128 https://api.github.com/zen' \
-    >/dev/null 2>&1; then
+if reached_through_proxy "${EGRESS_RUNNER}" https://api.github.com/zen 15; then
   echo "OK: api.github.com reachable via proxy"
 else
   echo "FAIL: api.github.com unreachable via proxy (expected allow)"
