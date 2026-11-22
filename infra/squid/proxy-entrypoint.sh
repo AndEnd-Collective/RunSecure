@@ -11,6 +11,7 @@
 #   SQUID_CFG     — path to squid config   (default: /etc/squid/squid.conf)
 #   ENABLE_HAPROXY— "true" to start HAProxy (default: "false")
 #   ENABLE_DNSMASQ— "true" to start dnsmasq (default: "false")
+#   PROXY_MAX_OPEN_FILES — ceiling for the open-file limit (default: 65536)
 # ============================================================================
 
 set -euo pipefail
@@ -22,6 +23,34 @@ ENABLE_HAPROXY="${ENABLE_HAPROXY:-false}"
 ENABLE_DNSMASQ="${ENABLE_DNSMASQ:-false}"
 
 log() { echo "[proxy-entrypoint] $*"; }
+
+# --- Cap the open-file limit before anything starts --------------------------
+# Squid and HAProxy size internal tables from the open-file limit they
+# inherit, so their idle memory is proportional to it, not to traffic. The
+# limit is whatever the container runtime hands out:
+#
+#   containerd under kind      1073741816   proxy is OOM-killed at 256Mi
+#   Docker default                1048576   ~150 MiB idle
+#   65536                                   ~17 MiB idle
+#
+# A per-job proxy serves one runner; 65536 descriptors is far more than it
+# can use. Lowering a limit needs no privilege, so this works with every
+# capability dropped. The limit is only ever lowered, never raised.
+PROXY_MAX_OPEN_FILES="${PROXY_MAX_OPEN_FILES:-65536}"
+if [[ ! "${PROXY_MAX_OPEN_FILES}" =~ ^[1-9][0-9]*$ ]]; then
+    log "ERROR: PROXY_MAX_OPEN_FILES must be a positive integer, got '${PROXY_MAX_OPEN_FILES}'"
+    exit 1
+fi
+current_open_files="$(ulimit -n)"
+if [[ "${current_open_files}" == "unlimited" ]] || (( current_open_files > PROXY_MAX_OPEN_FILES )); then
+    if ! ulimit -n "${PROXY_MAX_OPEN_FILES}"; then
+        log "ERROR: could not lower the open-file limit from ${current_open_files} to ${PROXY_MAX_OPEN_FILES}"
+        exit 1
+    fi
+    log "open-file limit lowered from ${current_open_files} to ${PROXY_MAX_OPEN_FILES}"
+else
+    log "open-file limit is ${current_open_files}"
+fi
 
 PIDS=()
 
