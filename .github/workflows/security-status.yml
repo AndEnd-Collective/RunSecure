@@ -203,5 +203,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PR_URL: ${{ needs.pr.outputs.pr_url }}
+          # Queues for a self-hosted runner that is only online when an operator
+          # starts one; it repeats lints validate.yml already ran.
+          OPTIONAL_PENDING_CHECKS: lints-on-self
         # validate.yml always runs and reports four jobs.
         run: bash infra/scripts/merge-pr-when-green.sh "$PR_URL" 4
