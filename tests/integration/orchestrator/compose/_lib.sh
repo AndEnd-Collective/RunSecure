@@ -613,3 +613,20 @@ wait_for_log() {
   orch_logs | tail -50 >&2
   return 1
 }
+
+# reached_through_proxy CONTAINER URL [MAX_TIME]
+# Succeeds when the proxy let an HTTPS request through: the CONNECT tunnel was
+# established and the origin answered. The origin's own status does not
+# matter here. api.github.com rate-limits unauthenticated calls per source IP
+# and hosted runners share addresses, so a 403 from GitHub through an
+# established tunnel still proves the proxy allowed the request. A proxy
+# denial is different: the CONNECT is refused (403 from the proxy) and no
+# origin response arrives (status 000).
+reached_through_proxy() {
+  local container="$1" url="$2" max_time="${3:-15}" codes
+  codes=$(docker exec "$container" \
+    curl -s -o /dev/null -w '%{http_code} %{http_connect}' --max-time "$max_time" \
+    -x http://proxy:3128 "$url" 2>/dev/null) || true
+  echo "    ${url} → origin HTTP ${codes%% *}, CONNECT ${codes##* }"
+  [[ "${codes##* }" == "200" && "${codes%% *}" != "000" ]]
+}
