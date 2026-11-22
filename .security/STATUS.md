@@ -37,7 +37,7 @@ Software fetched into the images by an explicit pin, and who is responsible for 
 
 | Component | Pin | Upstream | Why it is trusted |
 |---|---|---|---|
-| Debian (base operating system) | `debian:bookworm-slim` @ `sha256:3783cc01769c…` in `images/base.Dockerfile` | [Debian](https://security-tracker.debian.org/tracker/) | Base distribution for every runner image; rebuilt with no cache so security updates land nightly. |
+| Debian (base operating system) | `debian:bookworm-slim` @ `sha256:734a72b3d614…` in `images/base.Dockerfile` | [Debian](https://security-tracker.debian.org/tracker/) | Base distribution for every runner image; rebuilt with no cache so security updates land nightly. |
 | GitHub Actions runner | `RUNNER_VERSION=2.338.2` in `images/base.Dockerfile` | [actions/runner (GitHub)](https://github.com/actions/runner/issues) | The official runner. It bundles the .NET runtime, Node.js and npm, so advisories in those arrive through a runner release. |
 | GitHub CLI | `GH_CLI_VERSION=2.105.0` in `images/base.Dockerfile` | [cli/cli (GitHub)](https://github.com/cli/cli/issues) | The official GitHub CLI. It is a Go binary, so Go standard library and golang.org/x advisories arrive through a gh release. |
 | npm | `NPM_VERSION=11.21.1` in `images/base.Dockerfile` | [npm (GitHub)](https://github.com/npm/cli/issues) | The official npm client, replacing the copy bundled in the runner. |
@@ -48,8 +48,8 @@ Software fetched into the images by an explicit pin, and who is responsible for 
 | Rust toolchain | `RUST_STABLE_PIN=1.99.1` in `images/rust.Dockerfile` | [The Rust project](https://github.com/rust-lang/rust/issues) | Official stable toolchain; the pin moves only after both architectures certify. |
 | Go toolchain (build stage) | `GO_VERSION=1.27` in `infra/orchestrator/Dockerfile` | [The Go project](https://github.com/golang/go/issues) | Official Go images; build stage only, the orchestrator ships on distroless. |
 | Distroless base (orchestrator, socket-proxy) | `gcr.io/distroless/static-debian12:nonroot` @ `sha256:afa5c872c891…` in `infra/orchestrator/Dockerfile` | [GoogleContainerTools/distroless (Google)](https://github.com/GoogleContainerTools/distroless/issues) | Minimal static base with no shell or package manager. |
-| Squid, HAProxy, dnsmasq (egress proxy) | `debian:bookworm-slim` @ `sha256:3783cc01769c…` in `infra/squid/Dockerfile` | [Debian packages of Squid, HAProxy and dnsmasq](https://security-tracker.debian.org/tracker/) | Installed from Debian so they receive Debian security updates on every rebuild. |
-| OpenTelemetry Collector Builder | `golang:1.27.3-alpine3.24` @ `sha256:d200d2dd76b0…` in `infra/collector/Dockerfile` | [OpenTelemetry (CNCF)](https://github.com/open-telemetry/opentelemetry-collector/issues) | Builds the telemetry collector from a pinned OCB release. |
+| Squid, HAProxy, dnsmasq (egress proxy) | `debian:bookworm-slim` @ `sha256:734a72b3d614…` in `infra/squid/Dockerfile` | [Debian packages of Squid, HAProxy and dnsmasq](https://security-tracker.debian.org/tracker/) | Installed from Debian so they receive Debian security updates on every rebuild. |
+| OpenTelemetry Collector Builder | `golang:1.27.4-alpine3.24` @ `sha256:70bd7ddea8b6…` in `infra/collector/Dockerfile` | [OpenTelemetry (CNCF)](https://github.com/open-telemetry/opentelemetry-collector/issues) | Builds the telemetry collector from a pinned OCB release. |
 
 ## Upstreams not in the registry
 
