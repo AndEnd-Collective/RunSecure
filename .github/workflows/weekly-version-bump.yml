@@ -1,6 +1,11 @@
 # ============================================================================
-# RunSecure — Weekly Patch-Version Bump
+# RunSecure — Weekly Patch-Version Bump and Nightly Dependency Refresh
 # ============================================================================
+# Two schedules share this file:
+#   Monday 02:30 UTC   cut the weekly stable release (tag, publish, promote)
+#   every night 00:30  refresh Go dependencies only; no tag
+# The nightly image build itself is publish-images.yml's own schedule.
+#
 # Every Monday 02:30 UTC, computes the next patch version (latest tag +1
 # on the patch component), creates an annotated tag, and pushes it. The
 # tag push fires publish-images.yml in publish mode, which rebuilds every
@@ -33,6 +38,12 @@ on:
     # so the resulting tag-push fires before any external consumers expect
     # the new images to be available.
     - cron: '30 2 * * 1'
+    # Every night, 00:30 UTC — dependency refresh only. No tag is created on
+    # this schedule: the Go refresh runs, its PR is merged when CI is green,
+    # and the nightly image build (publish-images.yml, 04:00 UTC) then picks
+    # the result up from main. On Mondays this fires two hours before the
+    # release tag, so the weekly stable is cut on refreshed dependencies.
+    - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       bump_type:
@@ -138,7 +149,9 @@ jobs:
           echo "Computed next version: $NEXT (bump: $BUMP_TYPE)"
 
       - name: Create and push tag
-        if: github.event.inputs.dry_run != 'true'
+        # Not on the nightly refresh schedule: only the Monday schedule and a
+        # non-dry-run dispatch cut a release.
+        if: github.event.inputs.dry_run != 'true' && github.event.schedule != '30 0 * * *'
         env:
           NEXT_VERSION: ${{ steps.next_version.outputs.version }}
           BUMP_TYPE: ${{ github.event.inputs.bump_type || 'patch' }}
@@ -430,6 +443,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PR_URL: ${{ needs.go-deps-pr.outputs.pr_url }}
+          # Queues for a self-hosted runner that is only online when an operator
+          # starts one; it repeats lints validate.yml already ran.
+          OPTIONAL_PENDING_CHECKS: lints-on-self
         # validate.yml always runs and reports four jobs; path-filtered
         # workflows add more. Four is the floor below which "no failures"
         # cannot be told apart from "nothing ran".

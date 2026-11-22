@@ -1,0 +1,361 @@
+# ============================================================================
+# RunSecure — Security Response
+# ============================================================================
+# Reacts to Dependabot without waiting for a person or for the next scheduled
+# build. Every hour (and on demand) it reads the repository's Dependabot
+# alerts and pull requests and does one of two things per advisory:
+#
+#   An upgrade path exists
+#     Dependabot has opened (or will open) a pull request. It is merged as
+#     soon as its CI is green, and a nightly image build is dispatched at
+#     once, so the fix is in `nightly` within the hour and in the next
+#     Monday's stable release.
+#
+#   No upgrade path exists
+#     Nothing can be merged, so the advisory gets an impact analysis instead:
+#     an AI model (Codex) with read-only access to the repository traces
+#     whether the vulnerable code is reachable here and who could trigger it.
+#     The result is recorded on a public issue, one per advisory. A verdict
+#     of not_applicable or not_exploitable also dismisses the alert, with a
+#     link to that issue. A dismissal made here is undone as soon as an
+#     upgrade path appears.
+#
+# Every decision lives in infra/scripts/security-response.py, which is pure
+# and tested (tests/validation/test-security-response.sh). This file only
+# moves data between GitHub and that script.
+#
+# Secrets
+#   RELEASE_TOKEN   reads and updates Dependabot alerts (the workflow token
+#                   cannot), and merges pull requests so that the merge
+#                   starts the usual workflows on main. Needs "Dependabot
+#                   alerts: read and write" in addition to what the release
+#                   train already uses.
+#   OPENAI_API_KEY  runs the impact analysis. Without it the analysis step is
+#                   skipped with a notice and everything else still works.
+#
+# Trust boundaries
+#   - The job that runs the model holds no token but the API key, checks out
+#     without credentials, and runs the model in a read-only sandbox.
+#   - Model output is untrusted text. It is validated against a schema, the
+#     verdict is an enum, and the prose is sanitised before it reaches an
+#     issue. It never becomes a command.
+# ============================================================================
+
+name: security-response
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: security-response
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      merge: ${{ steps.plan.outputs.merge }}
+      nightly_after_merge: ${{ steps.plan.outputs.nightly_after_merge }}
+      analyze: ${{ steps.plan.outputs.analyze }}
+      reopen: ${{ steps.plan.outputs.reopen }}
+      close: ${{ steps.plan.outputs.close }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read Dependabot alerts
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is required to read Dependabot alerts"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/state"
+          if ! gh api --paginate "/repos/${REPOSITORY}/dependabot/alerts?per_page=100" \
+              --jq '.[]' > "$RUNNER_TEMP/state/alerts.jsonl"; then
+            echo "::error title=Cannot read Dependabot alerts::RELEASE_TOKEN needs the 'Dependabot alerts' repository permission (read and write)."
+            exit 1
+          fi
+          jq -s '.' "$RUNNER_TEMP/state/alerts.jsonl" > "$RUNNER_TEMP/state/alerts.json"
+
+      - name: Read pull requests and advisory issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "/repos/${REPOSITORY}/pulls?state=open&per_page=100" --jq '.[]' \
+            | jq -s '.' > "$RUNNER_TEMP/state/pull-requests.json"
+          gh api --paginate "/repos/${REPOSITORY}/issues?labels=security-advisory&state=open&per_page=100" --jq '.[]' \
+            | jq -s 'map(select(has("pull_request") | not))' > "$RUNNER_TEMP/state/issues.json"
+
+      - name: Decide what to do
+        id: plan
+        run: |
+          set -euo pipefail
+          python3 infra/scripts/security-response.py plan \
+            --alerts "$RUNNER_TEMP/state/alerts.json" \
+            --pull-requests "$RUNNER_TEMP/state/pull-requests.json" \
+            --issues "$RUNNER_TEMP/state/issues.json" > "$RUNNER_TEMP/state/plan.json"
+          {
+            echo "merge=$(jq -c '.merge' "$RUNNER_TEMP/state/plan.json")"
+            echo "nightly_after_merge=$(jq -r '.nightly_after_merge' "$RUNNER_TEMP/state/plan.json")"
+            echo "analyze=$(jq -c '.analyze' "$RUNNER_TEMP/state/plan.json")"
+            echo "reopen=$(jq -c '.reopen' "$RUNNER_TEMP/state/plan.json")"
+            echo "close=$(jq -c '.close' "$RUNNER_TEMP/state/plan.json")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Security response"
+            echo
+            jq -r '.summary | "| Open alerts | With upgrade path | Without upgrade path | Tracked issues |\n|---|---|---|---|\n| \(.open_alerts) | \(.with_upgrade_path) | \(.without_upgrade_path) | \(.tracked_issues) |"' \
+              "$RUNNER_TEMP/state/plan.json"
+            echo
+            jq -r '"- Pull requests to merge when green: \(.merge | length)\n- Advisories to analyse: \(.analyze | length)\n- Dismissals to undo: \(.reopen | length)\n- Issues to close: \(.close | length)"' \
+              "$RUNNER_TEMP/state/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --- Upgrade path exists: take it -----------------------------------------
+  merge:
+    needs: plan
+    if: needs.plan.outputs.merge != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # One at a time: each merge changes main under the next pull request.
+      max-parallel: 1
+      matrix:
+        pr: ${{ fromJSON(needs.plan.outputs.merge) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Merge the Dependabot pull request once its checks pass
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ matrix.pr }}
+          # Queues for a self-hosted runner that is only online when an operator
+          # starts one; it repeats lints validate.yml already ran.
+          OPTIONAL_PENDING_CHECKS: lints-on-self
+        # validate.yml always runs and reports four jobs; path-filtered
+        # workflows add more.
+        run: bash infra/scripts/merge-pr-when-green.sh "$PR" 4
+
+  nightly:
+    needs: [plan, merge]
+    if: needs.plan.outputs.nightly_after_merge == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Build nightly now instead of waiting for tonight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run publish-images.yml --ref main -f channel=nightly
+
+  # --- No upgrade path: analyse the impact ----------------------------------
+  analyze:
+    needs: plan
+    if: needs.plan.outputs.analyze != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        advisory: ${{ fromJSON(needs.plan.outputs.analyze) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the advisory and write the prompt
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          ALERT: ${{ matrix.advisory.alert }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/analysis"
+          gh api "/repos/${REPOSITORY}/dependabot/alerts/${ALERT}" \
+            | jq -s '.' > "$RUNNER_TEMP/analysis/alerts.json"
+          python3 infra/scripts/security-response.py prompt \
+            --alerts "$RUNNER_TEMP/analysis/alerts.json" --alert "$ALERT" \
+            > "$RUNNER_TEMP/analysis/prompt.md"
+          python3 infra/scripts/security-response.py schema \
+            > "$RUNNER_TEMP/analysis/schema.json"
+
+      - name: Check that the analysis key is configured
+        id: key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$OPENAI_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Impact analysis skipped::OPENAI_API_KEY is not set; the advisory stays open and unanalysed."
+          fi
+
+      - name: Analyse the impact
+        if: steps.key.outputs.present == 'true'
+        uses: openai/codex-action@306c6a196a99dcc6582530c396a19d2672d5e9ec # v1.14
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: ${{ runner.temp }}/analysis/prompt.md
+          output-file: ${{ runner.temp }}/analysis/analysis.json
+          output-schema-file: ${{ runner.temp }}/analysis/schema.json
+          # View files only: no writes, no network.
+          safety-strategy: read-only
+          # Scheduled runs are attributed to a bot account.
+          allow-bots: true
+
+      - name: Check the analysis is the object the schema describes
+        if: steps.key.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          jq -e '
+            (.verdict | IN("not_applicable", "not_exploitable", "exploitable", "needs_review"))
+            and (.summary | type == "string")
+            and (.analysis | type == "string")
+            and (.upstream | type == "string")
+            and (.evidence | type == "array")
+          ' "$RUNNER_TEMP/analysis/analysis.json" > /dev/null
+
+      - name: Hand the analysis to the recording job
+        if: steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: advisory-analysis-${{ matrix.advisory.alert }}
+          path: ${{ runner.temp }}/analysis/analysis.json
+          if-no-files-found: error
+          retention-days: 7
+
+  record:
+    needs: [plan, analyze]
+    if: always() && needs.plan.outputs.analyze != '[]' && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        advisory: ${{ fromJSON(needs.plan.outputs.analyze) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the analysis
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: advisory-analysis-${{ matrix.advisory.alert }}
+          path: ${{ runner.temp }}/analysis
+
+      - name: Write the issue and, if warranted, dismiss the alert
+        if: steps.download.outcome == 'success'
+        env:
+          ALERTS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          ALERT: ${{ matrix.advisory.alert }}
+          GHSA: ${{ matrix.advisory.ghsa }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/analysis"
+          GH_TOKEN="$ALERTS_TOKEN" gh api "/repos/${REPOSITORY}/dependabot/alerts/${ALERT}" \
+            | jq -s '.' > "$work/alerts.json"
+          python3 infra/scripts/security-response.py record \
+            --alerts "$work/alerts.json" --alert "$ALERT" \
+            --analysis "$work/analysis.json" \
+            --repository "$REPOSITORY" --run-url "$RUN_URL" > "$work/record.json"
+          jq -r '.body' "$work/record.json" > "$work/body.md"
+          title=$(jq -r '.title' "$work/record.json")
+
+          label_args=()
+          while IFS= read -r label; do
+            gh label create "$label" --color B60205 \
+              --description "Managed by security-response.yml" --force > /dev/null
+            label_args+=(--label "$label")
+          done < <(jq -r '.labels[]' "$work/record.json")
+
+          # One issue per advisory: reuse the open one that carries its marker.
+          issue=$(gh issue list --label security-advisory --state open --limit 200 \
+            --json number,body \
+            --jq "map(select(.body | contains(\"runsecure-advisory: ${GHSA} alert:${ALERT} \"))) | .[0].number // empty")
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --title "$title" --body-file "$work/body.md" "${label_args[@]}" > /dev/null
+          else
+            url=$(gh issue create --title "$title" --body-file "$work/body.md" "${label_args[@]}")
+            issue="${url##*/}"
+          fi
+          echo "Recorded the analysis on issue #${issue}."
+
+          reason=$(jq -r '.dismissal.reason // empty' "$work/record.json")
+          if [ -n "$reason" ]; then
+            comment=$(jq -r '.dismissal.comment_template' "$work/record.json")
+            comment="${comment//\{issue\}/$issue}"
+            GH_TOKEN="$ALERTS_TOKEN" gh api -X PATCH "/repos/${REPOSITORY}/dependabot/alerts/${ALERT}" \
+              -f state=dismissed -f dismissed_reason="$reason" -f dismissed_comment="$comment" > /dev/null
+            echo "Dismissed alert ${ALERT} as ${reason}."
+          fi
+
+  # --- Keep earlier decisions honest ----------------------------------------
+  maintain:
+    needs: plan
+    if: needs.plan.outputs.reopen != '[]' || needs.plan.outputs.close != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Undo automated dismissals that now have an upgrade path
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          REOPEN: ${{ needs.plan.outputs.reopen }}
+        run: |
+          set -euo pipefail
+          for alert in $(jq -r '.[]' <<<"$REOPEN"); do
+            gh api -X PATCH "/repos/${REPOSITORY}/dependabot/alerts/${alert}" -f state=open > /dev/null
+            echo "Reopened alert ${alert}: an upgrade path now exists."
+          done
+
+      - name: Close issues whose advisory is resolved or now fixable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CLOSE: ${{ needs.plan.outputs.close }}
+        run: |
+          set -euo pipefail
+          jq -c '.[]' <<<"$CLOSE" | while IFS= read -r entry; do
+            issue=$(jq -r '.issue' <<<"$entry")
+            reason=$(jq -r '.reason' <<<"$entry")
+            gh issue close "$issue" --comment "Closing automatically: ${reason}." > /dev/null
+            echo "Closed issue #${issue}."
+          done

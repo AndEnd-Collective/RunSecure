@@ -122,12 +122,40 @@ apt install docker.io gh
 > | Tag | Meaning | When to use |
 > |---|---|---|
 > | `1.2.3` (or `latest`) | Promoted to stable after acceptance suite passed against the same digest | **Production** — every consumer should pin one of these |
-> | `nightly` | Built, and every Grype scan passed; acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
+> | `nightly` | Rebuilt from `main` every night with no cache, so it carries the day's Debian security updates and merged dependency refreshes. Moved only after every Grype scan passed and build provenance verified; acceptance results not yet validated | Bleeding-edge testing only — the digest may regress on a documented security claim |
 > | `1.2.3-canary` | Built and pushed so the scans can run against it. The tag exists even if a scan then fails; the result is on the Publish Images run for `v1.2.3` | Verifying a specific release candidate — check its publish run first |
 >
 > The `:1.2.3-canary` digest is byte-identical to `:1.2.3` after promotion
 > — same artifact, just a server-side retag. If acceptance fails, the
 > canary tag stays and no stable tag is created.
+
+### Release cadence
+
+| Channel | When | What happens |
+|---|---|---|
+| Stable (`<version>`, `latest`) | Every Monday | A new patch version is tagged, built, scanned, acceptance-tested and promoted with no manual step |
+| `nightly` | Every night | Every image is rebuilt from `main`; Go dependencies are refreshed and merged beforehand when their CI is green |
+
+A security fix does not wait for either schedule: see
+[.github/workflows/security-response.yml](.github/workflows/security-response.yml).
+
+### Verify what you pull
+
+Every image is published with a signed build-provenance attestation
+([SLSA](https://slsa.dev/) provenance, keyless via Sigstore). It is bound to
+the image digest, so it holds for any tag that points at that digest. To check
+that an image was built by this repository's publish workflow:
+
+```bash
+gh attestation verify \
+  oci://ghcr.io/andend-collective/runsecure/node:latest-24 \
+  --repo AndEnd-Collective/RunSecure \
+  --signer-workflow AndEnd-Collective/RunSecure/.github/workflows/publish-images.yml
+```
+
+The release pipeline runs the same check, pinned to the release tag and
+commit, before it moves `nightly`, `<version>` or `latest`. An image without
+matching provenance is never promoted.
 
 ### Clone-and-run (recommended)
 
