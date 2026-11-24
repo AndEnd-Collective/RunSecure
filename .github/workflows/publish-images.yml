@@ -783,7 +783,7 @@ jobs:
 
       - name: Upload Grype scan results (base) to GitHub Security
         if: always() && hashFiles(format('grype-base-{0}.sarif', matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-base-${{ matrix.platform_slug }}.sarif
           category: grype-base-${{ matrix.platform_slug }}
@@ -937,7 +937,7 @@ jobs:
 
       - name: Upload Grype scan results (terminal language image)
         if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
           category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
@@ -1088,7 +1088,7 @@ jobs:
 
       - name: Upload Grype scan results (composition-stage image)
         if: always() && hashFiles(format('grype-{0}-{1}.sarif', matrix.sarif_name, matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}.sarif
           category: grype-${{ matrix.sarif_name }}-${{ matrix.platform_slug }}
@@ -1153,7 +1153,7 @@ jobs:
 
       - name: Upload Grype scan results (proxy) to GitHub Security
         if: always() && hashFiles(format('grype-proxy-{0}.sarif', matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-proxy-${{ matrix.platform_slug }}.sarif
           category: grype-proxy-${{ matrix.platform_slug }}
@@ -1221,7 +1221,7 @@ jobs:
 
       - name: Upload Grype scan results (orchestrator) to GitHub Security
         if: always() && hashFiles(format('grype-orchestrator-{0}.sarif', matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-orchestrator-${{ matrix.platform_slug }}.sarif
           category: grype-orchestrator-${{ matrix.platform_slug }}
@@ -1289,7 +1289,7 @@ jobs:
 
       - name: Upload Grype scan results (socket-proxy) to GitHub Security
         if: always() && hashFiles(format('grype-socket-proxy-{0}.sarif', matrix.platform_slug)) != ''
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: grype-socket-proxy-${{ matrix.platform_slug }}.sarif
           category: grype-socket-proxy-${{ matrix.platform_slug }}
