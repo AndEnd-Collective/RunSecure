@@ -3,7 +3,7 @@ module github.com/AndEnd-Collective/runsecure/infra/socket-proxy
 go 1.27.1
 
 require (
-	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-20261124065827-995faa3ae015
+	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-20261124102607-912a1582f838
 	github.com/stretchr/testify v1.12.1
 )
 
