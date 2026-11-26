@@ -3,14 +3,14 @@ module github.com/AndEnd-Collective/runsecure/infra/orchestrator
 go 1.27.1
 
 require (
-	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-20261124102607-912a1582f838
+	github.com/AndEnd-Collective/runsecure/infra/telemetry v0.0.0-20261125090929-b92efc8a100a
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/net v0.63.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/client-go v0.37.2
+	k8s.io/api v0.37.3
+	k8s.io/apimachinery v0.37.3
+	k8s.io/client-go v0.37.3
 )
 
 require (
