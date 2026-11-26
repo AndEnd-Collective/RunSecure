@@ -42,50 +42,50 @@ No third-party dependencies.
 | `github.com/google/uuid@v1.6.0` | third party (direct) |  | google/uuid (Google) |
 | `golang.org/x/net@v0.63.0` | third party (direct) |  | The Go project (golang.org/x sub-repositories) |
 | `gopkg.in/yaml.v3@v3.0.1` | third party (direct) |  | go-yaml |
-| `k8s.io/api@v0.37.2` | third party (direct) |  | Kubernetes (CNCF) |
-| `k8s.io/apimachinery@v0.37.2` | third party (direct) |  | Kubernetes (CNCF) |
-| `k8s.io/client-go@v0.37.2` | third party (direct) |  | Kubernetes (CNCF) |
-| `github.com/davecgh/go-spew@v1.1.2-0.20180830191138-d8f796af33cc` | fourth party | k8s.io/api@v0.37.2 | davecgh/go-spew |
-| `github.com/emicklei/go-restful/v3@v3.13.0` | fourth party | k8s.io/client-go@v0.37.2 | emicklei/go-restful |
-| `github.com/fxamacker/cbor/v2@v2.10.0` | fourth party | k8s.io/api@v0.37.2 | fxamacker/cbor |
-| `github.com/go-logr/logr@v1.4.4` | fourth party | k8s.io/api@v0.37.2 | go-logr |
-| `github.com/go-openapi/jsonpointer@v1.0.3` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/jsonreference@v1.0.3` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/cmdutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/conv@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/fileutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/jsonutils@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/loading@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/mangling@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/netutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/pools@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/stringutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/typeutils@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag/yamlutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/go-openapi/swag@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.2 | go-openapi |
-| `github.com/google/gnostic-models@v0.7.1` | fourth party | k8s.io/apimachinery@v0.37.2 | google/gnostic-models (Google) |
-| `github.com/json-iterator/go@v1.1.12` | fourth party | k8s.io/api@v0.37.2 | json-iterator |
-| `github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd` | fourth party | k8s.io/api@v0.37.2 | modern-go |
-| `github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee` | fourth party | k8s.io/api@v0.37.2 | modern-go |
-| `github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822` | fourth party | k8s.io/client-go@v0.37.2 | munnerz/goautoneg |
-| `github.com/x448/float16@v0.8.4` | fourth party | k8s.io/api@v0.37.2 | x448/float16 |
-| `go.yaml.in/yaml/v2@v2.4.5` | fourth party | k8s.io/api@v0.37.2 | go-yaml (YAML organization fork) |
-| `go.yaml.in/yaml/v3@v3.0.6` | fourth party | k8s.io/apimachinery@v0.37.2 | go-yaml (YAML organization fork) |
-| `golang.org/x/oauth2@v0.38.0` | fourth party | k8s.io/client-go@v0.37.2 | The Go project (golang.org/x sub-repositories) |
+| `k8s.io/api@v0.37.3` | third party (direct) |  | Kubernetes (CNCF) |
+| `k8s.io/apimachinery@v0.37.3` | third party (direct) |  | Kubernetes (CNCF) |
+| `k8s.io/client-go@v0.37.3` | third party (direct) |  | Kubernetes (CNCF) |
+| `github.com/davecgh/go-spew@v1.1.2-0.20180830191138-d8f796af33cc` | fourth party | k8s.io/api@v0.37.3 | davecgh/go-spew |
+| `github.com/emicklei/go-restful/v3@v3.13.0` | fourth party | k8s.io/client-go@v0.37.3 | emicklei/go-restful |
+| `github.com/fxamacker/cbor/v2@v2.10.0` | fourth party | k8s.io/api@v0.37.3 | fxamacker/cbor |
+| `github.com/go-logr/logr@v1.4.4` | fourth party | k8s.io/api@v0.37.3 | go-logr |
+| `github.com/go-openapi/jsonpointer@v1.0.3` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/jsonreference@v1.0.3` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/cmdutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/conv@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/fileutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/jsonutils@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/loading@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/mangling@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/netutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/pools@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/stringutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/typeutils@v0.29.2` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag/yamlutils@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/go-openapi/swag@v0.27.1` | fourth party | k8s.io/apimachinery@v0.37.3 | go-openapi |
+| `github.com/google/gnostic-models@v0.7.1` | fourth party | k8s.io/apimachinery@v0.37.3 | google/gnostic-models (Google) |
+| `github.com/json-iterator/go@v1.1.12` | fourth party | k8s.io/api@v0.37.3 | json-iterator |
+| `github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd` | fourth party | k8s.io/api@v0.37.3 | modern-go |
+| `github.com/modern-go/reflect2@v1.0.3-0.20250322232337-35a7c28c31ee` | fourth party | k8s.io/api@v0.37.3 | modern-go |
+| `github.com/munnerz/goautoneg@v0.0.0-20191010083416-a7dc8b61c822` | fourth party | k8s.io/client-go@v0.37.3 | munnerz/goautoneg |
+| `github.com/x448/float16@v0.8.4` | fourth party | k8s.io/api@v0.37.3 | x448/float16 |
+| `go.yaml.in/yaml/v2@v2.4.5` | fourth party | k8s.io/api@v0.37.3 | go-yaml (YAML organization fork) |
+| `go.yaml.in/yaml/v3@v3.0.6` | fourth party | k8s.io/apimachinery@v0.37.3 | go-yaml (YAML organization fork) |
+| `golang.org/x/oauth2@v0.38.0` | fourth party | k8s.io/client-go@v0.37.3 | The Go project (golang.org/x sub-repositories) |
 | `golang.org/x/sys@v0.50.0` | fourth party | golang.org/x/net@v0.63.0 | The Go project (golang.org/x sub-repositories) |
 | `golang.org/x/term@v0.48.0` | fourth party | golang.org/x/net@v0.63.0 | The Go project (golang.org/x sub-repositories) |
 | `golang.org/x/text@v0.44.0` | fourth party | golang.org/x/net@v0.63.0 | The Go project (golang.org/x sub-repositories) |
-| `golang.org/x/time@v0.16.0` | fourth party | k8s.io/apimachinery@v0.37.2 | The Go project (golang.org/x sub-repositories) |
-| `google.golang.org/protobuf@v1.36.12` | fourth party | k8s.io/apimachinery@v0.37.2 | Protocol Buffers for Go (Google) |
-| `gopkg.in/evanphx/json-patch.v4@v4.13.0` | fourth party | k8s.io/apimachinery@v0.37.2 | evanphx/json-patch |
-| `gopkg.in/inf.v0@v0.9.1` | fourth party | k8s.io/api@v0.37.2 | go-inf/inf |
-| `k8s.io/klog/v2@v2.140.0` | fourth party | k8s.io/api@v0.37.2 | Kubernetes (CNCF) |
-| `k8s.io/kube-openapi@v0.0.0-20260721132016-d427ff9ee9ad` | fourth party | k8s.io/api@v0.37.2 | Kubernetes (CNCF) |
-| `k8s.io/utils@v0.0.0-20261023123148-ca04ba58ecab` | fourth party | k8s.io/api@v0.37.2 | Kubernetes (CNCF) |
-| `sigs.k8s.io/json@v0.0.0-20260909141634-11ed52e25bc5` | fourth party | k8s.io/api@v0.37.2 | Kubernetes SIGs (CNCF) |
-| `sigs.k8s.io/randfill@v1.0.0` | fourth party | k8s.io/api@v0.37.2 | Kubernetes SIGs (CNCF) |
-| `sigs.k8s.io/structured-merge-diff/v6@v6.4.2` | fourth party | k8s.io/api@v0.37.2 | Kubernetes SIGs (CNCF) |
-| `sigs.k8s.io/yaml@v1.6.0` | fourth party | k8s.io/api@v0.37.2 | Kubernetes SIGs (CNCF) |
+| `golang.org/x/time@v0.16.0` | fourth party | k8s.io/apimachinery@v0.37.3 | The Go project (golang.org/x sub-repositories) |
+| `google.golang.org/protobuf@v1.36.12` | fourth party | k8s.io/apimachinery@v0.37.3 | Protocol Buffers for Go (Google) |
+| `gopkg.in/evanphx/json-patch.v4@v4.13.0` | fourth party | k8s.io/apimachinery@v0.37.3 | evanphx/json-patch |
+| `gopkg.in/inf.v0@v0.9.1` | fourth party | k8s.io/api@v0.37.3 | go-inf/inf |
+| `k8s.io/klog/v2@v2.140.0` | fourth party | k8s.io/api@v0.37.3 | Kubernetes (CNCF) |
+| `k8s.io/kube-openapi@v0.0.0-20260721132016-d427ff9ee9ad` | fourth party | k8s.io/api@v0.37.3 | Kubernetes (CNCF) |
+| `k8s.io/utils@v0.0.0-20261023123148-ca04ba58ecab` | fourth party | k8s.io/api@v0.37.3 | Kubernetes (CNCF) |
+| `sigs.k8s.io/json@v0.0.0-20260909141634-11ed52e25bc5` | fourth party | k8s.io/api@v0.37.3 | Kubernetes SIGs (CNCF) |
+| `sigs.k8s.io/randfill@v1.0.0` | fourth party | k8s.io/api@v0.37.3 | Kubernetes SIGs (CNCF) |
+| `sigs.k8s.io/structured-merge-diff/v6@v6.4.2` | fourth party | k8s.io/api@v0.37.3 | Kubernetes SIGs (CNCF) |
+| `sigs.k8s.io/yaml@v1.6.0` | fourth party | k8s.io/api@v0.37.3 | Kubernetes SIGs (CNCF) |
 
 ## `infra/socket-proxy`
 

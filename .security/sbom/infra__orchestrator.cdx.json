@@ -418,37 +418,37 @@
    "version": "v3.0.1"
   },
   {
-   "bom-ref": "pkg:golang/k8s.io/api@v0.37.2",
+   "bom-ref": "pkg:golang/k8s.io/api@v0.37.3",
    "licenses": [
     "Apache-2.0"
    ],
    "name": "k8s.io/api",
-   "purl": "pkg:golang/k8s.io/api@v0.37.2",
+   "purl": "pkg:golang/k8s.io/api@v0.37.3",
    "scope": "required",
    "type": "library",
-   "version": "v0.37.2"
+   "version": "v0.37.3"
   },
   {
-   "bom-ref": "pkg:golang/k8s.io/apimachinery@v0.37.2",
+   "bom-ref": "pkg:golang/k8s.io/apimachinery@v0.37.3",
    "licenses": [
     "Apache-2.0"
    ],
    "name": "k8s.io/apimachinery",
-   "purl": "pkg:golang/k8s.io/apimachinery@v0.37.2",
+   "purl": "pkg:golang/k8s.io/apimachinery@v0.37.3",
    "scope": "required",
    "type": "library",
-   "version": "v0.37.2"
+   "version": "v0.37.3"
   },
   {
-   "bom-ref": "pkg:golang/k8s.io/client-go@v0.37.2",
+   "bom-ref": "pkg:golang/k8s.io/client-go@v0.37.3",
    "licenses": [
     "Apache-2.0"
    ],
    "name": "k8s.io/client-go",
-   "purl": "pkg:golang/k8s.io/client-go@v0.37.2",
+   "purl": "pkg:golang/k8s.io/client-go@v0.37.3",
    "scope": "required",
    "type": "library",
-   "version": "v0.37.2"
+   "version": "v0.37.3"
   },
   {
    "bom-ref": "pkg:golang/k8s.io/klog/v2@v2.140.0",
@@ -538,9 +538,9 @@
     "pkg:golang/github.com/google/uuid@v1.6.0",
     "pkg:golang/golang.org/x/net@v0.63.0",
     "pkg:golang/gopkg.in/yaml.v3@v3.0.1",
-    "pkg:golang/k8s.io/api@v0.37.2",
-    "pkg:golang/k8s.io/apimachinery@v0.37.2",
-    "pkg:golang/k8s.io/client-go@v0.37.2"
+    "pkg:golang/k8s.io/api@v0.37.3",
+    "pkg:golang/k8s.io/apimachinery@v0.37.3",
+    "pkg:golang/k8s.io/client-go@v0.37.3"
    ],
    "ref": "pkg:golang/github.com/andend-collective/runsecure/infra/orchestrator"
   },
@@ -760,7 +760,7 @@
     "pkg:golang/golang.org/x/net@v0.63.0",
     "pkg:golang/golang.org/x/text@v0.44.0",
     "pkg:golang/gopkg.in/inf.v0@v0.9.1",
-    "pkg:golang/k8s.io/apimachinery@v0.37.2",
+    "pkg:golang/k8s.io/apimachinery@v0.37.3",
     "pkg:golang/k8s.io/klog/v2@v2.140.0",
     "pkg:golang/k8s.io/kube-openapi@v0.0.0-20260721132016-d427ff9ee9ad",
     "pkg:golang/k8s.io/utils@v0.0.0-20261023123148-ca04ba58ecab",
@@ -769,7 +769,7 @@
     "pkg:golang/sigs.k8s.io/structured-merge-diff/v6@v6.4.2",
     "pkg:golang/sigs.k8s.io/yaml@v1.6.0"
    ],
-   "ref": "pkg:golang/k8s.io/api@v0.37.2"
+   "ref": "pkg:golang/k8s.io/api@v0.37.3"
   },
   {
    "dependsOn": [
@@ -813,7 +813,7 @@
     "pkg:golang/sigs.k8s.io/structured-merge-diff/v6@v6.4.2",
     "pkg:golang/sigs.k8s.io/yaml@v1.6.0"
    ],
-   "ref": "pkg:golang/k8s.io/apimachinery@v0.37.2"
+   "ref": "pkg:golang/k8s.io/apimachinery@v0.37.3"
   },
   {
    "dependsOn": [
@@ -854,8 +854,8 @@
     "pkg:golang/gopkg.in/evanphx/json-patch.v4@v4.13.0",
     "pkg:golang/gopkg.in/inf.v0@v0.9.1",
     "pkg:golang/gopkg.in/yaml.v3@v3.0.1",
-    "pkg:golang/k8s.io/api@v0.37.2",
-    "pkg:golang/k8s.io/apimachinery@v0.37.2",
+    "pkg:golang/k8s.io/api@v0.37.3",
+    "pkg:golang/k8s.io/apimachinery@v0.37.3",
     "pkg:golang/k8s.io/klog/v2@v2.140.0",
     "pkg:golang/k8s.io/kube-openapi@v0.0.0-20260721132016-d427ff9ee9ad",
     "pkg:golang/k8s.io/utils@v0.0.0-20261023123148-ca04ba58ecab",
@@ -864,7 +864,7 @@
     "pkg:golang/sigs.k8s.io/structured-merge-diff/v6@v6.4.2",
     "pkg:golang/sigs.k8s.io/yaml@v1.6.0"
    ],
-   "ref": "pkg:golang/k8s.io/client-go@v0.37.2"
+   "ref": "pkg:golang/k8s.io/client-go@v0.37.3"
   },
   {
    "dependsOn": [
